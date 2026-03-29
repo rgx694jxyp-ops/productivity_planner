@@ -7,3 +7,6 @@ dpd_*.log
 *.log
 .streamlit/secrets.toml
 test_*.csv
+venv/
+.DS_Store
+.claude/
