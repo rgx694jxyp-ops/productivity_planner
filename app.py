@@ -3926,20 +3926,35 @@ def _verify_checkout_and_activate():
     """After Stripe checkout, verify payment and create subscription in DB."""
     import requests as _req
     from database import get_tenant_id, get_client, _get_config, PLAN_LIMITS
+    _debug = []
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     tid = get_tenant_id()
-    if not stripe_key or not tid:
+    if not stripe_key:
+        _debug.append("no STRIPE_SECRET_KEY")
+        st.session_state["_verify_debug"] = _debug
         return False
+    if not tid:
+        _debug.append("no tenant_id")
+        st.session_state["_verify_debug"] = _debug
+        return False
+
+    _debug.append(f"tenant_id={tid[:8]}...")
 
     # Get the tenant's Stripe customer ID
     sb = get_client()
     try:
         t_resp = sb.table("tenants").select("stripe_customer_id").eq("id", tid).execute()
         cust_id = t_resp.data[0].get("stripe_customer_id") if t_resp.data else None
-    except Exception:
+    except Exception as e:
+        _debug.append(f"tenant lookup err: {e}")
+        st.session_state["_verify_debug"] = _debug
         return False
     if not cust_id:
+        _debug.append("no stripe_customer_id on tenant")
+        st.session_state["_verify_debug"] = _debug
         return False
+
+    _debug.append(f"stripe_customer={cust_id[:12]}...")
 
     # List recent subscriptions for this customer
     try:
@@ -3950,13 +3965,21 @@ def _verify_checkout_and_activate():
             timeout=10,
         )
         if sub_resp.status_code != 200:
+            _debug.append(f"stripe list subs: {sub_resp.status_code} {sub_resp.text[:100]}")
+            st.session_state["_verify_debug"] = _debug
             return False
         subs = sub_resp.json().get("data", [])
         if not subs:
+            _debug.append("no active subscriptions in Stripe")
+            st.session_state["_verify_debug"] = _debug
             return False
         stripe_sub = subs[0]
-    except Exception:
+    except Exception as e:
+        _debug.append(f"stripe API err: {e}")
+        st.session_state["_verify_debug"] = _debug
         return False
+
+    _debug.append(f"found stripe sub {stripe_sub['id'][:16]}...")
 
     # Determine plan from price metadata
     plan = "starter"
@@ -3966,6 +3989,7 @@ def _verify_checkout_and_activate():
     except Exception:
         pass
     limit = PLAN_LIMITS.get(plan, 25)
+    _debug.append(f"plan={plan} limit={limit}")
 
     # Upsert subscription in our DB
     try:
@@ -3981,8 +4005,12 @@ def _verify_checkout_and_activate():
             "current_period_end": period_end,
             "cancel_at_period_end": stripe_sub.get("cancel_at_period_end", False),
         }, on_conflict="tenant_id").execute()
+        _debug.append("DB upsert SUCCESS")
+        st.session_state["_verify_debug"] = _debug
         return True
-    except Exception:
+    except Exception as e:
+        _debug.append(f"DB upsert FAILED: {e}")
+        st.session_state["_verify_debug"] = _debug
         return False
 
 
@@ -4121,6 +4149,12 @@ def _subscription_page():
 
     if not (_price_starter or _price_pro or _price_business):
         st.info("Payment system is being configured. Check back soon.")
+
+    # Debug info
+    if st.session_state.get("_verify_debug"):
+        with st.expander("Debug: subscription verification"):
+            for d in st.session_state["_verify_debug"]:
+                st.text(d)
 
     st.markdown("---")
     if st.button("Sign out", use_container_width=False):
