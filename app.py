@@ -3922,6 +3922,70 @@ def _check_session_timeout():
     return False
 
 
+def _verify_checkout_and_activate():
+    """After Stripe checkout, verify payment and create subscription in DB."""
+    import requests as _req
+    from database import get_tenant_id, get_client, _get_config, PLAN_LIMITS
+    stripe_key = _get_config("STRIPE_SECRET_KEY")
+    tid = get_tenant_id()
+    if not stripe_key or not tid:
+        return False
+
+    # Get the tenant's Stripe customer ID
+    sb = get_client()
+    try:
+        t_resp = sb.table("tenants").select("stripe_customer_id").eq("id", tid).execute()
+        cust_id = t_resp.data[0].get("stripe_customer_id") if t_resp.data else None
+    except Exception:
+        return False
+    if not cust_id:
+        return False
+
+    # List recent subscriptions for this customer
+    try:
+        sub_resp = _req.get(
+            "https://api.stripe.com/v1/subscriptions",
+            auth=(stripe_key, ""),
+            params={"customer": cust_id, "status": "active", "limit": 1},
+            timeout=10,
+        )
+        if sub_resp.status_code != 200:
+            return False
+        subs = sub_resp.json().get("data", [])
+        if not subs:
+            return False
+        stripe_sub = subs[0]
+    except Exception:
+        return False
+
+    # Determine plan from price metadata
+    plan = "starter"
+    try:
+        price_meta = stripe_sub["items"]["data"][0]["price"].get("metadata", {})
+        plan = price_meta.get("plan", "starter")
+    except Exception:
+        pass
+    limit = PLAN_LIMITS.get(plan, 25)
+
+    # Upsert subscription in our DB
+    try:
+        from datetime import datetime
+        period_end = datetime.fromtimestamp(stripe_sub["current_period_end"]).isoformat()
+        sb.table("subscriptions").upsert({
+            "tenant_id": tid,
+            "stripe_customer_id": cust_id,
+            "stripe_subscription_id": stripe_sub["id"],
+            "plan": plan,
+            "status": "active",
+            "employee_limit": limit,
+            "current_period_end": period_end,
+            "cancel_at_period_end": stripe_sub.get("cancel_at_period_end", False),
+        }, on_conflict="tenant_id").execute()
+        return True
+    except Exception:
+        return False
+
+
 def _subscription_page():
     """Show pricing page for users without an active subscription."""
     from database import (create_stripe_checkout_url, get_subscription,
@@ -3930,12 +3994,21 @@ def _subscription_page():
     # Handle checkout return
     _qp = st.query_params
     if _qp.get("checkout") == "success":
-        st.balloons()
-        st.success("Welcome! Your subscription is now active.")
-        st.query_params.clear()
-        st.session_state.pop("_sub_cache", None)
-        time.sleep(2)
-        st.rerun()
+        # Verify with Stripe and activate subscription
+        with st.spinner("Activating your subscription..."):
+            activated = _verify_checkout_and_activate()
+        if activated:
+            st.balloons()
+            st.success("Welcome! Your subscription is now active.")
+            st.query_params.clear()
+            st.session_state.pop("_sub_active", None)
+            st.session_state.pop("_checkout_url", None)
+            st.session_state.pop("_checkout_plan", None)
+            time.sleep(2)
+            st.rerun()
+        else:
+            st.warning("Payment received! It may take a moment to activate. Please refresh.")
+            st.query_params.clear()
     if _qp.get("checkout") == "canceled":
         st.info("Checkout canceled. Choose a plan below to get started.")
         st.query_params.clear()
@@ -3973,13 +4046,13 @@ def _subscription_page():
         _price_starter = _price_pro = _price_business = ""
 
     _app_url = st.context.headers.get("Origin", "http://localhost:8501")
-    _success = f"{_app_url}/?checkout=success"
-    _cancel  = f"{_app_url}/?checkout=canceled"
+    _success = _app_url + "/?checkout=success"
+    _cancel  = _app_url + "/?checkout=canceled"
 
     # ── If checkout URL already generated, show just the link ────────
     if st.session_state.get("_checkout_url"):
         _plan_name = st.session_state.get("_checkout_plan", "your plan")
-        st.markdown(f"### Ready to checkout: **{_plan_name}**")
+        st.subheader(f"Ready to checkout: {_plan_name}")
         st.link_button("Complete checkout on Stripe →", st.session_state["_checkout_url"],
                         use_container_width=True, type="primary")
         if st.button("← Choose a different plan"):
@@ -3989,39 +4062,62 @@ def _subscription_page():
         st.stop()
 
     # ── Pricing cards ──────────────────────────────────────────────────
-    _plans = [
-        {"name": "Starter",  "price": "$49",  "price_id": _price_starter,  "features": ["Up to <b>25</b> employees", "CSV upload + dashboard", "Weekly email reports", "Excel/PDF exports"], "popular": False},
-        {"name": "Pro",      "price": "$149", "price_id": _price_pro,      "features": ["Up to <b>100</b> employees", "Everything in Starter", "Goal tracking + trends", "Automated report schedules"], "popular": True},
-        {"name": "Business", "price": "$299", "price_id": _price_business, "features": ["<b>Unlimited</b> employees", "Everything in Pro", "Order tracking", "Priority support"], "popular": False},
-    ]
+    c1, c2, c3 = st.columns(3)
 
-    cols = st.columns(3)
-    for col, plan in zip(cols, _plans):
-        with col:
-            border = "2px solid #1E90FF" if plan["popular"] else "1px solid #333"
-            bg = "background:rgba(30,144,255,0.05);" if plan["popular"] else ""
-            badge = '<div style="background:#1E90FF;color:#fff;border-radius:20px;padding:2px 12px;display:inline-block;font-size:12px;margin-bottom:8px;">MOST POPULAR</div>' if plan["popular"] else ""
-            features_html = "".join(f"<p>{f}</p>" for f in plan["features"])
-            st.markdown(f"""
-            <div style="border:{border};border-radius:12px;padding:24px;text-align:center;height:320px;color:#000;{bg}">
-                {badge}
-                <h3>{plan["name"]}</h3>
-                <div style="font-size:36px;font-weight:700;">{plan["price"]}<span style="font-size:16px;color:#888;">/mo</span></div>
-                <hr>
-                {features_html}
-            </div>
-            """, unsafe_allow_html=True)
-            if plan["price_id"]:
-                btn_type = "primary" if plan["popular"] else "secondary"
-                if st.button(f"Get {plan['name']}", type=btn_type, use_container_width=True, key=f"btn_{plan['name'].lower()}"):
-                    with st.spinner("Connecting to Stripe..."):
-                        url, err = create_stripe_checkout_url(plan["price_id"], _success, _cancel)
-                    if url:
-                        st.session_state["_checkout_url"] = url
-                        st.session_state["_checkout_plan"] = plan["name"]
-                        st.rerun()
-                    else:
-                        st.error(f"Checkout failed: {err}")
+    with c1:
+        st.subheader("Starter")
+        st.markdown("### $49/mo")
+        st.markdown("- Up to **25** employees")
+        st.markdown("- CSV upload + dashboard")
+        st.markdown("- Weekly email reports")
+        st.markdown("- Excel/PDF exports")
+        if _price_starter:
+            if st.button("Get Starter", use_container_width=True, key="btn_starter"):
+                with st.spinner("Connecting to Stripe..."):
+                    url, err = create_stripe_checkout_url(_price_starter, _success, _cancel)
+                if url:
+                    st.session_state["_checkout_url"] = url
+                    st.session_state["_checkout_plan"] = "Starter"
+                    st.rerun()
+                else:
+                    st.error(f"Checkout failed: {err}")
+
+    with c2:
+        st.markdown(":blue[**MOST POPULAR**]")
+        st.subheader("Pro")
+        st.markdown("### $149/mo")
+        st.markdown("- Up to **100** employees")
+        st.markdown("- Everything in Starter")
+        st.markdown("- Goal tracking + trends")
+        st.markdown("- Automated report schedules")
+        if _price_pro:
+            if st.button("Get Pro", type="primary", use_container_width=True, key="btn_pro"):
+                with st.spinner("Connecting to Stripe..."):
+                    url, err = create_stripe_checkout_url(_price_pro, _success, _cancel)
+                if url:
+                    st.session_state["_checkout_url"] = url
+                    st.session_state["_checkout_plan"] = "Pro"
+                    st.rerun()
+                else:
+                    st.error(f"Checkout failed: {err}")
+
+    with c3:
+        st.subheader("Business")
+        st.markdown("### $299/mo")
+        st.markdown("- **Unlimited** employees")
+        st.markdown("- Everything in Pro")
+        st.markdown("- Order tracking")
+        st.markdown("- Priority support")
+        if _price_business:
+            if st.button("Get Business", use_container_width=True, key="btn_business"):
+                with st.spinner("Connecting to Stripe..."):
+                    url, err = create_stripe_checkout_url(_price_business, _success, _cancel)
+                if url:
+                    st.session_state["_checkout_url"] = url
+                    st.session_state["_checkout_plan"] = "Business"
+                    st.rerun()
+                else:
+                    st.error(f"Checkout failed: {err}")
 
     if not (_price_starter or _price_pro or _price_business):
         st.info("Payment system is being configured. Check back soon.")
