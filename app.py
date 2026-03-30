@@ -4097,10 +4097,15 @@ def _subscription_page():
     with c1:
         st.subheader("Starter")
         st.markdown("### $49/mo")
+        st.caption("For small teams getting started with productivity tracking.")
+        st.markdown("---")
+        st.markdown("**What's included:**")
         st.markdown("- Up to **25** employees")
-        st.markdown("- CSV upload + dashboard")
+        st.markdown("- CSV upload & auto-detection")
+        st.markdown("- Productivity dashboard & rankings")
+        st.markdown("- Department-level UPH tracking")
         st.markdown("- Weekly email reports")
-        st.markdown("- Excel/PDF exports")
+        st.markdown("- Excel & PDF exports")
         if _price_starter:
             if st.button("Get Starter", use_container_width=True, key="btn_starter"):
                 with st.spinner("Connecting to Stripe..."):
@@ -4116,10 +4121,16 @@ def _subscription_page():
         st.markdown(":blue[**MOST POPULAR**]")
         st.subheader("Pro")
         st.markdown("### $149/mo")
+        st.caption("For growing operations that need deeper insights and automation.")
+        st.markdown("---")
+        st.markdown("**Everything in Starter, plus:**")
         st.markdown("- Up to **100** employees")
-        st.markdown("- Everything in Starter")
-        st.markdown("- Goal tracking + trends")
-        st.markdown("- Automated report schedules")
+        st.markdown("- Goal setting & UPH targets")
+        st.markdown("- Employee trend analysis (improving/declining)")
+        st.markdown("- Underperformer flagging & alerts")
+        st.markdown("- Automated scheduled reports")
+        st.markdown("- Custom date range reports")
+        st.markdown("- Coaching notes per employee")
         if _price_pro:
             if st.button("Get Pro", type="primary", use_container_width=True, key="btn_pro"):
                 with st.spinner("Connecting to Stripe..."):
@@ -4134,10 +4145,15 @@ def _subscription_page():
     with c3:
         st.subheader("Business")
         st.markdown("### $299/mo")
+        st.caption("For large warehouses and multi-site operations.")
+        st.markdown("---")
+        st.markdown("**Everything in Pro, plus:**")
         st.markdown("- **Unlimited** employees")
-        st.markdown("- Everything in Pro")
-        st.markdown("- Order tracking")
-        st.markdown("- Priority support")
+        st.markdown("- Order & client tracking")
+        st.markdown("- Submission plans & progress")
+        st.markdown("- Client trend recording")
+        st.markdown("- Multi-department management")
+        st.markdown("- Priority email support")
         if _price_business:
             if st.button("Get Business", use_container_width=True, key="btn_business"):
                 with st.spinner("Connecting to Stripe..."):
@@ -4172,6 +4188,16 @@ def main():
         st.stop()
 
     # ── Subscription gate ─────────────────────────────────────────────────
+    # Admin bypass: add ADMIN_EMAILS in secrets to skip subscription check
+    _admin_emails = []
+    try:
+        _admin_emails = [e.strip().lower() for e in st.secrets.get("ADMIN_EMAILS", "").split(",") if e.strip()]
+    except Exception:
+        pass
+    _user_email = st.session_state.get("user_email", "").lower()
+    if _user_email and _user_email in _admin_emails:
+        st.session_state["_sub_active"] = True
+
     if not st.session_state.get("_sub_active"):
         try:
             from database import has_active_subscription
