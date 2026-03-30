@@ -3922,6 +3922,134 @@ def _check_session_timeout():
     return False
 
 
+def _subscription_page():
+    """Show pricing page for users without an active subscription."""
+    from database import (create_stripe_checkout_url, get_subscription,
+                          get_employee_count, create_billing_portal_url)
+
+    # Handle checkout return
+    _qp = st.query_params
+    if _qp.get("checkout") == "success":
+        st.balloons()
+        st.success("Welcome! Your subscription is now active.")
+        st.query_params.clear()
+        st.session_state.pop("_sub_cache", None)
+        time.sleep(2)
+        st.rerun()
+    if _qp.get("checkout") == "canceled":
+        st.info("Checkout canceled. Choose a plan below to get started.")
+        st.query_params.clear()
+
+    st.markdown("""
+    <div style="max-width:800px;margin:40px auto 0;text-align:center;">
+      <div style="background:#0F2D52;border-radius:12px;padding:32px 36px;margin-bottom:8px;">
+        <div style="font-size:28px;margin-bottom:4px;">📦</div>
+        <div style="font-size:22px;font-weight:700;color:#fff;letter-spacing:-.02em;">
+          Productivity Planner
+        </div>
+      </div>
+      <h2 style="margin-top:24px;">Choose Your Plan</h2>
+      <p style="color:#888;">Start optimizing your warehouse productivity today.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Check if user has an expired/canceled subscription
+    existing_sub = get_subscription()
+    if existing_sub and existing_sub.get("status") == "past_due":
+        st.warning("Your payment is past due. Please update your payment method to continue.")
+        _portal_url = create_billing_portal_url(
+            return_url=st.context.headers.get("Origin", "http://localhost:8501")
+        )
+        if _portal_url:
+            st.link_button("Update Payment Method", _portal_url, use_container_width=True)
+        st.stop()
+
+    # Get price IDs from secrets
+    try:
+        _price_starter  = st.secrets.get("STRIPE_PRICE_STARTER", "")
+        _price_pro      = st.secrets.get("STRIPE_PRICE_PRO", "")
+        _price_business = st.secrets.get("STRIPE_PRICE_BUSINESS", "")
+    except Exception:
+        _price_starter = _price_pro = _price_business = ""
+
+    _app_url = st.context.headers.get("Origin", "http://localhost:8501")
+    _success = f"{_app_url}/?checkout=success"
+    _cancel  = f"{_app_url}/?checkout=canceled"
+
+    # ── Pricing cards ──────────────────────────────────────────────────
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.markdown("""
+        <div style="border:1px solid #333;border-radius:12px;padding:24px;text-align:center;height:320px;">
+            <h3>Starter</h3>
+            <div style="font-size:36px;font-weight:700;">$49<span style="font-size:16px;color:#888;">/mo</span></div>
+            <hr>
+            <p>Up to <b>25</b> employees</p>
+            <p>CSV upload + dashboard</p>
+            <p>Weekly email reports</p>
+            <p>Excel/PDF exports</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if _price_starter:
+            if st.button("Get Starter", use_container_width=True, key="btn_starter"):
+                url = create_stripe_checkout_url(_price_starter, _success, _cancel)
+                if url:
+                    st.markdown(f'<meta http-equiv="refresh" content="0;url={url}">', unsafe_allow_html=True)
+                else:
+                    st.error("Could not create checkout session. Try again.")
+
+    with c2:
+        st.markdown("""
+        <div style="border:2px solid #1E90FF;border-radius:12px;padding:24px;text-align:center;height:320px;background:rgba(30,144,255,0.05);">
+            <div style="background:#1E90FF;color:#fff;border-radius:20px;padding:2px 12px;display:inline-block;font-size:12px;margin-bottom:8px;">MOST POPULAR</div>
+            <h3>Pro</h3>
+            <div style="font-size:36px;font-weight:700;">$149<span style="font-size:16px;color:#888;">/mo</span></div>
+            <hr>
+            <p>Up to <b>100</b> employees</p>
+            <p>Everything in Starter</p>
+            <p>Goal tracking + trends</p>
+            <p>Automated report schedules</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if _price_pro:
+            if st.button("Get Pro", type="primary", use_container_width=True, key="btn_pro"):
+                url = create_stripe_checkout_url(_price_pro, _success, _cancel)
+                if url:
+                    st.markdown(f'<meta http-equiv="refresh" content="0;url={url}">', unsafe_allow_html=True)
+                else:
+                    st.error("Could not create checkout session. Try again.")
+
+    with c3:
+        st.markdown("""
+        <div style="border:1px solid #333;border-radius:12px;padding:24px;text-align:center;height:320px;">
+            <h3>Business</h3>
+            <div style="font-size:36px;font-weight:700;">$299<span style="font-size:16px;color:#888;">/mo</span></div>
+            <hr>
+            <p><b>Unlimited</b> employees</p>
+            <p>Everything in Pro</p>
+            <p>Order tracking</p>
+            <p>Priority support</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if _price_business:
+            if st.button("Get Business", use_container_width=True, key="btn_business"):
+                url = create_stripe_checkout_url(_price_business, _success, _cancel)
+                if url:
+                    st.markdown(f'<meta http-equiv="refresh" content="0;url={url}">', unsafe_allow_html=True)
+                else:
+                    st.error("Could not create checkout session. Try again.")
+
+    if not (_price_starter or _price_pro or _price_business):
+        st.info("Payment system is being configured. Check back soon.")
+
+    st.markdown("---")
+    if st.button("Sign out", use_container_width=False):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+
 def main():
     # ── Auth gate ──────────────────────────────────────────────────────────
     if "supabase_session" not in st.session_state:
@@ -3933,6 +4061,15 @@ def main():
         st.info("Session expired due to inactivity. Please sign in again.")
         _login_page()
         st.stop()
+
+    # ── Subscription gate ─────────────────────────────────────────────────
+    if not st.session_state.get("_sub_active"):
+        from database import has_active_subscription
+        if has_active_subscription():
+            st.session_state["_sub_active"] = True
+        else:
+            _subscription_page()
+            st.stop()
 
     # Start background email thread (idempotent — only creates once per process)
     _start_email_thread()

@@ -928,7 +928,164 @@ _TENANT_TABLES = [
     "uploaded_files", "clients", "orders", "order_assignments",
     "unit_submissions", "client_trends",
     "tenant_goals", "tenant_settings", "tenant_email_config",
+    "subscriptions",
 ]
+
+
+# ── Subscriptions (Stripe) ─────────────────────────────────────────────────────
+
+PLAN_LIMITS = {
+    "starter":  25,
+    "pro":      100,
+    "business": -1,   # unlimited
+    "trial":    10,
+}
+
+
+def get_subscription(tenant_id: str = "") -> Optional[dict]:
+    """Return the subscription row for the current tenant, or None."""
+    sb = get_client()
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return None
+    try:
+        resp = sb.table("subscriptions").select("*").eq("tenant_id", tid).execute()
+        if resp.data:
+            return resp.data[0]
+    except Exception:
+        pass
+    return None
+
+
+def has_active_subscription(tenant_id: str = "") -> bool:
+    """Check if the current tenant has an active (or trialing/past_due) subscription."""
+    sub = get_subscription(tenant_id)
+    if not sub:
+        return False
+    return sub.get("status") in ("active", "past_due", "trialing")
+
+
+def get_employee_limit(tenant_id: str = "") -> int:
+    """Return the employee limit for the current plan. 0 if no sub, -1 if unlimited."""
+    sub = get_subscription(tenant_id)
+    if not sub or sub.get("status") not in ("active", "past_due", "trialing"):
+        return 0
+    return sub.get("employee_limit", 0)
+
+
+def get_employee_count(tenant_id: str = "") -> int:
+    """Return current number of employees for the tenant."""
+    sb = get_client()
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return 0
+    try:
+        resp = sb.table("employees").select("emp_id", count="exact").eq("tenant_id", tid).execute()
+        return resp.count or 0
+    except Exception:
+        return 0
+
+
+def can_add_employees(count: int = 1, tenant_id: str = "") -> bool:
+    """Check if adding `count` employees would exceed the plan limit."""
+    limit = get_employee_limit(tenant_id)
+    if limit == -1:
+        return True  # unlimited
+    if limit == 0:
+        return False  # no active plan
+    current = get_employee_count(tenant_id)
+    return (current + count) <= limit
+
+
+def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
+                                tenant_id: str = "") -> Optional[str]:
+    """Create a Stripe Checkout Session and return the URL."""
+    import requests
+    stripe_key = _get_config("STRIPE_SECRET_KEY")
+    if not stripe_key:
+        return None
+
+    tid = tenant_id or get_tenant_id()
+
+    # Get or create Stripe customer
+    sb = get_client()
+    try:
+        tenant_resp = sb.table("tenants").select("stripe_customer_id, name").eq("id", tid).execute()
+        stripe_cid = (tenant_resp.data[0].get("stripe_customer_id") if tenant_resp.data else None)
+    except Exception:
+        stripe_cid = None
+
+    if not stripe_cid:
+        # Create Stripe customer
+        try:
+            import streamlit as st
+            email = st.session_state.get("supabase_session", {}).get("user", {}).get("email", "")
+        except Exception:
+            email = ""
+        cust_resp = requests.post(
+            "https://api.stripe.com/v1/customers",
+            auth=(stripe_key, ""),
+            data={"email": email, "metadata[tenant_id]": tid},
+            timeout=10,
+        )
+        if cust_resp.status_code == 200:
+            stripe_cid = cust_resp.json().get("id")
+            # Store on tenants table
+            try:
+                sb.table("tenants").update({"stripe_customer_id": stripe_cid}).eq("id", tid).execute()
+            except Exception:
+                pass
+        else:
+            return None
+
+    # Create Checkout Session
+    checkout_resp = requests.post(
+        "https://api.stripe.com/v1/checkout/sessions",
+        auth=(stripe_key, ""),
+        data={
+            "mode": "subscription",
+            "customer": stripe_cid,
+            "line_items[0][price]": price_id,
+            "line_items[0][quantity]": 1,
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "client_reference_id": tid,
+            "subscription_data[metadata][tenant_id]": tid,
+        },
+        timeout=10,
+    )
+    if checkout_resp.status_code == 200:
+        return checkout_resp.json().get("url")
+    return None
+
+
+def create_billing_portal_url(return_url: str, tenant_id: str = "") -> Optional[str]:
+    """Create a Stripe Billing Portal session for the current tenant."""
+    import requests
+    stripe_key = _get_config("STRIPE_SECRET_KEY")
+    if not stripe_key:
+        return None
+
+    tid = tenant_id or get_tenant_id()
+    sb = get_client()
+    try:
+        resp = sb.table("tenants").select("stripe_customer_id").eq("id", tid).execute()
+        stripe_cid = resp.data[0].get("stripe_customer_id") if resp.data else None
+    except Exception:
+        return None
+
+    if not stripe_cid:
+        return None
+
+    portal_resp = requests.post(
+        "https://api.stripe.com/v1/billing_portal/sessions",
+        auth=(stripe_key, ""),
+        data={"customer": stripe_cid, "return_url": return_url},
+        timeout=10,
+    )
+    if portal_resp.status_code == 200:
+        return portal_resp.json().get("url")
+    return None
 
 
 def export_all_tenant_data(tenant_id: str = "") -> dict:
