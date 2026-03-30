@@ -4148,8 +4148,18 @@ def main():
             if has_active_subscription():
                 st.session_state["_sub_active"] = True
             else:
-                _subscription_page()
-                st.stop()
+                # No local subscription — try syncing from Stripe in case
+                # payment was completed but webhook/verification missed it
+                _synced = False
+                try:
+                    _synced = _verify_checkout_and_activate()
+                except Exception:
+                    pass
+                if _synced and has_active_subscription():
+                    st.session_state["_sub_active"] = True
+                else:
+                    _subscription_page()
+                    st.stop()
         except Exception as _sub_err:
             # If subscription check fails (table missing, etc.), let user through
             st.session_state["_sub_active"] = True
