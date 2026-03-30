@@ -3993,18 +3993,20 @@ def _verify_checkout_and_activate():
 
     # Upsert subscription in our DB
     try:
-        from datetime import datetime
-        period_end = datetime.fromtimestamp(stripe_sub["current_period_end"]).isoformat()
-        sb.table("subscriptions").upsert({
+        _sub_row = {
             "tenant_id": tid,
             "stripe_customer_id": cust_id,
             "stripe_subscription_id": stripe_sub["id"],
             "plan": plan,
             "status": "active",
             "employee_limit": limit,
-            "current_period_end": period_end,
             "cancel_at_period_end": stripe_sub.get("cancel_at_period_end", False),
-        }, on_conflict="tenant_id").execute()
+        }
+        _cpe = stripe_sub.get("current_period_end")
+        if _cpe:
+            from datetime import datetime, timezone
+            _sub_row["current_period_end"] = datetime.fromtimestamp(_cpe, tz=timezone.utc).isoformat()
+        sb.table("subscriptions").upsert(_sub_row, on_conflict="tenant_id").execute()
         _debug.append("DB upsert SUCCESS")
         st.session_state["_verify_debug"] = _debug
         return True
