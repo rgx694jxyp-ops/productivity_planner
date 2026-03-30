@@ -3976,83 +3976,52 @@ def _subscription_page():
     _success = f"{_app_url}/?checkout=success"
     _cancel  = f"{_app_url}/?checkout=canceled"
 
+    # ── If checkout URL already generated, show just the link ────────
+    if st.session_state.get("_checkout_url"):
+        _plan_name = st.session_state.get("_checkout_plan", "your plan")
+        st.markdown(f"### Ready to checkout: **{_plan_name}**")
+        st.link_button("Complete checkout on Stripe →", st.session_state["_checkout_url"],
+                        use_container_width=True, type="primary")
+        if st.button("← Choose a different plan"):
+            st.session_state.pop("_checkout_url", None)
+            st.session_state.pop("_checkout_plan", None)
+            st.rerun()
+        st.stop()
+
     # ── Pricing cards ──────────────────────────────────────────────────
-    c1, c2, c3 = st.columns(3)
+    _plans = [
+        {"name": "Starter",  "price": "$49",  "price_id": _price_starter,  "features": ["Up to <b>25</b> employees", "CSV upload + dashboard", "Weekly email reports", "Excel/PDF exports"], "popular": False},
+        {"name": "Pro",      "price": "$149", "price_id": _price_pro,      "features": ["Up to <b>100</b> employees", "Everything in Starter", "Goal tracking + trends", "Automated report schedules"], "popular": True},
+        {"name": "Business", "price": "$299", "price_id": _price_business, "features": ["<b>Unlimited</b> employees", "Everything in Pro", "Order tracking", "Priority support"], "popular": False},
+    ]
 
-    with c1:
-        st.markdown("""
-        <div style="border:1px solid #333;border-radius:12px;padding:24px;text-align:center;height:320px;color:#000;">
-            <h3>Starter</h3>
-            <div style="font-size:36px;font-weight:700;">$49<span style="font-size:16px;color:#888;">/mo</span></div>
-            <hr>
-            <p>Up to <b>25</b> employees</p>
-            <p>CSV upload + dashboard</p>
-            <p>Weekly email reports</p>
-            <p>Excel/PDF exports</p>
-        </div>
-        """, unsafe_allow_html=True)
-        if _price_starter:
-            if st.button("Get Starter", use_container_width=True, key="btn_starter"):
-                with st.spinner("Connecting to Stripe..."):
-                    url, err = create_stripe_checkout_url(_price_starter, _success, _cancel)
-                if url:
-                    st.session_state["_checkout_url"] = url
-                    st.rerun()
-                else:
-                    st.error(f"Checkout failed: {err}")
-            if st.session_state.get("_checkout_url") and st.session_state.get("_last_btn") == "starter":
-                st.link_button("Complete checkout →", st.session_state["_checkout_url"], use_container_width=True)
-
-    with c2:
-        st.markdown("""
-        <div style="border:2px solid #1E90FF;border-radius:12px;padding:24px;text-align:center;height:320px;background:rgba(30,144,255,0.05);color:#000;">
-            <div style="background:#1E90FF;color:#fff;border-radius:20px;padding:2px 12px;display:inline-block;font-size:12px;margin-bottom:8px;">MOST POPULAR</div>
-            <h3>Pro</h3>
-            <div style="font-size:36px;font-weight:700;">$149<span style="font-size:16px;color:#888;">/mo</span></div>
-            <hr>
-            <p>Up to <b>100</b> employees</p>
-            <p>Everything in Starter</p>
-            <p>Goal tracking + trends</p>
-            <p>Automated report schedules</p>
-        </div>
-        """, unsafe_allow_html=True)
-        if _price_pro:
-            if st.button("Get Pro", type="primary", use_container_width=True, key="btn_pro"):
-                with st.spinner("Connecting to Stripe..."):
-                    url, err = create_stripe_checkout_url(_price_pro, _success, _cancel)
-                if url:
-                    st.session_state["_checkout_url"] = url
-                    st.session_state["_last_btn"] = "pro"
-                    st.rerun()
-                else:
-                    st.error(f"Checkout failed: {err}")
-            if st.session_state.get("_checkout_url") and st.session_state.get("_last_btn") == "pro":
-                st.link_button("Complete checkout →", st.session_state["_checkout_url"], use_container_width=True)
-
-    with c3:
-        st.markdown("""
-        <div style="border:1px solid #333;border-radius:12px;padding:24px;text-align:center;height:320px;color:#000;">
-            <h3>Business</h3>
-            <div style="font-size:36px;font-weight:700;">$299<span style="font-size:16px;color:#888;">/mo</span></div>
-            <hr>
-            <p><b>Unlimited</b> employees</p>
-            <p>Everything in Pro</p>
-            <p>Order tracking</p>
-            <p>Priority support</p>
-        </div>
-        """, unsafe_allow_html=True)
-        if _price_business:
-            if st.button("Get Business", use_container_width=True, key="btn_business"):
-                with st.spinner("Connecting to Stripe..."):
-                    url, err = create_stripe_checkout_url(_price_business, _success, _cancel)
-                if url:
-                    st.session_state["_checkout_url"] = url
-                    st.session_state["_last_btn"] = "business"
-                    st.rerun()
-                else:
-                    st.error(f"Checkout failed: {err}")
-            if st.session_state.get("_checkout_url") and st.session_state.get("_last_btn") == "business":
-                st.link_button("Complete checkout →", st.session_state["_checkout_url"], use_container_width=True)
+    cols = st.columns(3)
+    for col, plan in zip(cols, _plans):
+        with col:
+            border = "2px solid #1E90FF" if plan["popular"] else "1px solid #333"
+            bg = "background:rgba(30,144,255,0.05);" if plan["popular"] else ""
+            badge = '<div style="background:#1E90FF;color:#fff;border-radius:20px;padding:2px 12px;display:inline-block;font-size:12px;margin-bottom:8px;">MOST POPULAR</div>' if plan["popular"] else ""
+            features_html = "".join(f"<p>{f}</p>" for f in plan["features"])
+            st.markdown(f"""
+            <div style="border:{border};border-radius:12px;padding:24px;text-align:center;height:320px;color:#000;{bg}">
+                {badge}
+                <h3>{plan["name"]}</h3>
+                <div style="font-size:36px;font-weight:700;">{plan["price"]}<span style="font-size:16px;color:#888;">/mo</span></div>
+                <hr>
+                {features_html}
+            </div>
+            """, unsafe_allow_html=True)
+            if plan["price_id"]:
+                btn_type = "primary" if plan["popular"] else "secondary"
+                if st.button(f"Get {plan['name']}", type=btn_type, use_container_width=True, key=f"btn_{plan['name'].lower()}"):
+                    with st.spinner("Connecting to Stripe..."):
+                        url, err = create_stripe_checkout_url(plan["price_id"], _success, _cancel)
+                    if url:
+                        st.session_state["_checkout_url"] = url
+                        st.session_state["_checkout_plan"] = plan["name"]
+                        st.rerun()
+                    else:
+                        st.error(f"Checkout failed: {err}")
 
     if not (_price_starter or _price_pro or _price_business):
         st.info("Payment system is being configured. Check back soon.")
