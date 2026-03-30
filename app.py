@@ -3993,11 +3993,15 @@ def _subscription_page():
         """, unsafe_allow_html=True)
         if _price_starter:
             if st.button("Get Starter", use_container_width=True, key="btn_starter"):
-                url = create_stripe_checkout_url(_price_starter, _success, _cancel)
+                with st.spinner("Connecting to Stripe..."):
+                    url, err = create_stripe_checkout_url(_price_starter, _success, _cancel)
                 if url:
-                    st.markdown(f'<meta http-equiv="refresh" content="0;url={url}">', unsafe_allow_html=True)
+                    st.session_state["_checkout_url"] = url
+                    st.rerun()
                 else:
-                    st.error("Could not create checkout session. Try again.")
+                    st.error(f"Checkout failed: {err}")
+            if st.session_state.get("_checkout_url") and st.session_state.get("_last_btn") == "starter":
+                st.link_button("Complete checkout →", st.session_state["_checkout_url"], use_container_width=True)
 
     with c2:
         st.markdown("""
@@ -4014,11 +4018,16 @@ def _subscription_page():
         """, unsafe_allow_html=True)
         if _price_pro:
             if st.button("Get Pro", type="primary", use_container_width=True, key="btn_pro"):
-                url = create_stripe_checkout_url(_price_pro, _success, _cancel)
+                with st.spinner("Connecting to Stripe..."):
+                    url, err = create_stripe_checkout_url(_price_pro, _success, _cancel)
                 if url:
-                    st.markdown(f'<meta http-equiv="refresh" content="0;url={url}">', unsafe_allow_html=True)
+                    st.session_state["_checkout_url"] = url
+                    st.session_state["_last_btn"] = "pro"
+                    st.rerun()
                 else:
-                    st.error("Could not create checkout session. Try again.")
+                    st.error(f"Checkout failed: {err}")
+            if st.session_state.get("_checkout_url") and st.session_state.get("_last_btn") == "pro":
+                st.link_button("Complete checkout →", st.session_state["_checkout_url"], use_container_width=True)
 
     with c3:
         st.markdown("""
@@ -4034,11 +4043,16 @@ def _subscription_page():
         """, unsafe_allow_html=True)
         if _price_business:
             if st.button("Get Business", use_container_width=True, key="btn_business"):
-                url = create_stripe_checkout_url(_price_business, _success, _cancel)
+                with st.spinner("Connecting to Stripe..."):
+                    url, err = create_stripe_checkout_url(_price_business, _success, _cancel)
                 if url:
-                    st.markdown(f'<meta http-equiv="refresh" content="0;url={url}">', unsafe_allow_html=True)
+                    st.session_state["_checkout_url"] = url
+                    st.session_state["_last_btn"] = "business"
+                    st.rerun()
                 else:
-                    st.error("Could not create checkout session. Try again.")
+                    st.error(f"Checkout failed: {err}")
+            if st.session_state.get("_checkout_url") and st.session_state.get("_last_btn") == "business":
+                st.link_button("Complete checkout →", st.session_state["_checkout_url"], use_container_width=True)
 
     if not (_price_starter or _price_pro or _price_business):
         st.info("Payment system is being configured. Check back soon.")

@@ -998,30 +998,34 @@ def can_add_employees(count: int = 1, tenant_id: str = "") -> bool:
 
 
 def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
-                                tenant_id: str = "") -> Optional[str]:
-    """Create a Stripe Checkout Session and return the URL."""
+                                tenant_id: str = "") -> tuple:
+    """Create a Stripe Checkout Session. Returns (url, error_msg)."""
     import requests
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     if not stripe_key:
-        return None
+        return None, "STRIPE_SECRET_KEY not configured"
 
     tid = tenant_id or get_tenant_id()
+    if not tid:
+        return None, "No tenant_id found"
 
     # Get or create Stripe customer
     sb = get_client()
+    stripe_cid = None
     try:
         tenant_resp = sb.table("tenants").select("stripe_customer_id, name").eq("id", tid).execute()
         stripe_cid = (tenant_resp.data[0].get("stripe_customer_id") if tenant_resp.data else None)
-    except Exception:
-        stripe_cid = None
+    except Exception as e:
+        return None, f"Tenant lookup failed: {e}"
 
     if not stripe_cid:
         # Create Stripe customer
+        email = ""
         try:
             import streamlit as st
-            email = st.session_state.get("supabase_session", {}).get("user", {}).get("email", "")
+            email = st.session_state.get("user_email", "")
         except Exception:
-            email = ""
+            pass
         cust_resp = requests.post(
             "https://api.stripe.com/v1/customers",
             auth=(stripe_key, ""),
@@ -1030,13 +1034,12 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
         )
         if cust_resp.status_code == 200:
             stripe_cid = cust_resp.json().get("id")
-            # Store on tenants table
             try:
                 sb.table("tenants").update({"stripe_customer_id": stripe_cid}).eq("id", tid).execute()
             except Exception:
                 pass
         else:
-            return None
+            return None, f"Stripe customer creation failed: {cust_resp.status_code} {cust_resp.text[:200]}"
 
     # Create Checkout Session
     checkout_resp = requests.post(
@@ -1055,8 +1058,8 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
         timeout=10,
     )
     if checkout_resp.status_code == 200:
-        return checkout_resp.json().get("url")
-    return None
+        return checkout_resp.json().get("url"), None
+    return None, f"Checkout creation failed: {checkout_resp.status_code} {checkout_resp.text[:200]}"
 
 
 def create_billing_portal_url(return_url: str, tenant_id: str = "") -> Optional[str]:
