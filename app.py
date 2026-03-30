@@ -3948,8 +3948,8 @@ def _subscription_page():
           Productivity Planner
         </div>
       </div>
-      <h2 style="margin-top:24px;">Choose Your Plan</h2>
-      <p style="color:#888;">Start optimizing your warehouse productivity today.</p>
+      <h2 style="margin-top:24px;color:#000;">Choose Your Plan</h2>
+      <p style="color:#555;">Start optimizing your warehouse productivity today.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -3981,7 +3981,7 @@ def _subscription_page():
 
     with c1:
         st.markdown("""
-        <div style="border:1px solid #333;border-radius:12px;padding:24px;text-align:center;height:320px;">
+        <div style="border:1px solid #333;border-radius:12px;padding:24px;text-align:center;height:320px;color:#000;">
             <h3>Starter</h3>
             <div style="font-size:36px;font-weight:700;">$49<span style="font-size:16px;color:#888;">/mo</span></div>
             <hr>
@@ -4001,7 +4001,7 @@ def _subscription_page():
 
     with c2:
         st.markdown("""
-        <div style="border:2px solid #1E90FF;border-radius:12px;padding:24px;text-align:center;height:320px;background:rgba(30,144,255,0.05);">
+        <div style="border:2px solid #1E90FF;border-radius:12px;padding:24px;text-align:center;height:320px;background:rgba(30,144,255,0.05);color:#000;">
             <div style="background:#1E90FF;color:#fff;border-radius:20px;padding:2px 12px;display:inline-block;font-size:12px;margin-bottom:8px;">MOST POPULAR</div>
             <h3>Pro</h3>
             <div style="font-size:36px;font-weight:700;">$149<span style="font-size:16px;color:#888;">/mo</span></div>
@@ -4022,7 +4022,7 @@ def _subscription_page():
 
     with c3:
         st.markdown("""
-        <div style="border:1px solid #333;border-radius:12px;padding:24px;text-align:center;height:320px;">
+        <div style="border:1px solid #333;border-radius:12px;padding:24px;text-align:center;height:320px;color:#000;">
             <h3>Business</h3>
             <div style="font-size:36px;font-weight:700;">$299<span style="font-size:16px;color:#888;">/mo</span></div>
             <hr>
