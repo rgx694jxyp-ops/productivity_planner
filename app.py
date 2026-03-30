@@ -4152,12 +4152,6 @@ def _subscription_page():
     if not (_price_starter or _price_pro or _price_business):
         st.info("Payment system is being configured. Check back soon.")
 
-    # Debug info
-    if st.session_state.get("_verify_debug"):
-        with st.expander("Debug: subscription verification"):
-            for d in st.session_state["_verify_debug"]:
-                st.text(d)
-
     st.markdown("---")
     if st.button("Sign out", use_container_width=False):
         for key in list(st.session_state.keys()):
