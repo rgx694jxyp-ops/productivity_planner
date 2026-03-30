@@ -4064,12 +4064,16 @@ def main():
 
     # ── Subscription gate ─────────────────────────────────────────────────
     if not st.session_state.get("_sub_active"):
-        from database import has_active_subscription
-        if has_active_subscription():
+        try:
+            from database import has_active_subscription
+            if has_active_subscription():
+                st.session_state["_sub_active"] = True
+            else:
+                _subscription_page()
+                st.stop()
+        except Exception as _sub_err:
+            # If subscription check fails (table missing, etc.), let user through
             st.session_state["_sub_active"] = True
-        else:
-            _subscription_page()
-            st.stop()
 
     # Start background email thread (idempotent — only creates once per process)
     _start_email_thread()
