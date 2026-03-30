@@ -1515,12 +1515,102 @@ def _import_step3():
 # PAGE: EMPLOYEES
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _build_coaching_recommendations():
+    """Generate smart coaching recommendations based on employee performance data."""
+    gs = st.session_state.get("goal_status", [])
+    if not gs:
+        return []
+
+    recommendations = []
+    for r in gs:
+        name = r.get("Employee", "")
+        dept = r.get("Department", "")
+        uph = r.get("Avg UPH")
+        target = r.get("Target UPH")
+        trend_dir = r.get("Trend", "")
+        vs_target = r.get("vs Target")
+
+        if not name:
+            continue
+
+        try:
+            uph = float(uph) if uph and uph not in ("—", None, "") else None
+        except (ValueError, TypeError):
+            uph = None
+        try:
+            target = float(target) if target and target not in ("—", None, "", 0) else None
+        except (ValueError, TypeError):
+            target = None
+
+        if uph is None:
+            continue
+
+        rec = {"name": name, "dept": dept, "uph": uph, "target": target,
+               "priority": "low", "actions": [], "status": ""}
+
+        # Determine gap
+        gap_pct = 0
+        if target and target > 0:
+            gap_pct = round(((uph - target) / target) * 100, 1)
+
+        # Rule-based coaching logic
+        if target and gap_pct < -20:
+            rec["priority"] = "high"
+            rec["status"] = f"{gap_pct}% below target"
+            rec["actions"].append(f"Schedule one-on-one coaching session — {name} is significantly below the {dept} target of {target} UPH.")
+            rec["actions"].append("Review workstation setup and process efficiency for immediate improvements.")
+            rec["actions"].append("Consider pairing with a top performer for peer mentoring.")
+            if trend_dir and "declining" in str(trend_dir).lower():
+                rec["actions"].append("URGENT: Performance is declining. Investigate potential issues (equipment, training, engagement).")
+        elif target and gap_pct < -10:
+            rec["priority"] = "medium"
+            rec["status"] = f"{gap_pct}% below target"
+            rec["actions"].append(f"Monitor closely — {name} is moderately below the {target} UPH target.")
+            rec["actions"].append("Provide targeted training on efficiency techniques.")
+            if trend_dir and "improving" in str(trend_dir).lower():
+                rec["actions"].append("Positive sign: trend is improving. Continue current support.")
+            else:
+                rec["actions"].append("Set a 2-week improvement checkpoint to track progress.")
+        elif target and gap_pct < 0:
+            rec["priority"] = "low"
+            rec["status"] = f"{gap_pct}% below target"
+            rec["actions"].append(f"Slightly below target. Encourage {name} and recognize effort.")
+            rec["actions"].append("Small adjustments to workflow may close the gap.")
+        elif target and gap_pct >= 20:
+            rec["priority"] = "star"
+            rec["status"] = f"+{gap_pct}% above target"
+            rec["actions"].append(f"Top performer! Consider {name} for peer mentor or team lead role.")
+            rec["actions"].append("Recognize achievement publicly to boost team morale.")
+        elif target and gap_pct >= 0:
+            rec["priority"] = "low"
+            rec["status"] = f"+{gap_pct}% above target"
+            rec["actions"].append("Meeting or exceeding target. Keep up the good work!")
+        else:
+            rec["status"] = "No target set"
+            rec["actions"].append(f"Set a department target for {dept} to enable performance tracking.")
+
+        # Trend-based additions
+        if trend_dir and "declining" in str(trend_dir).lower() and rec["priority"] != "high":
+            rec["priority"] = "medium" if rec["priority"] == "low" else rec["priority"]
+            rec["actions"].append("Note: Performance trend is declining — check in with employee.")
+
+        recommendations.append(rec)
+
+    # Sort: high first, then medium, then low, then star
+    priority_order = {"high": 0, "medium": 1, "low": 2, "star": 3}
+    recommendations.sort(key=lambda x: priority_order.get(x["priority"], 99))
+    return recommendations
+
+
 def page_employees():
     st.title("👥 Employees")
     if not require_db(): return
 
+    _plan = _get_current_plan()
     EMP_OPTS = ["Employee History", "Performance Journal"]
-    if "emp_view" not in st.session_state or st.session_state.emp_view == "All Employees":
+    if _plan in ("pro", "business", "admin"):
+        EMP_OPTS.append("🤖 Coaching Insights")
+    if "emp_view" not in st.session_state or st.session_state.emp_view not in EMP_OPTS:
         st.session_state.emp_view = "Employee History"
 
     chosen = st.session_state.emp_view
@@ -1535,6 +1625,7 @@ def page_employees():
     try:
         if   chosen == "Employee History": _emp_history()
         elif chosen == "Performance Journal":   _emp_coaching()
+        elif chosen == "🤖 Coaching Insights":  _emp_ai_coaching()
     except Exception as e:
         st.error(f"Error: {e}")
         _log_app_error("employees", f"Employee page error: {e}", detail=traceback.format_exc())
@@ -1661,6 +1752,57 @@ def _emp_history():
 
 @st.fragment
 @st.fragment
+def _emp_ai_coaching():
+    """Show AI-powered coaching recommendations based on performance data."""
+    st.subheader("🤖 Coaching Insights")
+    st.caption("Smart recommendations based on employee performance, goals, and trends.")
+
+    if not st.session_state.get("pipeline_done") and not st.session_state.get("_archived_loaded"):
+        _build_archived_productivity()
+
+    recs = _build_coaching_recommendations()
+    if not recs:
+        st.info("No coaching data available. Import productivity data and set department goals first.")
+        return
+
+    # Summary metrics
+    _high = sum(1 for r in recs if r["priority"] == "high")
+    _med  = sum(1 for r in recs if r["priority"] == "medium")
+    _stars = sum(1 for r in recs if r["priority"] == "star")
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("🔴 Urgent", _high)
+    mc2.metric("🟡 Monitor", _med)
+    mc3.metric("🟢 On Track", sum(1 for r in recs if r["priority"] == "low"))
+    mc4.metric("⭐ Stars", _stars)
+
+    st.markdown("---")
+
+    # Filter
+    _filter = st.radio("Show", ["All", "🔴 Urgent only", "🟡 Needs attention", "⭐ Top performers"],
+                        horizontal=True, key="coaching_filter")
+
+    for rec in recs:
+        if _filter == "🔴 Urgent only" and rec["priority"] != "high":
+            continue
+        if _filter == "🟡 Needs attention" and rec["priority"] not in ("high", "medium"):
+            continue
+        if _filter == "⭐ Top performers" and rec["priority"] != "star":
+            continue
+
+        # Priority badge
+        _badge = {"high": "🔴", "medium": "🟡", "low": "🟢", "star": "⭐"}.get(rec["priority"], "")
+        _uph_str = f" — {rec['uph']} UPH" if rec["uph"] else ""
+        _target_str = f" (target: {rec['target']})" if rec["target"] else ""
+
+        with st.expander(f"{_badge} **{rec['name']}** · {rec['dept']}{_uph_str}{_target_str} · {rec['status']}"):
+            for action in rec["actions"]:
+                st.markdown(f"→ {action}")
+
+    st.markdown("---")
+    st.caption("Recommendations are generated from UPH data, department targets, and performance trends. "
+               "Review and adapt based on your direct knowledge of each employee.")
+
+
 def _emp_coaching():
     emps  = _cached_employees()
     flags = _cached_active_flags()
