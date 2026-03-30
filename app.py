@@ -771,7 +771,32 @@ _init()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
+def _get_current_plan() -> str:
+    """Return current subscription plan: 'starter', 'pro', 'business', or 'admin'."""
+    # Check admin bypass first
+    _user_email = st.session_state.get("user_email", "").lower()
+    try:
+        _admin_emails = [e.strip().lower() for e in st.secrets.get("ADMIN_EMAILS", "").split(",") if e.strip()]
+        if _user_email in _admin_emails:
+            return "admin"
+    except Exception:
+        pass
+    # Check cached plan
+    if st.session_state.get("_current_plan"):
+        return st.session_state["_current_plan"]
+    try:
+        from database import get_subscription
+        sub = get_subscription()
+        plan = sub.get("plan", "starter") if sub else "starter"
+        st.session_state["_current_plan"] = plan
+        return plan
+    except Exception:
+        return "starter"
+
+
 def render_sidebar() -> str:
+    _plan = _get_current_plan()
+
     with st.sidebar:
         st.markdown("""
 <div style="padding:8px 0 20px;">
@@ -782,13 +807,16 @@ def render_sidebar() -> str:
 
         st.divider()
 
+        # Build nav based on plan
         NAV_OPTS = [
             "📁  Import Data",
             "👥  Employees",
             "📈  Productivity",
-            "📧  Email Setup",
-            "⚙️  Settings",
         ]
+        # Pro+ gets email setup
+        if _plan in ("pro", "business", "admin"):
+            NAV_OPTS.append("📧  Email Setup")
+        NAV_OPTS.append("⚙️  Settings")
         # Allow programmatic navigation via st.session_state.goto_page
         goto = st.session_state.pop("goto_page", None)
         if goto and goto in NAV_OPTS:
@@ -805,6 +833,27 @@ def render_sidebar() -> str:
         if st.button("↺ Refresh data", use_container_width=True, key="sb_refresh"):
             _bust_cache()
             st.rerun()
+
+        # ── Plan badge ──────────────────────────────────────────────────
+        _plan_display = _plan.capitalize() if _plan != "admin" else "Admin"
+        _plan_color = {"starter": "#888", "pro": "#1E90FF", "business": "#FFD700", "admin": "#FF6347"}.get(_plan, "#888")
+        st.markdown(
+            f'<div style="font-size:10px;color:{_plan_color};font-weight:700;margin-bottom:4px;">'
+            f'Plan: {_plan_display}</div>',
+            unsafe_allow_html=True,
+        )
+        try:
+            from database import get_employee_count, get_employee_limit
+            _emp_count = get_employee_count()
+            _emp_limit = get_employee_limit()
+            _limit_str = "unlimited" if _emp_limit == -1 else str(_emp_limit)
+            st.markdown(
+                f'<div style="font-size:10px;color:#7FA8CC;margin-bottom:8px;">'
+                f'Employees: {_emp_count}/{_limit_str}</div>',
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            pass
 
         # ── User info + logout ─────────────────────────────────────────────
         user_name = st.session_state.get("user_name", "")
@@ -1212,6 +1261,23 @@ def _import_step3():
                     "shift":      str(row.get(shift_col,"")).strip(),
                 }
         if seen_emps:
+            # Check employee limit before importing
+            try:
+                from database import can_add_employees, get_employee_count, get_employee_limit
+                _el = get_employee_limit()
+                if _el != -1:  # not unlimited
+                    _existing = get_employee_count()
+                    _new_unique = len(seen_emps)
+                    if _existing + _new_unique > _el and _el > 0:
+                        _plan = _get_current_plan()
+                        st.error(
+                            f"Employee limit reached. Your **{_plan.capitalize()}** plan allows "
+                            f"**{_el}** employees and you have **{_existing}**. "
+                            f"This import has **{_new_unique}** unique employees. "
+                            f"Upgrade your plan in Settings → Subscription."
+                        )
+            except Exception:
+                pass  # don't block import if limit check fails
             try:
                 batch_upsert_employees(list(seen_emps.values()))
             except Exception as _e:
@@ -2247,7 +2313,7 @@ def page_productivity():
         st.error(f"Productivity module error: {e}"); return
 
     # Nav buttons (no tabs — avoids running all content simultaneously)
-    PROD_OPTS = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📅 Weekly"]
+    PROD_OPTS = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📅 Weekly", "💰 Labor Cost"]
     if "prod_view" not in st.session_state:
         st.session_state.prod_view = "🎯 Dept Goals"
 
@@ -2722,8 +2788,113 @@ def page_productivity():
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="dl_weekly")
 
+    elif chosen_prod == "💰 Labor Cost":
+        _plan = _get_current_plan()
+        if _plan not in ("pro", "business", "admin"):
+            st.info("💰 Labor Cost Impact is available on **Pro** and **Business** plans.")
+            st.caption("Upgrade in Settings → Subscription to unlock this feature.")
+            return
 
+        st.subheader("Labor Cost Impact Analysis")
+        st.caption("See the dollar impact of employee performance vs targets. Enter your average hourly wage to calculate.")
 
+        if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
+            _build_archived_productivity()
+
+        gs = st.session_state.get("goal_status", [])
+        if not gs:
+            st.info("No productivity data. Import data first.")
+            return
+
+        _hourly_wage = st.number_input("Average hourly wage ($)", min_value=0.0, value=18.0, step=0.50, key="labor_wage")
+
+        # Build labor cost table
+        _lc_rows = []
+        for r in gs:
+            name = r.get("Employee", "")
+            dept = r.get("Department", "")
+            uph  = r.get("Avg UPH")
+            target = r.get("Target UPH")
+            hours = r.get("Hours Worked") or r.get("HoursWorked")
+
+            if not uph or not target or target in ("—", None, "", 0):
+                continue
+            try:
+                uph = float(uph)
+                target = float(target)
+            except (ValueError, TypeError):
+                continue
+
+            # Estimate hours from data or default to 40
+            try:
+                hours = float(hours) if hours and hours not in ("—", None, "") else 40.0
+            except (ValueError, TypeError):
+                hours = 40.0
+
+            expected_units = target * hours
+            actual_units = uph * hours
+            unit_diff = actual_units - expected_units
+            # Cost per unit = wage / target_uph
+            cost_per_unit = _hourly_wage / target if target > 0 else 0
+            dollar_impact = unit_diff * cost_per_unit
+
+            _lc_rows.append({
+                "Employee": name,
+                "Department": dept,
+                "Avg UPH": round(uph, 1),
+                "Target": round(target, 1),
+                "UPH Diff": round(uph - target, 1),
+                "Est. Hours": round(hours, 1),
+                "Unit Diff": round(unit_diff, 0),
+                "$ Impact": round(dollar_impact, 2),
+            })
+
+        if not _lc_rows:
+            st.info("No employees with both UPH and targets set.")
+            return
+
+        df_lc = pd.DataFrame(_lc_rows).sort_values("$ Impact")
+
+        # Summary metrics
+        total_loss = sum(r["$ Impact"] for r in _lc_rows if r["$ Impact"] < 0)
+        total_gain = sum(r["$ Impact"] for r in _lc_rows if r["$ Impact"] > 0)
+        net_impact = total_loss + total_gain
+
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("Lost from Underperformance", f"-${abs(total_loss):,.0f}", delta_color="inverse")
+        mc2.metric("Gained from Overperformance", f"+${total_gain:,.0f}")
+        mc3.metric("Net Impact", f"${net_impact:,.0f}",
+                    delta=f"${net_impact:,.0f}", delta_color="normal")
+
+        st.markdown("---")
+
+        # Color code: red for negative, green for positive
+        st.subheader("Employee Breakdown")
+        st.caption("Negative = costing you money vs target. Positive = saving you money.")
+
+        def _color_impact(val):
+            try:
+                v = float(val)
+                if v < 0: return "color: #FF4444"
+                if v > 0: return "color: #44AA44"
+            except: pass
+            return ""
+
+        styled = df_lc.style.applymap(_color_impact, subset=["$ Impact", "UPH Diff"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+        # Department summary
+        st.subheader("Department Summary")
+        dept_summary = {}
+        for r in _lc_rows:
+            d = r["Department"]
+            if d not in dept_summary:
+                dept_summary[d] = {"Department": d, "Employees": 0, "Total $ Impact": 0}
+            dept_summary[d]["Employees"] += 1
+            dept_summary[d]["Total $ Impact"] += r["$ Impact"]
+        df_dept = pd.DataFrame(dept_summary.values())
+        df_dept["Total $ Impact"] = df_dept["Total $ Impact"].round(2)
+        st.dataframe(df_dept, use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2816,10 +2987,41 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
 
     on_g  = sum(1 for r in scope_gs if r["goal_status"] == "on_goal")
     below = sum(1 for r in scope_gs if r["goal_status"] == "below_goal")
+
+    # Top 3 performers
+    _top3 = scope_gs[:3]
+    _top3_html = ""
+    if _top3:
+        _top3_html = "<h3>🏆 Top Performers</h3><ol>"
+        for t in _top3:
+            _top3_html += f"<li><strong>{t['Employee Name']}</strong> ({t['Department']}) — {t['Average UPH']} UPH</li>"
+        _top3_html += "</ol>"
+
+    # Bottom 3 performers (with targets)
+    _bottom = [r for r in reversed(scope_gs) if r["goal_status"] == "below_goal"][:3]
+    _bottom_html = ""
+    if _bottom:
+        _bottom_html = "<h3>⚠️ Needs Coaching</h3><ol>"
+        for b in _bottom:
+            _tgt = b.get('Target UPH', '—')
+            _diff = ""
+            try:
+                _diff = f" ({round(float(b['Average UPH']) - float(_tgt), 1)} vs target)"
+            except (ValueError, TypeError):
+                pass
+            _bottom_html += f"<li><strong>{b['Employee Name']}</strong> ({b['Department']}) — {b['Average UPH']} UPH{_diff}</li>"
+        _bottom_html += "</ol>"
+
+    # Average UPH across all employees
+    _avg_all = round(sum(r["Average UPH"] for r in scope_gs) / len(scope_gs), 1) if scope_gs else 0
+
     body  = (f"<h2>{dept_label} — {period_label}</h2>"
              f"<p><strong>{len(scope_gs)}</strong> employees · "
+             f"Avg UPH: <strong>{_avg_all}</strong> · "
              f"<strong style='color:green'>{on_g} on goal</strong> · "
              f"<strong style='color:red'>{below} below goal</strong></p>"
+             f"{_top3_html}"
+             f"{_bottom_html}"
              f"<p>See the attached Excel report for full details.</p>")
 
     xl_data = None
@@ -3289,7 +3491,50 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
 def page_settings():
     st.title("⚙️ Settings")
 
-    tab_app, tab_access, tab_errors = st.tabs(["App Settings", "🔐 Access Control", "🔴 Error Log"])
+    tab_app, tab_sub, tab_access, tab_errors = st.tabs(["App Settings", "💳 Subscription", "🔐 Access Control", "🔴 Error Log"])
+
+    # ── Subscription tab ──────────────────────────────────────────────────
+    with tab_sub:
+        st.subheader("Your Subscription")
+        try:
+            from database import get_subscription, get_employee_count, get_employee_limit, create_billing_portal_url
+            sub = get_subscription()
+            if sub:
+                _plan = sub.get("plan", "unknown").capitalize()
+                _status = sub.get("status", "unknown")
+                _limit = sub.get("employee_limit", 0)
+                _limit_str = "Unlimited" if _limit == -1 else str(_limit)
+                _emp_count = get_employee_count()
+                _period_end = sub.get("current_period_end", "")
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Plan", _plan)
+                col2.metric("Status", _status.replace("_", " ").title())
+                col3.metric("Employees", f"{_emp_count} / {_limit_str}")
+
+                if _period_end:
+                    try:
+                        from datetime import datetime
+                        _pe = datetime.fromisoformat(_period_end.replace("Z", "+00:00"))
+                        st.caption(f"Current period ends: {_pe.strftime('%B %d, %Y')}")
+                    except Exception:
+                        pass
+
+                if sub.get("cancel_at_period_end"):
+                    st.warning("Your subscription will cancel at the end of the current period.")
+
+                st.markdown("---")
+                _app_url = st.context.headers.get("Origin", "http://localhost:8501")
+                _portal_url = create_billing_portal_url(return_url=_app_url)
+                if _portal_url:
+                    st.link_button("Manage Subscription (upgrade, cancel, update card)", _portal_url,
+                                    use_container_width=True, type="primary")
+                else:
+                    st.info("Billing portal not available. Contact support.")
+            else:
+                st.info("No active subscription found.")
+        except Exception as _sub_err:
+            st.error(f"Could not load subscription info: {_sub_err}")
 
     st.caption("Productivity Planner · Powered by Supply Chain Automation Co")
 
