@@ -87,11 +87,25 @@ serve(async (req) => {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
-        const tenantId = session.client_reference_id;
+        const userId = session.client_reference_id;
         const customerId = session.customer;
         const subscriptionId = session.subscription;
 
-        if (!tenantId || !subscriptionId) break;
+        if (!userId || !subscriptionId) break;
+
+        // Get tenant_id from user_profiles
+        const { data: userProfile } = await supabase
+          .from("user_profiles")
+          .select("tenant_id")
+          .eq("user_id", userId)
+          .single();
+
+        if (!userProfile) {
+          console.error(`No user profile found for user ${userId}`);
+          break;
+        }
+
+        const tenantId = userProfile.tenant_id;
 
         // Fetch full subscription from Stripe
         const sub = await getSubscriptionDetails(subscriptionId);
@@ -101,6 +115,7 @@ serve(async (req) => {
         // Upsert subscription
         await supabase.from("subscriptions").upsert(
           {
+            user_id: userId,
             tenant_id: tenantId,
             stripe_customer_id: customerId,
             stripe_subscription_id: subscriptionId,

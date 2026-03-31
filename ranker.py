@@ -181,6 +181,111 @@ def build_top_bottom_summary(dept_rows: list[dict], n: int = 3) -> dict:
     return {"top": top_rows, "bottom": bottom_rows}
 
 
+def calculate_employee_risk(
+    history: list[dict],
+    mapping: dict[str, str],
+    settings: Settings,
+    error_log: ErrorLog,
+) -> list[dict]:
+    """
+    Calculates risk score for each employee based on:
+    - Under goal streak (consecutive days below department target)
+    - Downward trend (from trend analysis)
+    - Below department average UPH
+    Returns risk level: high, medium, low
+    """
+    from collections import defaultdict
+    from goals import get_all_targets, analyse_trends
+
+    targets = get_all_targets()
+    trend_data = analyse_trends(history, mapping, weeks=settings.get("trend_weeks", 4))
+
+    # Calculate department averages
+    dept_agg = defaultdict(lambda: {"total": 0.0, "count": 0})
+    for row in history:
+        dept = str(row.get(mapping.get("Department", "Department"), "")).strip()
+        uph = row.get(mapping.get("UPH", "UPH"), 0)
+        try:
+            uph = float(uph)
+            dept_agg[dept]["total"] += uph
+            dept_agg[dept]["count"] += 1
+        except (ValueError, TypeError):
+            pass
+    dept_avg = {d: agg["total"] / agg["count"] if agg["count"] > 0 else 0 for d, agg in dept_agg.items()}
+
+    # Group data by employee
+    emp_data = defaultdict(list)
+    for row in history:
+        emp = str(row.get(mapping.get("EmployeeName", "EmployeeName"), "")).strip()
+        if not emp:
+            continue
+        date_str = str(row.get(mapping.get("Date", "Date"), "")).strip()
+        uph = row.get(mapping.get("UPH", "UPH"), 0)
+        dept = str(row.get(mapping.get("Department", "Department"), "")).strip()
+        try:
+            uph = float(uph)
+            emp_data[emp].append({"date": date_str, "uph": uph, "dept": dept})
+        except (ValueError, TypeError):
+            pass
+
+    results = []
+    for emp, rows in emp_data.items():
+        if not rows:
+            continue
+
+        # Assume same department for employee
+        dept = rows[0]["dept"]
+        target = float(targets.get(dept, 0))
+
+        # Calculate employee average UPH
+        emp_avg = sum(r["uph"] for r in rows) / len(rows)
+
+        # Below department average
+        below_dept = emp_avg < dept_avg.get(dept, 0)
+
+        # Downward trend
+        trend = trend_data.get(emp, {}).get("direction", "flat")
+        downward = trend == "down"
+
+        # Under goal streak: max consecutive days below target
+        rows.sort(key=lambda x: x["date"])
+        streak = 0
+        max_streak = 0
+        for r in rows:
+            if r["uph"] < target:
+                streak += 1
+                max_streak = max(max_streak, streak)
+            else:
+                streak = 0
+        under_streak = max_streak >= 3  # Consider streak if 3+ consecutive days
+
+        # Risk level based on factors
+        factors = [under_streak, downward, below_dept]
+        count = sum(factors)
+        if count == 3:
+            risk = "high"
+        elif count == 2:
+            risk = "medium"
+        else:
+            risk = "low"
+
+        results.append({
+            "Employee": emp,
+            "Department": dept,
+            "Avg UPH": round(emp_avg, 2),
+            "Dept Avg": round(dept_avg.get(dept, 0), 2),
+            "Target": round(target, 2),
+            "Under Goal Streak": max_streak,
+            "Downward Trend": downward,
+            "Below Dept Avg": below_dept,
+            "Risk Level": risk
+        })
+
+    results.sort(key=lambda r: (r["Department"], r["Employee"]))
+    print(f"  ✓  {len(results)} employee risk assessments calculated")
+    return results
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _get_cutoff_month(settings: Settings) -> str:

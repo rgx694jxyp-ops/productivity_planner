@@ -98,10 +98,14 @@ def flag_employee(emp_id: str, emp_name: str, dept: str, reason: str = ""):
             "flagged_on": datetime.now().strftime("%Y-%m-%d"),
             "reason":    reason,
             "notes":     [],
+            "context_tags": [],
             "active":    True,
         }
     else:
         data["flagged_employees"][emp_id]["active"] = True
+        # Ensure context_tags field exists
+        if "context_tags" not in data["flagged_employees"][emp_id]:
+            data["flagged_employees"][emp_id]["context_tags"] = []
     save_goals(data)
     # Auto-log to coaching notes so the flag always appears in the coaching tab
     if not already_active:

@@ -10,6 +10,7 @@ Both respect the ChartMonths rolling window from settings.
 """
 
 from collections import defaultdict
+import pandas as pd
 from ranker import _get_cutoff_month   # reuse the same cutoff logic
 
 from settings  import Settings
@@ -155,4 +156,61 @@ def build_weekly_summary(
         })
 
     print(f"  ✓  {len(results)} department/week combination(s) built")
+    return results
+
+
+def calculate_employee_rolling_average(
+    history: list[dict],
+    mapping: dict[str, str],
+    settings: Settings,
+    error_log: ErrorLog,
+) -> list[dict]:
+    """
+    Calculates 7-day rolling average UPH for each employee.
+    Returns rows sorted by Employee, then Date.
+    """
+    date_col = mapping.get("Date", "Date")
+    emp_col = mapping.get("EmployeeName", "EmployeeName")
+    uph_col = mapping.get("UPH", "UPH")
+
+    if not history:
+        return []
+
+    df = pd.DataFrame(history)
+
+    # Ensure date is datetime
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+
+    # Drop rows with invalid dates
+    df = df.dropna(subset=[date_col])
+
+    # Ensure UPH is numeric
+    df[uph_col] = pd.to_numeric(df[uph_col], errors='coerce')
+
+    results = []
+
+    for emp, group in df.groupby(emp_col):
+        if group.empty:
+            continue
+
+        group = group.sort_values(date_col).set_index(date_col)
+
+        # Calculate 7-day and 14-day rolling averages
+        group['7DayRollingAvg'] = group[uph_col].rolling('7D', min_periods=1).mean()
+        group['14DayRollingAvg'] = group[uph_col].rolling('14D', min_periods=1).mean()
+
+        # Reset index to get date back
+        group = group.reset_index()
+
+        for _, row in group.iterrows():
+            results.append({
+                "Date": row[date_col].strftime("%Y-%m-%d"),
+                "Employee": emp,
+                "UPH": round(row[uph_col], 2) if pd.notna(row[uph_col]) else None,
+                "7DayRollingAvg": round(row['7DayRollingAvg'], 2),
+                "14DayRollingAvg": round(row['14DayRollingAvg'], 2),
+            })
+
+    results.sort(key=lambda r: (r["Employee"], r["Date"]))
+    print(f"  ✓  {len(results)} employee/day rolling average(s) calculated")
     return results

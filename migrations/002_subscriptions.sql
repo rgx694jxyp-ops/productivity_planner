@@ -5,6 +5,7 @@
 -- 1. Create subscriptions table
 CREATE TABLE IF NOT EXISTS subscriptions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID REFERENCES auth.users(id) ON DELETE CASCADE,
     tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     stripe_customer_id      TEXT NOT NULL,
     stripe_subscription_id  TEXT,
@@ -18,15 +19,18 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     CONSTRAINT subscriptions_tenant_uq UNIQUE (tenant_id)
 );
 
+-- Add user_id column if not exists (for existing tables)
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;
+
 -- 2. Add stripe_customer_id to tenants table for quick lookup
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
 
 -- 3. RLS policies
 ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Tenants can view own subscription"
+CREATE POLICY "Users can view own subscription"
     ON subscriptions FOR SELECT
-    USING (tenant_id = (
+    USING (user_id = auth.uid() OR tenant_id = (
         SELECT tenant_id FROM user_profiles
         WHERE user_id = auth.uid()
         LIMIT 1

@@ -56,6 +56,7 @@ DEFAULTS = {
     # ── Archive ───────────────────────────────────────────────────────────
     "timezone":         "",         # IANA name e.g. "America/Chicago"; "" = server local time
     "max_history_rows": 50000,      # 0 = never archive
+    "avg_hourly_wage":  18.0,       # $ used to calculate labor cost impact
 
     # ── Paths ─────────────────────────────────────────────────────────────
     "default_csv_path": "",         # pre-populate the file picker dialog
