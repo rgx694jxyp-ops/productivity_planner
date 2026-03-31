@@ -75,7 +75,7 @@ MAIN ENTRY POINT (Line ~6160)
   - Startup sequence
 """
 
-import io, os, sys, csv, json, tempfile, traceback, threading, time, math, html as _html_mod
+import io, os, sys, csv, json, tempfile, traceback, threading, time, math, re, html as _html_mod
 from datetime import datetime, date
 import pandas as pd
 
@@ -1663,11 +1663,11 @@ def _import_step1():
             continue
 
         rows, headers = _parse_csv(raw_bytes)
-        if not rows:
-            st.error(f"Could not parse **{f.name}** — check that it's a valid CSV with column headers.")
-            continue
         if not headers:
             st.error(f"**{f.name}** has no column headers. Make sure the first row contains column names.")
+            continue
+        if not rows:
+            st.error(f"**{f.name}** has column headers but no data rows. Add at least one employee row and try again.")
             continue
         pending.append({
             "filename":  f.name,
@@ -1931,14 +1931,23 @@ def _import_step3():
         dept_col  = all_mapping.get("Department","Department")
         shift_col = all_mapping.get("Shift","Shift")
         seen_emps = {}
+        name_fixed_count = 0
+        uph_rejected_count = 0
+        neg_value_fixed_count = 0
+        max_reasonable_uph = 500.0
         for row in all_rows:
             eid = str(row.get(id_col,"")).strip()
             if eid and eid not in seen_emps:
+                _safe_name, _name_flagged = _sanitize_employee_name(row.get(name_col, ""), eid)
+                _safe_dept = _normalize_label_text(row.get(dept_col, ""), max_len=40)
+                _safe_shift = _normalize_label_text(row.get(shift_col, ""), max_len=30)
+                if _name_flagged or _safe_name != str(row.get(name_col, "")).strip():
+                    name_fixed_count += 1
                 seen_emps[eid] = {
                     "emp_id":     eid,
-                    "name":       str(row.get(name_col,"")).strip(),
-                    "department": str(row.get(dept_col,"")).strip(),
-                    "shift":      str(row.get(shift_col,"")).strip(),
+                    "name":       _safe_name,
+                    "department": _safe_dept,
+                    "shift":      _safe_shift,
                 }
         if seen_emps:
             # Check employee limit before importing
@@ -1988,6 +1997,42 @@ def _import_step3():
             log = ErrorLog(tempfile.gettempdir())
 
             processed = process_data(all_rows, all_mapping, ps, log)
+
+            # User-friendly cleanup pass: normalize employee labels and discard
+            # unrealistic/non-finite UPH values before ranking.
+            _proc_name_col = all_mapping.get("EmployeeName") or "EmployeeName"
+            _proc_id_col = all_mapping.get("EmployeeID") or "EmployeeID"
+            _proc_dept_col = all_mapping.get("Department") or "Department"
+            _proc_uph_col = all_mapping.get("UPH") or "UPH"
+            for _row in processed:
+                _eid = str(_row.get(_proc_id_col, "")).strip()
+                _raw_name = _row.get(_proc_name_col, "")
+                _safe_name, _flagged = _sanitize_employee_name(_raw_name, _eid)
+                if _flagged or _safe_name != str(_raw_name).strip():
+                    name_fixed_count += 1
+                _row[_proc_name_col] = _safe_name
+                _row[_proc_dept_col] = _normalize_label_text(_row.get(_proc_dept_col, ""), max_len=40)
+
+                _raw_uph = _row.get(_proc_uph_col, "")
+                if str(_raw_uph).strip() != "":
+                    try:
+                        _uph = float(_raw_uph)
+                        if (not math.isfinite(_uph)) or _uph < 0 or _uph > max_reasonable_uph:
+                            _row[_proc_uph_col] = ""
+                            uph_rejected_count += 1
+                        else:
+                            _row[_proc_uph_col] = round(_uph, 4)
+                    except (ValueError, TypeError):
+                        _row[_proc_uph_col] = ""
+                        uph_rejected_count += 1
+
+            if name_fixed_count or uph_rejected_count:
+                st.warning(
+                    "Data cleanup applied for readability: "
+                    f"{name_fixed_count} employee label(s) normalized, "
+                    f"{uph_rejected_count} invalid UPH value(s) ignored."
+                )
+
             bar.progress(40, text="Ranking employees…")
 
             existing = st.session_state.history
@@ -2056,6 +2101,12 @@ def _import_step3():
                             hours_val = 0.0
                     except (ValueError, TypeError):
                         hours_val = 0.0
+                    if units_val < 0:
+                        units_val = 0.0
+                        neg_value_fixed_count += 1
+                    if hours_val < 0:
+                        hours_val = 0.0
+                        neg_value_fixed_count += 1
                     raw_uph = row.get(s_uph_col, None)
 
                     # Date: use mapped column value, fall back to work_date picker
@@ -2071,16 +2122,23 @@ def _import_step3():
                     key = (eid, "", row_date)
                     combo_agg[key]["units"] += units_val
                     combo_agg[key]["hours"] += hours_val
+                    _valid_uph_val = None
                     if raw_uph:
                         try:
                             _uph_val = float(raw_uph)
-                            if math.isfinite(_uph_val):
-                                combo_agg[key]["uphs"].append(_uph_val)
+                            if math.isfinite(_uph_val) and 0 <= _uph_val <= max_reasonable_uph:
+                                _valid_uph_val = _uph_val
+                            else:
+                                uph_rejected_count += 1
                         except (ValueError, TypeError):
-                            pass
+                            uph_rejected_count += 1
+                    if _valid_uph_val is not None:
+                        combo_agg[key]["uphs"].append(_valid_uph_val)
 
-                    name_val = str(row.get(s_name_col, "")).strip()
-                    dept_val = str(row.get(s_dept_col, "")).strip()
+                    name_val, _name_flagged = _sanitize_employee_name(row.get(s_name_col, ""), eid)
+                    if _name_flagged:
+                        name_fixed_count += 1
+                    dept_val = _normalize_label_text(row.get(s_dept_col, ""), max_len=40)
                     if name_val:
                         combo_agg[key]["name"]                    = name_val
                         emp_date_totals[(eid, row_date)]["name"]  = name_val
@@ -2090,13 +2148,11 @@ def _import_step3():
 
                     emp_date_totals[(eid, row_date)]["units"] += units_val
                     emp_date_totals[(eid, row_date)]["hours"] += hours_val
-                    if raw_uph:
-                        try:
-                            _uph_val = float(raw_uph)
-                            if math.isfinite(_uph_val):
-                                emp_date_totals[(eid, row_date)]["uphs"].append(_uph_val)
-                        except (ValueError, TypeError):
-                            pass
+                    if _valid_uph_val is not None:
+                        emp_date_totals[(eid, row_date)]["uphs"].append(_valid_uph_val)
+
+            if neg_value_fixed_count:
+                st.warning(f"Adjusted {neg_value_fixed_count} negative unit/hour value(s) to 0.")
 
             # Build alloc_rows — one entry per (emp, date) combo
             alloc_rows = []
@@ -2365,7 +2421,7 @@ def _emp_history():
 
     # Employee dropdown: Name — Department — ID
     emp_opts = {
-        f"{e['name']} — {e.get('department','') or 'No dept'} — {e['emp_id']}": e["emp_id"]
+        f"{_normalize_label_text(e.get('name',''))} — {_normalize_label_text(e.get('department','') or 'No dept', max_len=28)} — {e['emp_id']}": e["emp_id"]
         for e in filtered_emps
     }
     chosen = st.selectbox("Select employee", list(emp_opts.keys()), key="eh_emp")
@@ -3299,7 +3355,12 @@ def page_productivity():
 
         st.divider()
         st.subheader("🚩 Flag employees for performance tracking")
-        emp_labels      = [f"{r.get('Employee Name','')} — {r.get('Department','')} ({r.get('Shift','')})" for r in filtered]
+        emp_labels      = [
+            f"{_normalize_label_text(r.get('Employee Name',''))} — "
+            f"{_normalize_label_text(r.get('Department',''), max_len=24)} "
+            f"({_normalize_label_text(r.get('Shift',''), max_len=18)})"
+            for r in filtered
+        ]
         active_flag_ids = set(_cached_active_flags().keys())
         if emp_labels:
             _flag_tab1, _flag_tab2 = st.tabs(["Flag individual", "Bulk flag / unflag"])
@@ -5319,6 +5380,32 @@ def page_settings():
 # ══════════════════════════════════════════════════════════════════════════════
 # SHARED HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+
+_SUSPICIOUS_NAME_RE = re.compile(r"(<\s*/?\s*script\b|drop\s+table|;--|javascript:)", re.IGNORECASE)
+
+
+def _normalize_label_text(value, max_len: int = 64) -> str:
+    """Normalize UI labels so imported text stays readable and safe-looking."""
+    s = str(value or "")
+    s = s.replace("\x00", " ")
+    s = re.sub(r"[\r\n\t]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = s.replace("|", " ").replace("<", " ").replace(">", " ")
+    s = s.strip(" '\"")
+    if len(s) > max_len:
+        s = s[: max_len - 3].rstrip() + "..."
+    return s or "Unknown"
+
+
+def _sanitize_employee_name(raw_name, emp_id: str = "") -> tuple[str, bool]:
+    """Return a cleaned display name and a flag indicating suspicious input."""
+    raw = str(raw_name or "")
+    suspicious = bool(_SUSPICIOUS_NAME_RE.search(raw))
+    cleaned = _normalize_label_text(raw, max_len=64)
+    if suspicious:
+        fallback = f"Employee {emp_id}".strip() if emp_id else "Employee"
+        return _normalize_label_text(fallback, max_len=64), True
+    return cleaned, False
 
 def _parse_csv(raw: bytes) -> tuple[list[dict], list[str]]:
     """Parse CSV bytes → (rows, headers). Delegates to data_loader."""
