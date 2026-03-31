@@ -1099,6 +1099,10 @@ def _calc_risk_level(emp, history):
         return "🟢 Low", risk_score, details
 
 
+# Alias: some code paths call this as _calc_risk_level_shared
+_calc_risk_level_shared = _calc_risk_level
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # PAGE: SUPERVISOR VIEW
 # Daily one-screen view: department health, top risks, trending alerts, actions
