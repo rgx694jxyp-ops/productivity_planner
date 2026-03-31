@@ -281,7 +281,7 @@ def _bg_send_scheduled_emails():
     """Called by the background thread every 60 s to fire due email schedules.
     Iterates over ALL tenants with email configs — no st.session_state needed."""
     try:
-        from email_engine import get_schedules_due_now, send_report_email, mark_schedule_sent
+        from email_engine import get_schedules_due_now, send_report_email, mark_schedule_sent, load_email_config
         from settings    import Settings
         from database    import SUPABASE_URL as _BG_URL, SUPABASE_KEY as _BG_KEY
         from supabase    import create_client as _bg_create
@@ -322,11 +322,18 @@ def _bg_send_scheduled_emails():
                 except Exception:
                     emps_lookup = {}
 
+                _tenant_cfg = load_email_config(tenant_id=tid)
+                _tenant_recips = [
+                    r.get("email", "").strip() for r in (_tenant_cfg.get("recipients") or [])
+                    if r.get("email")
+                ]
+
                 for sched in due:
                     try:
                         period  = sched.get("report_period", "Prior day")
-                        send_to = sched.get("recipients", [])
+                        send_to = sched.get("recipients", []) or _tenant_recips
                         if not send_to:
+                            _email_log(f"[{tid[:8]}] SKIP '{sched.get('name')}' — no recipients configured")
                             continue
 
                         today = _date.today()
@@ -1685,10 +1692,17 @@ def _import_step1():
 
         rows, headers = _parse_csv(raw_bytes)
         if not headers:
-            st.error(f"**{f.name}** has no column headers. Make sure the first row contains column names.")
+            st.error(
+                f"**{f.name}** could not be parsed as a valid CSV header row. "
+                "Make sure row 1 contains column names (e.g., EmployeeID, EmployeeName, Department, UPH/Units/HoursWorked) "
+                "and that the file is comma-separated."
+            )
             continue
         if not rows:
-            st.error(f"**{f.name}** has column headers but no data rows. Add at least one employee row and try again.")
+            st.error(
+                f"**{f.name}** has headers but no usable data rows. "
+                "Add at least one employee row beneath the header and remove blank trailing lines."
+            )
             continue
         pending.append({
             "filename":  f.name,
@@ -1977,13 +1991,19 @@ def _import_step3():
                 _el = get_employee_limit()
                 if _el != -1:  # not unlimited
                     _existing = get_employee_count()
-                    _new_unique = len(seen_emps)
+                    _existing_ids = {
+                        str(e.get("emp_id", "")).strip()
+                        for e in (_cached_employees() or [])
+                        if str(e.get("emp_id", "")).strip()
+                    }
+                    _new_ids = [eid for eid in seen_emps.keys() if eid not in _existing_ids]
+                    _new_unique = len(_new_ids)
                     if _existing + _new_unique > _el and _el > 0:
                         _plan = _get_current_plan()
                         st.error(
                             f"Employee limit reached. Your **{_plan.capitalize()}** plan allows "
                             f"**{_el}** employees and you have **{_existing}**. "
-                            f"This import has **{_new_unique}** unique employees. "
+                            f"This import adds **{_new_unique}** new employee(s). "
                             f"Upgrade your plan in Settings → Subscription."
                         )
                         return
@@ -2217,12 +2237,60 @@ def _import_step3():
                     "hours_worked": hours_total,
                     "department":   dept,
                 })
+            # Avoid inserting exact duplicates when users import the same file again.
+            _dup_skipped = 0
+            try:
+                _tenant_id = st.session_state.get("tenant_id", "")
+                _dates = sorted({r.get("work_date") for r in uph_batch if r.get("work_date")})
+                _date_min = _dates[0] if _dates else ""
+                _date_max = _dates[-1] if _dates else ""
+                _emp_ids = sorted({r.get("emp_id") for r in uph_batch if r.get("emp_id")})
+                _existing_keys = set()
+                if _tenant_id and _date_min and _date_max and _emp_ids:
+                    _sb = _get_db_client()
+                    _res = (
+                        _sb.table("uph_history")
+                        .select("emp_id, work_date, uph, units, hours_worked")
+                        .eq("tenant_id", _tenant_id)
+                        .gte("work_date", _date_min)
+                        .lte("work_date", _date_max)
+                        .in_("emp_id", _emp_ids)
+                        .execute()
+                    )
+                    for _er in (_res.data or []):
+                        _existing_keys.add((
+                            str(_er.get("emp_id", "")),
+                            str(_er.get("work_date", "")),
+                            round(float(_er.get("uph") or 0), 4),
+                            round(float(_er.get("units") or 0), 4),
+                            round(float(_er.get("hours_worked") or 0), 4),
+                        ))
+
+                _filtered_batch = []
+                for _r in uph_batch:
+                    _key = (
+                        str(_r.get("emp_id", "")),
+                        str(_r.get("work_date", "")),
+                        round(float(_r.get("uph") or 0), 4),
+                        round(float(_r.get("units") or 0), 4),
+                        round(float(_r.get("hours_worked") or 0), 4),
+                    )
+                    if _key in _existing_keys:
+                        _dup_skipped += 1
+                        continue
+                    _filtered_batch.append(_r)
+                uph_batch = _filtered_batch
+            except Exception:
+                pass
+
             # Store UPH history synchronously so data is in DB before pipeline completes
             try:
                 _bg_tid = st.session_state.get("tenant_id", "")
                 if _bg_tid:
                     uph_batch = [{**r, "tenant_id": _bg_tid} for r in uph_batch]
                 batch_store_uph_history(uph_batch)
+                if _dup_skipped:
+                    st.info(f"Skipped {_dup_skipped} duplicate UPH row(s) already in history.")
             except Exception as _uph_err:
                 st.warning(f"UPH history storage warning: {_uph_err}")
                 _log_app_error("pipeline", f"UPH history storage failed: {_uph_err}",
@@ -3211,9 +3279,10 @@ def page_productivity():
             return
         st.subheader("Department UPH targets")
         st.caption("Set a UPH target for each department. Type a value and press Enter — it saves immediately and updates all charts.")
+        st.caption("Trend window and Top/Bottom % below only affect highlighting/ranking views (Goal Status, Priority, Coaching). They do not change raw UPH history.")
 
         # Trend window slider lives here
-        tw = st.slider("Trend window (weeks)", 2, 12,
+        tw = st.slider("Trend window used for trend scoring (weeks)", 2, 12,
                        st.session_state.get("trend_weeks", 4), key="prod_tw")
         if tw != st.session_state.get("trend_weeks", 4):
             st.session_state.trend_weeks = tw
@@ -3225,11 +3294,11 @@ def page_productivity():
         # Top / bottom highlight thresholds
         hc1, hc2 = st.columns(2)
         st.session_state.top_pct = hc1.slider(
-            "Top % highlighted green", 0, 50,
+            "Top % bucket (green highlight)", 0, 50,
             st.session_state.get("top_pct", 10), key="goals_top_pct"
         )
         st.session_state.bot_pct = hc2.slider(
-            "Bottom % highlighted red", 0, 50,
+            "Bottom % bucket (red highlight)", 0, 50,
             st.session_state.get("bot_pct", 10), key="goals_bot_pct"
         )
 
@@ -5273,7 +5342,8 @@ def page_settings():
     st.caption("Productivity Planner · Powered by Supply Chain Automation Co")
 
     with tab_app:
-        st.session_state.chart_months = st.slider("Rolling window (months)", 0, 60, st.session_state.chart_months)
+        st.session_state.chart_months = st.slider("History window used across charts (months)", 0, 60, st.session_state.chart_months)
+        st.caption("This limits how many months of historical data are included in dashboard/productivity trend charts.")
         st.session_state.smart_merge  = True   # always on
 
         st.divider()
@@ -6415,7 +6485,7 @@ def main():
     if _now - st.session_state.get("_last_email_check", 0) > 60:
         st.session_state["_last_email_check"] = _now
         try:
-            from email_engine import get_schedules_due_now, send_report_email
+            from email_engine import get_schedules_due_now, send_report_email, get_recipients
             from settings    import Settings as _S
             _tz  = _S().get("timezone", "")
             _due = get_schedules_due_now(timezone=_tz)
@@ -6423,13 +6493,19 @@ def main():
                 _gs      = st.session_state.get("goal_status", [])
                 _targets = _cached_targets()
                 _depts   = sorted({r.get("Department","") for r in _gs if r.get("Department")})
+                _global_recips = [r.get("email", "") for r in (get_recipients() or []) if r.get("email")]
                 for _sched in _due:
-                    _send_to = _sched.get("recipients", [])
+                    _send_to = _sched.get("recipients", []) or _global_recips
                     if not _send_to:
                         continue
+                    _per = _sched.get("report_period", "Prior day")
+                    if _per == "Custom":
+                        _ds = date.fromisoformat(_sched.get("date_start", date.today().isoformat()))
+                        _de = date.fromisoformat(_sched.get("date_end", _ds.isoformat()))
+                    else:
+                        _ds, _de = _resolve_period_dates(_per)
                     _xl, _subj, _body = _build_period_report(
-                        _sched.get("report_period", "Prior day"),
-                        "All departments", _depts, _gs, _targets)
+                        _ds, _de, "All departments", _depts, _gs, _targets)
                     send_report_email(_send_to, _subj, _body, _xl)
                     from email_engine import mark_schedule_sent as _mss
                     _mss(_sched.get("name", ""), timezone=_tz)
