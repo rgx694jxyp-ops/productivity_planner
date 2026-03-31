@@ -1956,6 +1956,7 @@ def _import_step3():
                             f"This import has **{_new_unique}** unique employees. "
                             f"Upgrade your plan in Settings → Subscription."
                         )
+                        return
             except Exception:
                 pass  # don't block import if limit check fails
             try:
@@ -3077,23 +3078,17 @@ def page_productivity():
         except Exception as _e:
             pass   # silently skip — archived data may lack history
 
-    # Load archived data from DB if pipeline hasn't run this session
-    if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-        with st.spinner("Loading archived productivity data…"):
+    # Always refresh from archived DB data on Productivity page so it includes
+    # prior imports and newly imported rows in one combined view.
+    _last_arch_refresh = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
+    _arch_refresh_due = (time.time() - _last_arch_refresh) > 30
+    if _arch_refresh_due:
+        with st.spinner("Loading productivity data…"):
             try:
-                ok = _build_archived_productivity()
-                if not ok:
-                    _dbg = st.session_state.get("_arch_debug", "")
-                    st.warning(f"No productivity data found in the database. Run Import Data to get started. {_dbg}")
+                _build_archived_productivity()
+                st.session_state["_archived_last_refresh_ts"] = time.time()
             except BaseException as _ae:
-                try:    st.error(f"Archive load error: {repr(_ae)[:300]}")
-                except Exception: st.error("Could not load archived data — check DB connection.")
                 _log_app_error("productivity", f"Archive load error: {repr(_ae)[:500]}", detail=traceback.format_exc())
-
-    if st.session_state.get("_archived_loaded"):
-        _tp_count = len(st.session_state.get("top_performers", []))
-        _dt_count = len(st.session_state.get("dept_trends", []))
-        st.info(f"📂 Showing archived data — {_tp_count} employees, {_dt_count} trend records. Run Import Data to load fresh results.")
 
     # Reapply goals only when targets changed (not every click)
     _fresh_targets = _cached_targets()
@@ -3608,12 +3603,18 @@ def page_productivity():
             target = r.get("Target UPH")
             hours = r.get("Hours Worked") or r.get("HoursWorked")
 
-            if not uph or not target or target in ("—", None, "", 0):
+            if target in ("—", None, "", 0):
+                target = _cached_targets().get(dept, 0)
+
+            if not uph or target in ("—", None, "", 0):
                 continue
             try:
                 uph = float(uph)
                 target = float(target)
             except (ValueError, TypeError):
+                continue
+
+            if target <= 0:
                 continue
 
             # Estimate hours from data or default to 40
