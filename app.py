@@ -5990,14 +5990,35 @@ def _verify_checkout_and_activate():
 
 
 def _subscription_page():
-    """Show pricing page for users without an active subscription."""
+    """Subscription gate page — shown when no active subscription is found."""
     from database import (create_stripe_checkout_url, get_subscription,
                           get_employee_count, create_billing_portal_url)
 
-    # Handle checkout return
+    # ── Shared plan data (mirrors Settings tab) ───────────────────────────
+    _PORD  = ["starter", "pro", "business"]
+    _PINFO = {
+        "starter":  {"label": "Starter",  "price": "$49/mo",  "emp": "Up to 25",  "clr": "#6b7280",
+                     "desc": "For small teams getting started."},
+        "pro":      {"label": "Pro",       "price": "$149/mo", "emp": "Up to 100", "clr": "#2563eb",
+                     "desc": "For growing operations that need deeper insights."},
+        "business": {"label": "Business",  "price": "$299/mo", "emp": "Unlimited", "clr": "#7c3aed",
+                     "desc": "For large warehouses and multi-site operations."},
+    }
+    _FEATS = {
+        "starter":  ["CSV upload & auto-detection", "Dashboard & rankings",
+                     "Dept-level UPH tracking", "Weekly email reports", "Excel & PDF exports"],
+        "pro":      ["Everything in Starter", "Goal setting & UPH targets",
+                     "Employee trend analysis", "Underperformer flagging & alerts",
+                     "Scheduled automated reports", "Custom date range reports",
+                     "Coaching notes per employee"],
+        "business": ["Everything in Pro", "Order & client tracking",
+                     "Submission plans & progress", "Client trend recording",
+                     "Multi-department management", "Priority email support"],
+    }
+
+    # ── Handle checkout query params ──────────────────────────────────────
     _qp = st.query_params
     if _qp.get("checkout") == "success":
-        # Verify with Stripe and activate subscription
         with st.spinner("Activating your subscription..."):
             activated = _verify_checkout_and_activate()
         if activated:
@@ -6010,141 +6031,180 @@ def _subscription_page():
             time.sleep(2)
             st.rerun()
         else:
-            st.warning("Payment received! It may take a moment to activate. Please refresh.")
+            st.warning("Payment received! It may take a moment to activate. Please refresh in a few seconds.")
             st.query_params.clear()
     if _qp.get("checkout") == "canceled":
-        st.info("Checkout canceled. Choose a plan below to get started.")
+        st.info("Checkout canceled — no charge was made. Choose a plan below.")
         st.query_params.clear()
 
+    # ── Check existing subscription ───────────────────────────────────────
+    try:
+        existing_sub = get_subscription()
+    except Exception:
+        existing_sub = None
+
+    _app_url    = st.context.headers.get("Origin", "http://localhost:8501")
+    _portal_url = None
+    try:
+        _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
+    except Exception:
+        pass
+
+    _sub_status  = (existing_sub or {}).get("status", "")
+    _sub_plan    = (existing_sub or {}).get("plan", "").lower()
+    _period_end  = (existing_sub or {}).get("current_period_end", "")
+    _renew_str   = ""
+    if _period_end:
+        try:
+            _pe = datetime.fromisoformat(_period_end.replace("Z", "+00:00"))
+            _renew_str = _pe.strftime("%b %d, %Y")
+        except Exception:
+            pass
+
+    # ── Page header ───────────────────────────────────────────────────────
     st.markdown("""
-    <div style="max-width:800px;margin:40px auto 0;text-align:center;">
-      <div style="background:#0F2D52;border-radius:12px;padding:32px 36px;margin-bottom:8px;">
-        <div style="font-size:28px;margin-bottom:4px;">📦</div>
-        <div style="font-size:22px;font-weight:700;color:#fff;letter-spacing:-.02em;">
+    <div style="max-width:860px;margin:32px auto 0;text-align:center;">
+      <div style="background:#0F2D52;border-radius:12px;padding:28px 36px;margin-bottom:8px;">
+        <div style="font-size:26px;margin-bottom:4px;">📦</div>
+        <div style="font-size:20px;font-weight:700;color:#fff;letter-spacing:-.02em;">
           Productivity Planner
         </div>
       </div>
-      <h2 style="margin-top:24px;color:#000;">Choose Your Plan</h2>
-      <p style="color:#555;">You don't have an active plan yet. Pick one below to get started.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    # Check if user has an expired/canceled subscription
-    existing_sub = get_subscription()
-    if existing_sub and existing_sub.get("status") == "past_due":
-        st.warning("Your payment is past due. Please update your payment method to continue.")
-        _portal_url = create_billing_portal_url(
-            return_url=st.context.headers.get("Origin", "http://localhost:8501") + "/?portal=return"
-        )
+    # ── Branch on sub status ──────────────────────────────────────────────
+
+    # PAST DUE — fix payment to reactivate
+    if _sub_status == "past_due":
+        _pi = _PINFO.get(_sub_plan, {})
+        st.markdown(f"""
+        <div style="background:#fef2f2;border:2px solid #dc2626;border-radius:10px;
+                    padding:16px 20px;margin:16px 0 8px;">
+          <div style="font-weight:700;color:#dc2626;font-size:15px;">⚠ Payment Past Due</div>
+          <div style="color:#555;margin-top:4px;font-size:13px;">
+            Your <strong>{_pi.get("label", _sub_plan.capitalize()) if _pi else _sub_plan.capitalize()}</strong> plan
+            is on hold because your last payment failed.
+            Update your card to restore access immediately.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
         if _portal_url:
-            st.link_button("Update Payment Method", _portal_url, use_container_width=True)
+            st.link_button("Update Payment Method →", _portal_url,
+                           use_container_width=True, type="primary")
+        else:
+            st.info("Contact support to update your payment method.")
+        st.markdown("---")
+        if st.button("Sign out"):
+            for k in list(st.session_state.keys()): del st.session_state[k]
+            st.rerun()
         st.stop()
 
-    # Get price IDs from secrets
+    # CANCELED — show what they had, let them reactivate or pick a new plan
+    if _sub_status in ("canceled", "incomplete_expired") and _sub_plan:
+        _pi = _PINFO.get(_sub_plan, {})
+        _ended = f"  Ended {_renew_str}." if _renew_str else ""
+        st.markdown(f"""
+        <div style="background:#fffbeb;border:2px solid #d97706;border-radius:10px;
+                    padding:16px 20px;margin:16px 0 8px;">
+          <div style="font-weight:700;color:#d97706;font-size:15px;">Your plan has ended</div>
+          <div style="color:#555;margin-top:4px;font-size:13px;">
+            You previously had the <strong>{_pi.get("label", _sub_plan.capitalize()) if _pi else _sub_plan.capitalize()}</strong> plan.{_ended}
+            Re-subscribe below to restore access.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # NO SUB / TRIALING / OTHER — generic header
+    if not existing_sub or _sub_status not in ("past_due", "canceled", "incomplete_expired"):
+        st.markdown("<h2 style='text-align:center;margin:16px 0 4px;'>Choose Your Plan</h2>",
+                    unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#555;margin-bottom:20px;'>"
+                    "Pick the plan that fits your team. Cancel any time.</p>",
+                    unsafe_allow_html=True)
+
+    # ── If checkout URL already generated, show single CTA ───────────────
+    _success = _app_url + "/?checkout=success"
+    _cancel  = _app_url + "/?checkout=canceled"
+
+    if st.session_state.get("_checkout_url"):
+        _plan_name = st.session_state.get("_checkout_plan", "your plan")
+        st.subheader(f"Ready to checkout: {_plan_name}")
+        st.link_button("Complete checkout on Stripe →", st.session_state["_checkout_url"],
+                       use_container_width=True, type="primary")
+        if st.button("← Choose a different plan"):
+            st.session_state.pop("_checkout_url", None)
+            st.session_state.pop("_checkout_plan", None)
+            st.rerun()
+        st.markdown("---")
+        if st.button("Sign out"):
+            for k in list(st.session_state.keys()): del st.session_state[k]
+            st.rerun()
+        st.stop()
+
+    # ── Get price IDs ─────────────────────────────────────────────────────
     try:
         _price_starter  = st.secrets.get("STRIPE_PRICE_STARTER", "")
         _price_pro      = st.secrets.get("STRIPE_PRICE_PRO", "")
         _price_business = st.secrets.get("STRIPE_PRICE_BUSINESS", "")
     except Exception:
         _price_starter = _price_pro = _price_business = ""
+    _prices = {"starter": _price_starter, "pro": _price_pro, "business": _price_business}
 
-    _app_url = st.context.headers.get("Origin", "http://localhost:8501")
-    _success = _app_url + "/?checkout=success"
-    _cancel  = _app_url + "/?checkout=canceled"
+    # ── Plan cards ────────────────────────────────────────────────────────
+    _cols = st.columns(3)
+    for _ci, _pk in enumerate(_PORD):
+        _pi      = _PINFO[_pk]
+        _is_prev = (_pk == _sub_plan and _sub_status in ("canceled", "incomplete_expired"))
+        _is_pop  = (_pk == "pro")
+        with _cols[_ci]:
+            # Badge row
+            if _is_prev:
+                st.markdown(f"<div style='color:#d97706;font-size:11px;font-weight:700;"
+                            f"text-transform:uppercase;'>↺ Your Previous Plan</div>",
+                            unsafe_allow_html=True)
+            elif _is_pop:
+                st.markdown("<div style='color:#2563eb;font-size:11px;font-weight:700;"
+                            "text-transform:uppercase;'>★ Most Popular</div>",
+                            unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='font-size:11px;'>&nbsp;</div>", unsafe_allow_html=True)
 
-    # ── If checkout URL already generated, show just the link ────────
-    if st.session_state.get("_checkout_url"):
-        _plan_name = st.session_state.get("_checkout_plan", "your plan")
-        st.subheader(f"Ready to checkout: {_plan_name}")
-        st.link_button("Complete checkout on Stripe →", st.session_state["_checkout_url"],
-                        use_container_width=True, type="primary")
-        if st.button("← Choose a different plan"):
-            st.session_state.pop("_checkout_url", None)
-            st.session_state.pop("_checkout_plan", None)
-            st.rerun()
-        st.stop()
+            st.markdown(f"**{_pi['label']}**")
+            st.markdown(f"### {_pi['price']}")
+            st.caption(f"{_pi['emp']} employees · {_pi['desc']}")
+            st.markdown("---")
+            for _f in _FEATS[_pk]:
+                st.markdown(f"<div style='font-size:12px;color:#444;line-height:1.9;'>✓ {_f}</div>",
+                            unsafe_allow_html=True)
+            st.markdown("")
 
-    # ── Pricing cards ──────────────────────────────────────────────────
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        st.subheader("Starter")
-        st.markdown("### $49/mo")
-        st.caption("For small teams getting started with productivity tracking.")
-        st.markdown("---")
-        st.markdown("**What's included:**")
-        st.markdown("- Up to **25** employees")
-        st.markdown("- CSV upload & auto-detection")
-        st.markdown("- Productivity dashboard & rankings")
-        st.markdown("- Department-level UPH tracking")
-        st.markdown("- Weekly email reports")
-        st.markdown("- Excel & PDF exports")
-        if _price_starter:
-            if st.button("Get Starter", use_container_width=True, key="btn_starter"):
-                with st.spinner("Connecting to Stripe..."):
-                    url, err = create_stripe_checkout_url(_price_starter, _success, _cancel)
-                if url:
-                    st.session_state["_checkout_url"] = url
-                    st.session_state["_checkout_plan"] = "Starter"
-                    st.rerun()
-                else:
-                    st.error(f"Checkout failed: {err}")
-
-    with c2:
-        st.markdown(":blue[**MOST POPULAR**]")
-        st.subheader("Pro")
-        st.markdown("### $149/mo")
-        st.caption("For growing operations that need deeper insights and automation.")
-        st.markdown("---")
-        st.markdown("**Everything in Starter, plus:**")
-        st.markdown("- Up to **100** employees")
-        st.markdown("- Goal setting & UPH targets")
-        st.markdown("- Employee trend analysis (improving/declining)")
-        st.markdown("- Underperformer flagging & alerts")
-        st.markdown("- Automated scheduled reports")
-        st.markdown("- Custom date range reports")
-        st.markdown("- Coaching notes per employee")
-        if _price_pro:
-            if st.button("Get Pro", type="primary", use_container_width=True, key="btn_pro"):
-                with st.spinner("Connecting to Stripe..."):
-                    url, err = create_stripe_checkout_url(_price_pro, _success, _cancel)
-                if url:
-                    st.session_state["_checkout_url"] = url
-                    st.session_state["_checkout_plan"] = "Pro"
-                    st.rerun()
-                else:
-                    st.error(f"Checkout failed: {err}")
-
-    with c3:
-        st.subheader("Business")
-        st.markdown("### $299/mo")
-        st.caption("For large warehouses and multi-site operations.")
-        st.markdown("---")
-        st.markdown("**Everything in Pro, plus:**")
-        st.markdown("- **Unlimited** employees")
-        st.markdown("- Order & client tracking")
-        st.markdown("- Submission plans & progress")
-        st.markdown("- Client trend recording")
-        st.markdown("- Multi-department management")
-        st.markdown("- Priority email support")
-        if _price_business:
-            if st.button("Get Business", use_container_width=True, key="btn_business"):
-                with st.spinner("Connecting to Stripe..."):
-                    url, err = create_stripe_checkout_url(_price_business, _success, _cancel)
-                if url:
-                    st.session_state["_checkout_url"] = url
-                    st.session_state["_checkout_plan"] = "Business"
-                    st.rerun()
-                else:
-                    st.error(f"Checkout failed: {err}")
+            # CTA
+            _price_id = _prices.get(_pk, "")
+            if _is_prev and _portal_url:
+                # Reactivate via portal (no new checkout)
+                st.link_button(f"Reactivate {_pi['label']} →", _portal_url,
+                               use_container_width=True, type="primary")
+            elif _price_id:
+                _btn_label  = f"Get {_pi['label']}"
+                _btn_type   = "primary" if _is_pop else "secondary"
+                if st.button(_btn_label, use_container_width=True, type=_btn_type,
+                             key=f"btn_{_pk}"):
+                    with st.spinner("Connecting to Stripe..."):
+                        url, err = create_stripe_checkout_url(_price_id, _success, _cancel)
+                    if url:
+                        st.session_state["_checkout_url"] = url
+                        st.session_state["_checkout_plan"] = _pi["label"]
+                        st.rerun()
+                    else:
+                        st.error(f"Checkout failed: {err}")
 
     if not (_price_starter or _price_pro or _price_business):
         st.info("Payment system is being configured. Check back soon.")
 
     st.markdown("---")
-    if st.button("Sign out", use_container_width=False):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+    if st.button("Sign out"):
+        for k in list(st.session_state.keys()): del st.session_state[k]
         st.rerun()
 
 
