@@ -2214,6 +2214,8 @@ def _import_step3():
             bar.progress(90, text="Rebuilding full productivity view…")
             _full_ok = _build_archived_productivity()
             _ranked_count = len(st.session_state.get("top_performers", []))
+            if _full_ok:
+                st.session_state["_archived_last_refresh_ts"] = time.time()
             if not _full_ok:
                 # Fallback path: only compute heavy analytics when archived rebuild fails.
                 ranked = rank_employees(existing, all_mapping, ps, log)
@@ -3071,6 +3073,7 @@ def _build_archived_productivity():
         "trend_data":      trend_data,
         "pipeline_done":   True,
         "_archived_loaded": True,
+        "_archived_last_refresh_ts": time.time(),
     })
     return True
 
@@ -3104,11 +3107,13 @@ def page_productivity():
 
     st.divider()
 
+    _targets_snapshot = _cached_targets()
+
     class _PS:
         def get(self, k, d=None): return st.session_state.get(k, d)
         def get_output_dir(self): return tempfile.gettempdir()
         def get_dept_target_uph(self, d):
-            t = get_all_targets().get(d, 0)
+            t = _targets_snapshot.get(d, 0)
             return float(t) if t else 0.0
         def all_mappings(self): return st.session_state.get("mapping", {})
 
@@ -3137,14 +3142,18 @@ def page_productivity():
     # Always refresh from archived DB data on Productivity page so it includes
     # prior imports and newly imported rows in one combined view.
     _last_arch_refresh = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
-    _arch_refresh_due = (time.time() - _last_arch_refresh) > 30
+    _arch_refresh_due = (time.time() - _last_arch_refresh) > 120
     if _arch_refresh_due:
-        with st.spinner("Loading productivity data…"):
-            try:
+        _show_loading = not st.session_state.get("_archived_loaded")
+        try:
+            if _show_loading:
+                with st.spinner("Loading productivity data…"):
+                    _build_archived_productivity()
+            else:
                 _build_archived_productivity()
-                st.session_state["_archived_last_refresh_ts"] = time.time()
-            except BaseException as _ae:
-                _log_app_error("productivity", f"Archive load error: {repr(_ae)[:500]}", detail=traceback.format_exc())
+            st.session_state["_archived_last_refresh_ts"] = time.time()
+        except BaseException as _ae:
+            _log_app_error("productivity", f"Archive load error: {repr(_ae)[:500]}", detail=traceback.format_exc())
 
     # Reapply goals only when targets changed (not every click)
     _fresh_targets = _cached_targets()
@@ -3654,6 +3663,7 @@ def page_productivity():
             return
 
         _hourly_wage = st.number_input("Average hourly wage ($)", min_value=0.0, value=18.0, step=0.50, key="labor_wage")
+        _targets_map = _cached_targets()
 
         # Build labor cost table
         _lc_rows = []
@@ -3665,7 +3675,7 @@ def page_productivity():
             hours = r.get("Hours Worked") or r.get("HoursWorked")
 
             if target in ("—", None, "", 0):
-                target = _cached_targets().get(dept, 0)
+                target = _targets_map.get(dept, 0)
 
             if not uph or target in ("—", None, "", 0):
                 continue
