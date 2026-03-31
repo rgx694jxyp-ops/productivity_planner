@@ -1,9 +1,81 @@
 """
 app.py — Productivity Planner
 Run with:   streamlit run app.py
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                         CODE STRUCTURE MAP                                     ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+IMPORTS & SETUP
+  - Standard library imports
+  - Streamlit & external dependencies
+  - Database & module imports with error handling
+  - Data loader imports
+
+CORE CACHE SYSTEM (Lines ~50-120)
+  - Tenant ID helpers (_tid)
+  - Raw cache functions (_raw_cached_*)
+  - Wrapper functions (_cached_*) for clean API
+
+SESSION & AUTH HELPERS (Lines ~120-190)
+  - Sign out, cache clearing
+  - Success messages, logging
+  - Error tracking
+
+EMAIL BACKGROUND SYSTEM (Lines ~190-370)
+  - Background email scheduler thread
+  - Email logging and sending pipeline
+
+APP INITIALIZATION & STATE (Lines ~370-800)
+  - Main setup (_init)
+  - Plan management
+  - Sidebar navigation (render_sidebar)
+
+CORE BUSINESS LOGIC (Lines ~800-1000)
+  - Database availability check
+  - Risk calculation (_calc_risk_level_shared) - SHARED ACROSS ALL VIEWS
+
+PAGE FUNCTIONS (Lines ~1000-6000, Ordered by Navigation)
+  - page_supervisor()      👔 Supervisor View (daily dashboard)
+  - page_dashboard()       📊 Dashboard (risk view)
+  - page_import()          📁 Import Data (3-step pipeline)
+  - page_employees()       👥 Employees (individual profiles)
+  - page_productivity()    📈 Productivity (UPH, trends, coaching, labor cost)
+  - page_email()           📧 Email Setup (SMTP, schedules, send)
+  - page_settings()        ⚙️ Settings (goals, display, audit)
+
+IMPORT HELPER FUNCTIONS (Lines ~1600-1900)
+  - Step 1: Upload CSV files
+  - Step 2: Column mapping
+  - Step 3: Data pipeline & validation
+
+EMPLOYEE PAGE HELPERS (Lines ~2300-2700)
+  - Employee history view
+  - AI coaching suggestions
+  - Manual coaching notes
+
+REPORT BUILDERS (Lines ~4500-4800)
+  - Period report generation
+  - HTML email body construction
+
+CRITICAL HELPERS (Lines ~5500-5900)
+  - CSV parsing
+  - Column auto-detection
+  - Access control
+  - Login flow
+
+SUBSCRIPTION & CHECKOUT (Lines ~5900-6160)
+  - Session timeout checking
+  - Stripe integration
+  - Subscription page
+
+MAIN ENTRY POINT (Line ~6160)
+  - main() function
+  - Router logic
+  - Startup sequence
 """
 
-import io, os, sys, csv, json, tempfile, traceback, threading, time, html as _html_mod
+import io, os, sys, csv, json, tempfile, traceback, threading, time, math, html as _html_mod
 from datetime import datetime, date
 import pandas as pd
 
@@ -11,20 +83,20 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ════════════════════════════════════════════════════════════════════════════════
+# IMPORTS FROM INTERNAL MODULES
+# ════════════════════════════════════════════════════════════════════════════════
+
 # ── Guard: show friendly error if supabase not installed ─────────────────────
 try:
     from database import (
-        get_clients, create_client_record, update_client, delete_client,
-        get_employees, get_employee, upsert_employee, mark_employee_not_new,
+        get_employees, get_employee, upsert_employee,
         get_uph_history, get_avg_uph,
         add_coaching_note, get_coaching_notes, delete_coaching_note, archive_coaching_notes,
-        create_shift, get_shifts,
-        log_uploaded_file, get_active_uploaded_files, deactivate_uploaded_file,
-        get_client as _get_db_client,
         batch_store_uph_history, get_all_uph_history,
         batch_upsert_employees,
     )
-    from export_manager import (export_client, export_employee)
+    from export_manager import (export_employee)
     DB_AVAILABLE = True
 except RuntimeError as e:
     DB_AVAILABLE = False
@@ -45,20 +117,12 @@ from data_loader import (REQUIRED_FIELDS,
                          parse_csv_bytes as _dl_parse_csv)
 
 
-# ── Cached DB reads — TTL of 30s means no DB call on every keystroke ─────────
-# Only reading functions are cached. Writes always go direct to DB.
-# Every cache includes _tid (tenant_id) so tenants never share cached data.
+# ════════════════════════════════════════════════════════════════════════════════
+# CACHE & SESSION SYSTEM
+# ════════════════════════════════════════════════════════════════════════════════
 
 def _tid() -> str:
     return st.session_state.get("tenant_id", "")
-
-@st.cache_data(ttl=120, show_spinner=False)
-def _raw_cached_clients(_tid_key: str = ""):
-    if not DB_AVAILABLE: return []
-    try:
-        result = get_clients()
-        return result or []
-    except Exception: return []
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _raw_cached_employees(_tid_key: str = ""):
@@ -103,13 +167,17 @@ def _raw_cached_coaching_notes_for(emp_id: str, _tid_key: str = "") -> list:
     except Exception: return []
 
 # ── Tenant-aware wrappers (call these everywhere) ────────────────────────────
-def _cached_clients():          return _raw_cached_clients(_tid())
 def _cached_employees():        return _raw_cached_employees(_tid())
 def _cached_targets():          return _raw_cached_targets(_tid())
 def _cached_active_flags():     return _raw_cached_active_flags(_tid())
 def _cached_uph_history():      return _raw_cached_uph_history(_tid())
 def _cached_all_coaching_notes(): return _raw_cached_all_coaching_notes(_tid())
 def _cached_coaching_notes_for(emp_id: str): return _raw_cached_coaching_notes_for(emp_id, _tid())
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# SESSION & STATE MANAGEMENT
+# ════════════════════════════════════════════════════════════════════════════════
 
 def _full_sign_out():
     """Wipe ALL session state so the next user starts completely fresh."""
@@ -124,7 +192,6 @@ def _full_sign_out():
 
 def _bust_cache():
     """Call after any write to force fresh data on next render."""
-    _raw_cached_clients.clear()
     _raw_cached_employees.clear()
     _raw_cached_targets.clear()
     _raw_cached_uph_history.clear()
@@ -178,10 +245,13 @@ def _log_app_error(category: str, message: str, detail: str = "",
         print(f"[APP_ERROR] [{severity}] [{category}] {message}")
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# EMAIL & BACKGROUND JOBS
+# ════════════════════════════════════════════════════════════════════════════════
+
 # ── Background email scheduler ────────────────────────────────────────────────
 # Runs in a daemon thread so emails fire at the scheduled time even when no
-# user is actively viewing the app.  Uses st.cache_resource so the thread
-# starts exactly once for the lifetime of the Streamlit process.
+# user is actively viewing the app. Started only once via a module-level flag.
 
 def _email_log(msg: str):
     """Append a line to tenant-specific email scheduler log."""
@@ -756,6 +826,8 @@ def _init():
         "dept_report":        {},
         "dept_trends":        [],
         "weekly_summary":     [],
+        "employee_rolling_avg": [],
+        "employee_risk":       [],
         "goal_status":        [],
         "trend_data":         {},
         "pipeline_done":      False,
@@ -809,7 +881,9 @@ def render_sidebar() -> str:
 
         # Build nav based on plan
         NAV_OPTS = [
-            "📁  Import Data",
+            "👔  Supervisor",
+            "�  Dashboard",
+            "�📁  Import Data",
             "👥  Employees",
             "📈  Productivity",
         ]
@@ -886,9 +960,423 @@ def require_db() -> bool:
     return True
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PAGE: IMPORT & SUBMIT
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Risk calculation (shared by Supervisor View and Dashboard) ────────────────
+
+def _calc_risk_level(emp, history):
+    """Calculate performance risk level: 🔴 High, 🟡 Medium, 🟢 Low.
+    Combines: trend + under-goal streak + variance.
+    Returns: (risk_level, risk_score, details_dict)
+    
+    Used by: page_supervisor, page_dashboard, page_productivity.
+    """
+    risk_score = 0.0
+    details = {
+        "trend_score": 0,
+        "streak_score": 0,
+        "variance_score": 0,
+    }
+    
+    trend = emp.get("trend", "insufficient_data")
+    if trend == "down":
+        risk_score += 4
+        details["trend_score"] = 4
+    elif trend == "flat":
+        risk_score += 1
+        details["trend_score"] = 1
+    elif trend == "up":
+        risk_score -= 2
+        details["trend_score"] = -2
+    
+    emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+    target_uph = emp.get("Target UPH", "—")
+    under_goal_streak = 0
+    
+    if history and target_uph != "—":
+        try:
+            target = float(target_uph)
+            emp_history = [r for r in history
+                           if str(r.get("EmployeeID", r.get("Employee Name", ""))) == emp_id]
+            if emp_history:
+                sorted_hist = sorted(emp_history,
+                                    key=lambda r: (r.get("Date", "") or r.get("Week", "")))
+                for r in reversed(sorted_hist):
+                    try:
+                        uph_val = float(r.get("UPH", 0) or 0)
+                        if uph_val < target:
+                            under_goal_streak += 1
+                        else:
+                            break
+                    except (ValueError, TypeError):
+                        break
+        except (ValueError, TypeError):
+            pass
+    
+    if under_goal_streak >= 7:
+        risk_score += 5
+        details["streak_score"] = 5
+    elif under_goal_streak >= 5:
+        risk_score += 4
+        details["streak_score"] = 4
+    elif under_goal_streak >= 3:
+        risk_score += 2.5
+        details["streak_score"] = 2.5
+    elif under_goal_streak >= 1:
+        risk_score += 0.5
+        details["streak_score"] = 0.5
+    
+    variance = 0.0
+    uph_values = []
+    if history:
+        emp_history = [r for r in history
+                       if str(r.get("EmployeeID", r.get("Employee Name", ""))) == emp_id]
+        for r in emp_history:
+            try:
+                uph_val = float(r.get("UPH", 0) or 0)
+                if uph_val > 0:
+                    uph_values.append(uph_val)
+            except (ValueError, TypeError):
+                pass
+    
+    if len(uph_values) >= 3:
+        avg_uph = sum(uph_values) / len(uph_values)
+        variance = sum((x - avg_uph) ** 2 for x in uph_values) / len(uph_values)
+        std_dev = variance ** 0.5
+        coeff_variation = (std_dev / avg_uph * 100) if avg_uph > 0 else 0
+        
+        if coeff_variation > 30:
+            risk_score += 3
+            details["variance_score"] = 3
+        elif coeff_variation > 20:
+            risk_score += 1.5
+            details["variance_score"] = 1.5
+        elif coeff_variation > 10:
+            risk_score += 0.5
+            details["variance_score"] = 0.5
+        
+        details["variance_pct"] = round(coeff_variation, 1)
+    
+    details["under_goal_streak"] = under_goal_streak
+    details["total_score"] = round(risk_score, 1)
+    
+    if risk_score >= 7:
+        return "🔴 High", risk_score, details
+    elif risk_score >= 4:
+        return "🟡 Medium", risk_score, details
+    else:
+        return "🟢 Low", risk_score, details
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# PAGE: SUPERVISOR VIEW
+# Daily one-screen view: department health, top risks, trending alerts, actions
+# CRITICAL: This is the primary daily-use screen
+# ════════════════════════════════════════════════════════════════════════════════
+
+def page_supervisor():
+    """One-screen supervisor view: risks, trends, context, actions. Daily-use focused."""
+    st.title("👔 Supervisor View")
+    st.caption("One-screen daily overview: team health, top risks, trends, and next steps.")
+
+    if not require_db(): return
+
+    # Load data
+    if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
+        with st.spinner("Loading supervisor data…"):
+            try:
+                from app import _build_archived_productivity
+                _build_archived_productivity()
+            except Exception:
+                pass
+
+    gs = st.session_state.get("goal_status", [])
+    history = st.session_state.get("history", [])
+    
+    if not gs:
+        st.info("No productivity data. Run Import Data to get started.")
+        return
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # SECTION 1: DEPARTMENT HEALTH SUMMARY
+    # ────────────────────────────────────────────────────────────────────────────
+    
+    st.subheader("📊 Team Health by Department")
+    depts = sorted(set(r.get("Department", "") for r in gs if r.get("Department")))
+    dept_cols = st.columns(len(depts) if depts else 1)
+    
+    dept_summary = {}
+    for dept in depts:
+        dept_emps = [r for r in gs if r.get("Department") == dept]
+        on_goal = len([r for r in dept_emps if r.get("goal_status") == "on_goal"])
+        below_goal = len([r for r in dept_emps if r.get("goal_status") == "below_goal"])
+        total = len(dept_emps)
+        health_pct = round((on_goal / total * 100) if total > 0 else 0)
+        
+        dept_summary[dept] = {
+            "on_goal": on_goal,
+            "below_goal": below_goal,
+            "total": total,
+            "health_pct": health_pct,
+        }
+    
+    for col, dept in zip(dept_cols, depts):
+        s = dept_summary[dept]
+        health_color = "#28a745" if s["health_pct"] >= 75 else "#ffc107" if s["health_pct"] >= 50 else "#dc3545"
+        col.metric(
+            f"**{dept}**",
+            f"{s['on_goal']}/{s['total']} on goal",
+            f"{s['health_pct']}%",
+            label_visibility="visible"
+        )
+    
+    st.divider()
+    
+    # ────────────────────────────────────────────────────────────────────────────
+    # SECTION 2: TOP RISKS (5-10 employees)
+    # ────────────────────────────────────────────────────────────────────────────
+    
+    st.subheader("🔴 Top Risks — Action Required Today")
+    
+    # Filter for below_goal and calculate risk
+    below_goal = [r for r in gs if r.get("goal_status") == "below_goal"]
+    
+    if not below_goal:
+        st.success("✅ All employees meeting goals!")
+    else:
+        risk_list = []
+        for emp in below_goal:
+            emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+            risk_level, risk_score, risk_details = _calc_risk_level_shared(emp, history)
+            
+            # Get flagged info for context tags
+            flagged_info = {}
+            try:
+                from goals import get_employee_flags
+                all_flags = get_employee_flags()
+                flagged_info = next((f for f in all_flags if f.get("emp_id") == emp_id), {})
+            except Exception:
+                pass
+            
+            risk_list.append({
+                "name": emp.get("Employee", emp.get("Employee Name", "Unknown")),
+                "department": emp.get("Department", ""),
+                "emp_id": emp_id,
+                "avg_uph": round(float(emp.get("Average UPH", 0) or 0), 2),
+                "target_uph": emp.get("Target UPH", "—"),
+                "trend": emp.get("trend", "—"),
+                "change_pct": emp.get("change_pct", 0.0),
+                "risk_level": risk_level,
+                "risk_score": risk_score,
+                "risk_details": risk_details,
+                "context_tags": flagged_info.get("context_tags", []),
+            })
+        
+        # Sort by risk score (highest first) and take top 10
+        risk_list.sort(key=lambda x: x["risk_score"], reverse=True)
+        top_risks = risk_list[:10]
+        
+        # Display each top risk
+        for i, emp in enumerate(top_risks, 1):
+            try:
+                target = float(emp["target_uph"]) if emp["target_uph"] != "—" else 0
+                gap = target - emp["avg_uph"]
+                gap_str = f"-{gap:.1f} UPH" if gap > 0 else "—"
+            except (ValueError, TypeError):
+                gap_str = "—"
+            
+            # Build summary row
+            col1, col2, col3, col4, col5 = st.columns([1, 2, 1.5, 1, 2])
+            col1.write(f"**#{i}**")
+            col2.write(f"**{emp['name']}** · {emp['department']}")
+            col3.write(f"{emp['risk_level']} ({emp['risk_score']:.1f})")
+            col4.write(f"{emp['avg_uph']:.1f} / {emp['target_uph']}")
+            col5.write(f"{emp['trend']} {emp['change_pct']:+.0f}%")
+            
+            # Expandable details
+            with st.expander(f"View context & actions for {emp['name']}", expanded=False):
+                # Context tags
+                if emp['context_tags']:
+                    tag_cols = st.columns(len(emp['context_tags']))
+                    for tag_col, tag in zip(tag_cols, emp['context_tags']):
+                        tag_col.markdown(f"📌 {tag}")
+                    st.write("")
+                
+                # Risk breakdown
+                d = emp['risk_details']
+                rc1, rc2, rc3 = st.columns(3)
+                rc1.metric("Trend", f"{d.get('trend_score', 0):+.0f}pt", "down trend" if d.get("trend_score", 0) >= 4 else "")
+                rc2.metric("Streak", f"{d.get('streak_score', 0):.1f}pt", f"{d.get('under_goal_streak', 0)} days below")
+                rc3.metric("Variance", f"{d.get('variance_score', 0):.1f}pt", f"{d.get('variance_pct', 0):.0f}% CV")
+                
+                st.write("")
+                st.markdown("**👉 Suggested Next Actions:**")
+                
+                # Build context-aware actions
+                actions = []
+                
+                # Context-specific actions (take priority)
+                if "Equipment issues" in emp['context_tags']:
+                    actions.append("🔧 **Fix the equipment first** — Resolve tool/system issues before coaching.")
+                if "New employee" in emp['context_tags']:
+                    actions.append("📋 **Structured onboarding check** — Ensure proper training & mentoring.")
+                if "Cross-training" in emp['context_tags']:
+                    actions.append("🎓 **Support transition** — Provide extra mentoring during skill-building.")
+                if "Shift change" in emp['context_tags']:
+                    actions.append("⏰ **Allow adjustment time** — Follow up in 2 weeks for impact.")
+                if "Short staffed" in emp['context_tags']:
+                    actions.append("👥 **Increase capacity** — Hiring or redistribution may help faster.")
+                
+                # Trend-based actions
+                if not any(tag in emp['context_tags'] for tag in ["Equipment issues", "Short staffed"]):
+                    if emp["trend"] == "down":
+                        actions.append("💬 **Identify obstacles** — Ask what's changed. Check for workload/personal issues.")
+                    elif emp["trend"] == "flat":
+                        actions.append("📈 **Break the plateau** — Try new training, task rotation, or peer mentoring.")
+                
+                # Gap-based actions
+                try:
+                    target = float(emp["target_uph"]) if emp["target_uph"] != "—" else 0
+                    if target > 0:
+                        gap = target - emp["avg_uph"]
+                        if gap > 5 and "New employee" not in emp['context_tags']:
+                            actions.append("📊 **Major gap** — Structured improvement plan with weekly check-ins.")
+                        elif gap > 2 and "New employee" not in emp['context_tags']:
+                            actions.append("🤝 **1-on-1 coaching** — Discuss goals and what support they need.")
+                except (ValueError, TypeError):
+                    pass
+                
+                # Default if no actions were generated
+                if not actions:
+                    actions.append("🤝 **1-on-1 conversation** — Discuss performance, barriers, and support.")
+                
+                for action in actions:
+                    st.write(action)
+    
+    st.divider()
+    
+    # ────────────────────────────────────────────────────────────────────────────
+    # SECTION 3: TRENDING DOWN ALERTS
+    # ────────────────────────────────────────────────────────────────────────────
+    
+    st.subheader("⚠️ Trending Down — Proactive Check-In Recommended")
+    trending_down = [r for r in gs if r.get("trend") == "down" and r.get("goal_status") != "below_goal"]
+    
+    if trending_down:
+        st.caption(f"⚠️ {len(trending_down)} employee(s) showing downward trend but NOT yet below goal.")
+        for emp in trending_down[:5]:  # Show top 5 only
+            col1, col2, col3 = st.columns([2, 1, 2])
+            col1.write(f"**{emp.get('Employee Name', 'Unknown')}** ({emp.get('Department', '')})")
+            col2.write(f"↓ {emp.get('change_pct', 0):+.0f}%")
+            col3.write(f"{emp.get('Average UPH', 0):.1f} / {emp.get('Target UPH', '—')}")
+    else:
+        st.success("✅ No concerning trends detected.")
+    
+    st.divider()
+    
+    # ────────────────────────────────────────────────────────────────────────────
+    # SECTION 4: BUSINESS IMPACT (What it costs to not coach)
+    # ────────────────────────────────────────────────────────────────────────────
+    
+    st.subheader("💰 This Week's Cost Impact")
+    
+    # Try to get hourly wage from settings
+    try:
+        from settings import Settings as _ImpactS
+        _avg_wage = _ImpactS().get("avg_hourly_wage", 18.0)
+    except Exception:
+        _avg_wage = 18.0
+    
+    # Calculate labor cost for below-goal employees
+    cost_by_emp = []
+    for emp in below_goal:
+        emp_name = emp.get("Employee Name", emp.get("Employee", "Unknown"))
+        target = emp.get("Target UPH", "—")
+        avg_uph = emp.get("Average UPH", 0)
+        
+        if target == "—" or target is None or not avg_uph:
+            continue
+        
+        try:
+            target = float(target)
+            avg_uph = float(avg_uph)
+        except (ValueError, TypeError):
+            continue
+        
+        if target <= 0:
+            continue
+        
+        # Assume 40-hour work week
+        hours_week = 40.0
+        expected_units = target * hours_week
+        actual_units = avg_uph * hours_week
+        unit_diff = actual_units - expected_units
+        
+        if unit_diff >= 0:  # Only negative impacts count
+            continue
+        
+        cost_per_unit = _avg_wage / target if target > 0 else 0
+        weekly_cost = abs(unit_diff * cost_per_unit)
+        
+        cost_by_emp.append({
+            "name": emp_name,
+            "department": emp.get("Department", ""),
+            "weekly_cost": weekly_cost,
+            "gap": target - avg_uph,
+        })
+    
+    if cost_by_emp:
+        cost_by_emp.sort(key=lambda x: x["weekly_cost"], reverse=True)
+        top_3_cost = cost_by_emp[:3]
+        total_top_3_cost = sum(e["weekly_cost"] for e in top_3_cost)
+        
+        st.error(f"🔴 **Top 3 underperformers costing ${total_top_3_cost:,.0f} this week**")
+        
+        for i, emp in enumerate(top_3_cost, 1):
+            c1, c2, c3 = st.columns([2, 1, 1.5])
+            c1.write(f"**{i}. {emp['name']}** ({emp['department']})")
+            c2.metric("Gap", f"-{emp['gap']:.1f} UPH")
+            c3.metric("Weekly Cost", f"${emp['weekly_cost']:,.0f}")
+        
+        st.caption(f"📣 **Key insight:** Improving these 3 people alone would save ${total_top_3_cost:,.0f}/week (${ total_top_3_cost * 52:,.0f}/year).")
+    else:
+        st.success("✅ No significant labor cost impact detected.")
+    
+    st.divider()
+    
+    # ────────────────────────────────────────────────────────────────────────────
+    # SECTION 5: QUICK COACHING TIPS (Generic)
+    # ────────────────────────────────────────────────────────────────────────────
+    
+    st.subheader("💡 Quick Coaching Tips")
+    with st.expander("How to approach coaching conversations", expanded=False):
+        st.markdown("""
+**For High Risk (🔴):**
+- Schedule immediate 1-on-1
+- Ask: "What obstacles are you facing?"
+- Identify specific, measurable targets
+- Plan weekly check-in reviews
+
+**For Medium Risk (🟡):**
+- Proactive check-in within 3-5 days
+- Discuss trends: "I've noticed a dip the last few days"
+- Offer support: extra training, peer mentoring, resources
+- Set clear improvement goals
+
+**For Trending Down (but still on goal):**
+- Friendly conversation to prevent further decline
+- Ask about workload, personal factors, team dynamics
+- Recognize effort while addressing trend
+
+**Universal best practices:**
+- Focus on behaviors & solutions, not blame
+- Use data to support conversation
+- Celebrate wins when they happen
+- Make support concrete: training, tools, time
+""")
+    
+    st.divider()
+    
+    # Footer with quick links
+    st.caption("📚 Want to dive deeper? Visit **📈 Productivity** page for detailed analytics and risk breakdown.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -897,6 +1385,161 @@ def require_db() -> bool:
 # Step 1: Upload CSV(s)
 # Step 2: Map columns (per file, auto-detected)
 # Step 3: Run pipeline — employees registered, UPH calculated, data ready
+# ══════════════════════════════════════════════════════════════════════════════
+
+def page_dashboard():
+    """Dashboard: At-a-glance risk view of all employees."""
+    st.title("📊 Dashboard")
+    st.caption("Risk-based priority view of all employees. Filter by risk level or department.")
+
+    if not require_db(): return
+
+    if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
+        with st.spinner("Loading dashboard data…"):
+            try:
+                from app import _build_archived_productivity
+                _build_archived_productivity()
+            except Exception:
+                pass
+
+    gs = st.session_state.get("goal_status", [])
+    history = st.session_state.get("history", [])
+    
+    if not gs:
+        st.info("No productivity data. Run Import Data to get started.")
+        return
+
+    # Filter for below_goal employees
+    below_goal = [r for r in gs if r.get("goal_status") == "below_goal"]
+    
+    if not below_goal:
+        st.success("✅ All employees are meeting their goals!")
+        st.divider()
+        # Show summary of on-goal employees
+        on_goal = [r for r in gs if r.get("goal_status") != "below_goal"]
+        if on_goal:
+            st.subheader("On Target")
+            st.metric("Employees meeting goals", len(on_goal))
+        return
+
+    # Score all below-goal employees using shared risk calculator
+    risk_list = []
+    for emp in below_goal:
+        emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+        risk_level, risk_score, risk_details = _calc_risk_level(emp, history)
+        risk_list.append({
+            "name": emp.get("Employee", emp.get("Employee Name", "Unknown")),
+            "department": emp.get("Department", ""),
+            "emp_id": emp_id,
+            "avg_uph": round(float(emp.get("Average UPH", 0) or 0), 2),
+            "target_uph": emp.get("Target UPH", "—"),
+            "trend": emp.get("trend", "—"),
+            "change_pct": emp.get("change_pct", 0.0),
+            "risk_level": risk_level,
+            "risk_score": risk_score,
+            "risk_details": risk_details,
+        })
+
+    # Filter controls
+    col1, col2, col3 = st.columns([2, 2, 1])
+    
+    risk_filter = col1.multiselect(
+        "Filter by risk level",
+        ["🔴 High", "🟡 Medium", "🟢 Low"],
+        default=["🔴 High", "🟡 Medium", "🟢 Low"],
+        key="dash_risk_filter"
+    )
+    
+    dept_options = sorted(set(r["department"] for r in risk_list if r["department"]))
+    dept_filter = col2.multiselect(
+        "Filter by department",
+        ["All departments"] + dept_options,
+        default=["All departments"],
+        key="dash_dept_filter"
+    )
+    
+    sort_by = col3.selectbox(
+        "Sort by",
+        ["Risk (High → Low)", "UPH (Low → High)", "Streak (Longest)"],
+        key="dash_sort"
+    )
+
+    # Apply filters
+    filtered = [r for r in risk_list if r["risk_level"] in risk_filter]
+    if "All departments" not in dept_filter:
+        filtered = [r for r in filtered if r["department"] in dept_filter]
+
+    # Sort
+    if sort_by == "Risk (High → Low)":
+        filtered.sort(key=lambda x: x["risk_score"], reverse=True)
+    elif sort_by == "UPH (Low → High)":
+        filtered.sort(key=lambda x: x["avg_uph"])
+    elif sort_by == "Streak (Longest)":
+        filtered.sort(key=lambda x: x["risk_details"]["under_goal_streak"], reverse=True)
+
+    # Summary metrics
+    st.divider()
+    high_risk = len([r for r in filtered if r["risk_level"] == "🔴 High"])
+    med_risk = len([r for r in filtered if r["risk_level"] == "🟡 Medium"])
+    low_risk = len([r for r in filtered if r["risk_level"] == "🟢 Low"])
+    
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Below Goal", len(filtered))
+    m2.metric("🔴 High Risk", high_risk)
+    m3.metric("🟡 Medium Risk", med_risk)
+    m4.metric("🟢 Low Risk", low_risk)
+
+    st.divider()
+
+    # Display as scrollable table
+    st.subheader("Performance Priority List")
+    
+    if not filtered:
+        st.info("No employees match the selected filters.")
+        return
+
+    # Create table data
+    table_data = []
+    for r in filtered:
+        table_data.append({
+            "Risk": r["risk_level"],
+            "Name": r["name"],
+            "Dept": r["department"],
+            "Current UPH": r["avg_uph"],
+            "Target": r["target_uph"],
+            "Trend": r["trend"],
+            "Streak": f"{r['risk_details']['under_goal_streak']} days",
+            "Score": r["risk_score"],
+        })
+
+    df = pd.DataFrame(table_data)
+    
+    # Color code by risk
+    def _color_risk(val):
+        if "🔴" in str(val):
+            return "background-color: #ffcccc; color: #8b0000"
+        elif "🟡" in str(val):
+            return "background-color: #fff9e6; color: #ff6600"
+        elif "🟢" in str(val):
+            return "background-color: #e6ffe6; color: #008000"
+        return ""
+
+    styled = df.style.applymap(_color_risk, subset=["Risk"])
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # Export button
+    csv_buf = df.to_csv(index=False)
+    st.download_button(
+        "⬇️ Download priority list",
+        csv_buf,
+        f"priority_list_{date.today()}.csv",
+        "text/csv",
+        key="dash_export"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: IMPORT DATA
 # ══════════════════════════════════════════════════════════════════════════════
 
 def page_import():
@@ -1291,7 +1934,7 @@ def _import_step3():
         try:
             from data_processor import process_data
             from ranker         import rank_employees, build_department_report
-            from trends         import calculate_department_trends, build_weekly_summary
+            from trends         import calculate_department_trends, build_weekly_summary, calculate_employee_rolling_average
             from error_log      import ErrorLog
             from goals          import analyse_trends, build_goal_status, get_all_targets
 
@@ -1322,6 +1965,8 @@ def _import_step3():
             dept_report = build_department_report(ranked, ps, log)
             dept_trends = calculate_department_trends(existing, all_mapping, ps, log)
             weekly      = build_weekly_summary(existing, all_mapping, ps, log)
+            rolling_avg = calculate_employee_rolling_average(existing, all_mapping, ps, log)
+            risk_scores = calculate_employee_risk(existing, all_mapping, ps, log)
 
             bar.progress(85, text="Storing UPH history…")
 
@@ -1361,10 +2006,18 @@ def _import_step3():
                     if not eid:
                         continue
 
-                    try: units_val = float(row.get(s_u_col, 0) or 0)
-                    except (ValueError, TypeError): units_val = 0.0
-                    try: hours_val = float(row.get(s_h_col, 0) or 0)
-                    except (ValueError, TypeError): hours_val = 0.0
+                    try:
+                        units_val = float(row.get(s_u_col, 0) or 0)
+                        if not math.isfinite(units_val):
+                            units_val = 0.0
+                    except (ValueError, TypeError):
+                        units_val = 0.0
+                    try:
+                        hours_val = float(row.get(s_h_col, 0) or 0)
+                        if not math.isfinite(hours_val):
+                            hours_val = 0.0
+                    except (ValueError, TypeError):
+                        hours_val = 0.0
                     raw_uph = row.get(s_uph_col, None)
 
                     # Date: use mapped column value, fall back to work_date picker
@@ -1381,8 +2034,12 @@ def _import_step3():
                     combo_agg[key]["units"] += units_val
                     combo_agg[key]["hours"] += hours_val
                     if raw_uph:
-                        try: combo_agg[key]["uphs"].append(float(raw_uph))
-                        except (ValueError, TypeError): pass
+                        try:
+                            _uph_val = float(raw_uph)
+                            if math.isfinite(_uph_val):
+                                combo_agg[key]["uphs"].append(_uph_val)
+                        except (ValueError, TypeError):
+                            pass
 
                     name_val = str(row.get(s_name_col, "")).strip()
                     dept_val = str(row.get(s_dept_col, "")).strip()
@@ -1396,8 +2053,12 @@ def _import_step3():
                     emp_date_totals[(eid, row_date)]["units"] += units_val
                     emp_date_totals[(eid, row_date)]["hours"] += hours_val
                     if raw_uph:
-                        try: emp_date_totals[(eid, row_date)]["uphs"].append(float(raw_uph))
-                        except (ValueError, TypeError): pass
+                        try:
+                            _uph_val = float(raw_uph)
+                            if math.isfinite(_uph_val):
+                                emp_date_totals[(eid, row_date)]["uphs"].append(_uph_val)
+                        except (ValueError, TypeError):
+                            pass
 
             # Build alloc_rows — one entry per (emp, date) combo
             alloc_rows = []
@@ -1436,13 +2097,21 @@ def _import_step3():
                     uph = round(min(agg["units"] / agg["hours"], 9999), 2)
                 else:
                     uph = 0.0
+                if not math.isfinite(uph):
+                    uph = 0.0
+                units_total = round(agg["units"])
+                hours_total = round(agg["hours"], 2)
+                if not math.isfinite(float(units_total)):
+                    units_total = 0
+                if not math.isfinite(float(hours_total)):
+                    hours_total = 0.0
                 dept = agg["dept"] or _emp_dept_map.get(eid, "")
                 uph_batch.append({
                     "emp_id":       eid,
                     "work_date":    uph_date,
                     "uph":          uph,
-                    "units":        round(agg["units"]),
-                    "hours_worked": round(agg["hours"], 2),
+                    "units":        units_total,
+                    "hours_worked": hours_total,
                     "department":   dept,
                 })
             # Store UPH history synchronously so data is in DB before pipeline completes
@@ -1469,6 +2138,9 @@ def _import_step3():
                     "dept_report":       dept_report,
                     "dept_trends":       dept_trends,
                     "weekly_summary":    weekly,
+                    "employee_rolling_avg": rolling_avg,
+                    "employee_risk":     risk_scores,
+                    "employee_risk":     risk_scores,
                     "goal_status":       goal_status,
                     "trend_data":        trend_data,
                     "pipeline_done":     True,
@@ -2032,170 +2704,6 @@ def _emp_coaching():
                 st.caption("No journal entries yet — add one above.")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PAGE: CLIENTS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def page_clients():
-    st.title("🏢 Clients")
-    if not require_db(): return
-
-    CL_OPTS = ["All Clients", "Add Client"]
-    if "clients_view" not in st.session_state:
-        st.session_state.clients_view = "All Clients"
-
-    chosen = st.session_state.clients_view
-    cols   = st.columns(len(CL_OPTS))
-    for i, opt in enumerate(CL_OPTS):
-        if cols[i].button(opt, key=f"clv_{opt}", use_container_width=True,
-                           type="primary" if chosen == opt else "secondary"):
-            st.session_state.clients_view = opt
-            st.rerun()
-
-    st.divider()
-    try:
-        if   chosen == "All Clients":   _clients_list()
-        elif chosen == "Add Client":    _client_create()
-    except Exception as e:
-        st.error(f"Error: {e}")
-        _log_app_error("clients", f"Clients page error: {e}", detail=traceback.format_exc())
-
-
-def _clients_list():
-    clients = _cached_clients()
-    if not clients:
-        st.info("No clients yet. Click the **Add Client** tab above to add your first client.")
-        return
-
-    for c in clients:
-        with st.expander(f"**{c['name']}**"):
-            cid = c["id"]
-
-            # ── View / Edit toggle ────────────────────────────────────────────
-            edit_key = f"cl_edit_{cid}"
-            if st.session_state.get(edit_key):
-                # Edit mode
-                new_name  = st.text_input("Company name", value=c.get("name",""), key=f"cl_nm_{cid}")
-                new_notes = st.text_area("Notes", value=c.get("notes","") or "", height=68, key=f"cl_nt_{cid}")
-                st.markdown("**Contacts**")
-
-                # Parse existing contacts (stored as semicolon-separated)
-                ec_key = f"cl_contacts_{cid}"
-                if ec_key not in st.session_state:
-                    names  = [n.strip() for n in (c.get("contact","") or "").split(";") if n.strip()]
-                    emails = [e.strip() for e in (c.get("email","")   or "").split(";") if e.strip()]
-                    max_len = max(len(names), len(emails), 1)
-                    st.session_state[ec_key] = [
-                        {"name": names[i] if i < len(names) else "",
-                         "email": emails[i] if i < len(emails) else ""}
-                        for i in range(max_len)
-                    ]
-
-                for ci2, ct in enumerate(st.session_state[ec_key]):
-                    ec1, ec2, ec3 = st.columns([3, 3, 1])
-                    ct["name"]  = ec1.text_input("Name",  value=ct["name"],  key=f"ecn_{cid}_{ci2}",
-                                                  placeholder="Jane Smith",    label_visibility="visible" if ci2==0 else "collapsed")
-                    ct["email"] = ec2.text_input("Email", value=ct["email"], key=f"ece_{cid}_{ci2}",
-                                                  placeholder="jane@acme.com", label_visibility="visible" if ci2==0 else "collapsed")
-                    if ec3.button("✕", key=f"ecr_{cid}_{ci2}") and len(st.session_state[ec_key]) > 1:
-                        st.session_state[ec_key].pop(ci2); st.rerun()
-
-                if st.button("+ Add contact", key=f"ec_add_{cid}"):
-                    st.session_state[ec_key].append({"name":"","email":""}); st.rerun()
-
-                sv1, sv2 = st.columns(2)
-                if sv1.button("💾 Save", type="primary", key=f"cl_save_{cid}"):
-                    contacts  = st.session_state[ec_key]
-                    c_str = "; ".join(ct["name"]  for ct in contacts if ct["name"].strip())
-                    e_str = "; ".join(ct["email"] for ct in contacts if ct["email"].strip())
-                    update_client(cid, name=new_name.strip(), contact=c_str,
-                                  email=e_str, notes=new_notes.strip())
-                    _bust_cache()
-                    st.session_state.pop(ec_key, None)
-                    st.session_state[edit_key] = False
-                    st.success("✓ Saved.")
-                    st.rerun()
-                if sv2.button("Cancel", key=f"cl_cancel_{cid}"):
-                    st.session_state.pop(ec_key, None)
-                    st.session_state[edit_key] = False
-                    st.rerun()
-            else:
-                # View mode
-                contacts_raw = c.get("contact","") or "—"
-                emails_raw   = c.get("email","")   or "—"
-                col1, col2 = st.columns(2)
-                col1.caption(f"Contact: {contacts_raw}")
-                col2.caption(f"Email: {emails_raw}")
-                if c.get("notes"):
-                    st.caption(c["notes"])
-                if st.button("✏️ Edit client", key=f"cl_edit_btn_{cid}"):
-                    st.session_state[edit_key] = True
-                    st.rerun()
-
-            st.divider()
-            bc1, bc2 = st.columns(2)
-            if bc1.button("⬇️ Export history", key=f"exp_cl_{cid}"):
-                with st.spinner("Generating…"):
-                    data = export_client(cid)
-                st.download_button(f"⬇️ Download {c['name']}.xlsx", data,
-                                   f"client_{c['name']}_{date.today()}.xlsx",
-                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   key=f"dl_cl_{cid}")
-            with bc2.expander("🗑 Delete client"):
-                st.warning(f"Permanently deletes **{c['name']}**.")
-                dc_confirm = st.text_input("Type client name to confirm", key=f"dc_{cid}", placeholder=c['name'])
-                if st.button("Delete permanently", key=f"del_cl_{cid}"):
-                    if dc_confirm.strip().lower() == c["name"].strip().lower():
-                        try:
-                            delete_client(cid)
-                            _bust_cache()
-                            st.success(f"✓ {c['name']} deleted.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Delete failed: {e}")
-                            _log_app_error("clients", f"Client delete failed ({c['name']}): {e}", detail=traceback.format_exc())
-                    else:
-                        st.error("Name doesn't match.")
-
-
-def _client_create():
-    st.subheader("Add new client")
-
-    if "cc_ver" not in st.session_state:
-        st.session_state.cc_ver = 0
-    v = st.session_state.cc_ver
-
-    name  = st.text_input("Company name*", placeholder="e.g. Acme Logistics", key=f"cc_name_{v}")
-    notes = st.text_area("Notes", height=68, key=f"cc_notes_{v}")
-    st.markdown("**Contacts** *(add as many as needed)*")
-    if "cc_contacts" not in st.session_state:
-        st.session_state.cc_contacts = [{"name":"","email":""}]
-    for ci, ct in enumerate(st.session_state.cc_contacts):
-        cc1, cc2, cc3 = st.columns([3, 3, 1])
-        ct["name"]  = cc1.text_input("Name",  value=ct["name"],  key=f"ccn_{v}_{ci}", placeholder="Jane Smith",    label_visibility="visible" if ci == 0 else "collapsed")
-        ct["email"] = cc2.text_input("Email", value=ct["email"], key=f"cce_{v}_{ci}", placeholder="jane@acme.com", label_visibility="visible" if ci == 0 else "collapsed")
-        if cc3.button("✕", key=f"ccr_{v}_{ci}") and len(st.session_state.cc_contacts) > 1:
-            st.session_state.cc_contacts.pop(ci); st.rerun()
-    if st.button("+ Add contact", key=f"cc_addrow_{v}"):
-        st.session_state.cc_contacts.append({"name":"","email":""}); st.rerun()
-    st.divider()
-    if st.button("Add client", type="primary", use_container_width=True, key=f"cc_submit_{v}"):
-        if not name.strip():
-            st.error("Company name is required.")
-        else:
-            contacts = st.session_state.cc_contacts
-            contact_str = "; ".join(c["name"]  for c in contacts if c["name"].strip())
-            email_str   = "; ".join(c["email"] for c in contacts if c["email"].strip())
-            with st.spinner("Saving…"):
-                create_client_record(name.strip(), contact_str, email_str, notes.strip())
-            _bust_cache()
-            _saved_name = name.strip()
-            st.session_state.cc_contacts = [{"name":"","email":""}]
-            st.session_state.cc_ver += 1   # bump version → all widgets get fresh keys → fields clear
-            st.toast(f"✅ {_saved_name} added successfully.", icon="✅")
-            st.rerun()
-
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2224,6 +2732,8 @@ def _build_archived_productivity():
     emp_agg        = defaultdict(lambda: {"uph_sum": 0.0, "units": 0.0, "count": 0})
     month_dept_agg = defaultdict(lambda: defaultdict(lambda: {"uph_sum": 0.0, "uph_count": 0, "units": 0.0}))
     week_dept_agg  = defaultdict(lambda: defaultdict(lambda: {"units": 0.0, "uph_sum": 0.0, "uph_count": 0}))
+    # Per-employee daily UPH for rolling average
+    emp_daily      = defaultdict(list)  # eid -> [(date, uph)]
     # Per-employee weekly UPH for trend analysis
     emp_week_uph   = defaultdict(lambda: defaultdict(list))  # emp_id -> week_str -> [uph values]
 
@@ -2257,6 +2767,7 @@ def _build_archived_productivity():
                 emp_agg[eid]["uph_sum"] += uph
                 emp_agg[eid]["count"]   += 1
             emp_agg[eid]["units"] += units
+            emp_daily[eid].append((wd, uph))
             if month and uph > 0:
                 month_dept_agg[month][dept]["uph_sum"]   += uph
                 month_dept_agg[month][dept]["uph_count"] += 1
@@ -2300,6 +2811,7 @@ def _build_archived_productivity():
                     emp_agg[eid]["uph_sum"] += uph
                     emp_agg[eid]["count"]   += 1
                 emp_agg[eid]["units"] += units
+                emp_daily[eid].append((wd, uph))
                 if month and uph > 0:
                     month_dept_agg[month][dept]["uph_sum"]   += uph
                     month_dept_agg[month][dept]["uph_count"] += 1
@@ -2318,6 +2830,27 @@ def _build_archived_productivity():
             if len(batch) < page_size:
                 break
             offset += page_size
+
+    # Calculate employee rolling averages
+    employee_rolling_avg = []
+    for eid, dates_uph in emp_daily.items():
+        if not dates_uph:
+            continue
+        df = pd.DataFrame(dates_uph, columns=['Date', 'UPH'])
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.dropna(subset=['Date'])
+        df = df.sort_values('Date')
+        df['7DayRollingAvg'] = df['UPH'].rolling('7D', min_periods=1).mean()
+        df['14DayRollingAvg'] = df['UPH'].rolling('14D', min_periods=1).mean()
+        for _, row in df.iterrows():
+            employee_rolling_avg.append({
+                'Date': row['Date'].strftime('%Y-%m-%d'),
+                'Employee': emp_name.get(eid, eid),
+                'UPH': round(row['UPH'], 2) if pd.notna(row['UPH']) else None,
+                '7DayRollingAvg': round(row['7DayRollingAvg'], 2),
+                '14DayRollingAvg': round(row['14DayRollingAvg'], 2)
+            })
+    employee_rolling_avg.sort(key=lambda r: (r["Employee"], r["Date"]))
 
     if not emp_agg:
         st.session_state["_archived_loaded"] = False
@@ -2433,6 +2966,8 @@ def _build_archived_productivity():
         "dept_report":     dept_report,
         "dept_trends":     dept_trends,
         "weekly_summary":  weekly_summary,
+        "employee_rolling_avg": employee_rolling_avg,
+        "employee_risk": [],
         "trend_data":      trend_data,
         "pipeline_done":   True,
         "_archived_loaded": True,
@@ -2455,7 +2990,7 @@ def page_productivity():
         st.error(f"Productivity module error: {e}"); return
 
     # Nav buttons (no tabs — avoids running all content simultaneously)
-    PROD_OPTS = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📅 Weekly", "💰 Labor Cost"]
+    PROD_OPTS = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "💰 Labor Cost", "📋 Priority List", "🧑‍🏫 Coaching"]
     if "prod_view" not in st.session_state:
         st.session_state.prod_view = "🎯 Dept Goals"
 
@@ -2866,6 +3401,77 @@ def page_productivity():
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="dl_trends_prod")
 
+    # ── ROLLING AVG ───────────────────────────────────────────────────────────
+    elif chosen_prod == "📉 Rolling Avg":
+        if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
+            _build_archived_productivity()
+        rolling = st.session_state.get("employee_rolling_avg", [])
+        if not rolling: st.info("No rolling average data yet."); return
+        df_r = pd.DataFrame(rolling)
+
+        # Employee filter
+        employees = sorted(df_r["Employee"].unique()) if "Employee" in df_r.columns else []
+        if employees:
+            emp_sel = st.multiselect("Filter employees", employees, key="roll_emp_sel")
+            if emp_sel:
+                df_r = df_r[df_r["Employee"].isin(emp_sel)]
+
+        st.subheader("7-Day and 14-Day Rolling Average UPH per Employee")
+        st.caption("Each point shows the rolling average UPH for that employee on that date.")
+
+        # Select rolling period
+        roll_period = st.selectbox("Rolling Period", ["7-Day", "14-Day"], key="roll_period")
+
+        # Chart
+        try:
+            col_name = "7DayRollingAvg" if roll_period == "7-Day" else "14DayRollingAvg"
+            df_r_clean = df_r.dropna(subset=[col_name])
+            if not df_r_clean.empty:
+                st.line_chart(df_r_clean.pivot(index="Date", columns="Employee", values=col_name),
+                              use_container_width=True)
+        except Exception: pass
+        st.dataframe(df_r, use_container_width=True, hide_index=True)
+        _r_buf = io.BytesIO()
+        df_r.to_excel(_r_buf, index=False, engine="openpyxl")
+        _r_buf.seek(0)
+        st.download_button("⬇️ Download RollingAvg.xlsx", _r_buf.read(),
+                           f"RollingAvg_{date.today()}.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_rolling_prod")
+
+    # ── RISK ASSESSMENT ───────────────────────────────────────────────────────
+    elif chosen_prod == "⚠️ Risk Assessment":
+        if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
+            _build_archived_productivity()
+        risk = st.session_state.get("employee_risk", [])
+        if not risk: st.info("No risk assessment data yet."); return
+        df_risk = pd.DataFrame(risk)
+
+        # Filter by risk level
+        risk_levels = ["high", "medium", "low"]
+        sel_levels = st.multiselect("Filter by Risk Level", risk_levels, default=risk_levels, key="risk_level_sel")
+        if sel_levels:
+            df_risk = df_risk[df_risk["Risk Level"].isin(sel_levels)]
+
+        st.subheader("Employee Risk Assessment")
+        st.caption("Risk levels based on under goal streak, downward trend, and below department average.")
+
+        # Summary
+        level_counts = df_risk["Risk Level"].value_counts()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("High Risk", level_counts.get("high", 0))
+        col2.metric("Medium Risk", level_counts.get("medium", 0))
+        col3.metric("Low Risk", level_counts.get("low", 0))
+
+        st.dataframe(df_risk, use_container_width=True, hide_index=True)
+        _risk_buf = io.BytesIO()
+        df_risk.to_excel(_risk_buf, index=False, engine="openpyxl")
+        _risk_buf.seek(0)
+        st.download_button("⬇️ Download RiskAssessment.xlsx", _risk_buf.read(),
+                           f"RiskAssessment_{date.today()}.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_risk_prod")
+
     # ── WEEKLY ────────────────────────────────────────────────────────────────
     elif chosen_prod == "📅 Weekly":
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
@@ -3002,6 +3608,25 @@ def page_productivity():
         total_gain = sum(r["$ Impact"] for r in _lc_rows if r["$ Impact"] > 0)
         net_impact = total_loss + total_gain
 
+        # TOP 3 UNDERPERFORMERS — Personal & Actionable
+        st.subheader("⚠️ Top Cost Impact")
+        underperformers = [r for r in _lc_rows if r["$ Impact"] < 0]
+        underperformers.sort(key=lambda x: x["$ Impact"])  # Most negative first
+        top_3 = underperformers[:3]
+        
+        if top_3:
+            top_3_cost = sum(emp["$ Impact"] for emp in top_3)
+            st.error(f"🔴 Top 3 underperformers costing **${abs(top_3_cost):,.0f}** this week")
+            
+            for i, emp in enumerate(top_3, 1):
+                col1, col2, col3 = st.columns([2, 1.5, 1.5])
+                col1.write(f"**{i}. {emp['Employee']}** ({emp['Department']})")
+                col2.metric("UPH Gap", f"{emp['UPH Diff']:.1f}", "Below target")
+                col3.metric("Weekly Cost", f"${abs(emp['$ Impact']):,.0f}", "Lost productivity")
+
+        st.divider()
+        
+        # Summary metrics
         mc1, mc2, mc3 = st.columns(3)
         mc1.metric("Lost from Underperformance", f"-${abs(total_loss):,.0f}", delta_color="inverse")
         mc2.metric("Gained from Overperformance", f"+${total_gain:,.0f}")
@@ -3037,6 +3662,537 @@ def page_productivity():
         df_dept = pd.DataFrame(dept_summary.values())
         df_dept["Total $ Impact"] = df_dept["Total $ Impact"].round(2)
         st.dataframe(df_dept, use_container_width=True, hide_index=True)
+
+    # ── PRIORITY LIST ──────────────────────────────────────────────────────────────
+    elif chosen_prod == "📋 Priority List":
+        st.subheader("📋 Priority List")
+        st.caption("Employees below goal ranked by risk (combines trend + streak + variance).")
+
+        if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
+            _build_archived_productivity()
+
+        gs = st.session_state.get("goal_status", [])
+        history = st.session_state.get("history", [])
+        if not gs:
+            st.info("No productivity data. Import data first.")
+            return
+
+        # Filter for below_goal employees
+        below_goal = [r for r in gs if r.get("goal_status") == "below_goal"]
+        if not below_goal:
+            st.success("✅ All employees are meeting their goals!")
+            return
+
+        # Calculate risk for all below-goal employees
+        def _calc_priority_risk_level(emp, history):
+            """Calculate performance risk level."""
+            risk_score = 0.0
+            details = {"trend_score": 0, "streak_score": 0, "variance_score": 0}
+            
+            trend = emp.get("trend", "insufficient_data")
+            if trend == "down":
+                risk_score += 4
+                details["trend_score"] = 4
+            elif trend == "flat":
+                risk_score += 1
+                details["trend_score"] = 1
+            elif trend == "up":
+                risk_score -= 2
+                details["trend_score"] = -2
+            
+            emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+            target_uph = emp.get("Target UPH", "—")
+            under_goal_streak = 0
+            
+            if history and target_uph != "—":
+                try:
+                    target = float(target_uph)
+                    emp_history = [r for r in history if str(r.get("EmployeeID", r.get("Employee Name", ""))) == emp_id]
+                    if emp_history:
+                        sorted_hist = sorted(emp_history, key=lambda r: (r.get("Date", "") or r.get("Week", "")))
+                        for r in reversed(sorted_hist):
+                            try:
+                                uph_val = float(r.get("UPH", 0) or 0)
+                                if uph_val < target:
+                                    under_goal_streak += 1
+                                else:
+                                    break
+                            except (ValueError, TypeError):
+                                break
+                except (ValueError, TypeError):
+                    pass
+            
+            if under_goal_streak >= 7:
+                risk_score += 5
+                details["streak_score"] = 5
+            elif under_goal_streak >= 5:
+                risk_score += 4
+                details["streak_score"] = 4
+            elif under_goal_streak >= 3:
+                risk_score += 2.5
+                details["streak_score"] = 2.5
+            elif under_goal_streak >= 1:
+                risk_score += 0.5
+                details["streak_score"] = 0.5
+            
+            uph_values = []
+            if history:
+                emp_history = [r for r in history if str(r.get("EmployeeID", r.get("Employee Name", ""))) == emp_id]
+                for r in emp_history:
+                    try:
+                        uph_val = float(r.get("UPH", 0) or 0)
+                        if uph_val > 0:
+                            uph_values.append(uph_val)
+                    except (ValueError, TypeError):
+                        pass
+            
+            if len(uph_values) >= 3:
+                avg_uph = sum(uph_values) / len(uph_values)
+                variance = sum((x - avg_uph) ** 2 for x in uph_values) / len(uph_values)
+                std_dev = variance ** 0.5
+                coeff_variation = (std_dev / avg_uph * 100) if avg_uph > 0 else 0
+                
+                if coeff_variation > 30:
+                    risk_score += 3
+                    details["variance_score"] = 3
+                elif coeff_variation > 20:
+                    risk_score += 1.5
+                    details["variance_score"] = 1.5
+                elif coeff_variation > 10:
+                    risk_score += 0.5
+                    details["variance_score"] = 0.5
+                
+                details["variance_pct"] = round(coeff_variation, 1)
+            
+            details["under_goal_streak"] = under_goal_streak
+            details["total_score"] = round(risk_score, 1)
+            
+            if risk_score >= 7:
+                return "🔴 High", risk_score, details
+            elif risk_score >= 4:
+                return "🟡 Medium", risk_score, details
+            else:
+                return "🟢 Low", risk_score, details
+
+        # Score all below-goal employees
+        priority_list = []
+        for emp in below_goal:
+            emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+            risk_level, risk_score, risk_details = _calc_priority_risk_level(emp, history)
+            priority_list.append({
+                "name": emp.get("Employee", emp.get("Employee Name", "Unknown")),
+                "department": emp.get("Department", ""),
+                "emp_id": emp_id,
+                "avg_uph": round(float(emp.get("Average UPH", 0) or 0), 2),
+                "target_uph": emp.get("Target UPH", "—"),
+                "trend": emp.get("trend", "—"),
+                "change_pct": emp.get("change_pct", 0.0),
+                "risk_level": risk_level,
+                "risk_score": risk_score,
+                "risk_details": risk_details,
+            })
+
+        # Sort by risk score (highest first)
+        priority_list.sort(key=lambda x: x["risk_score"], reverse=True)
+
+        # Summary
+        high_risk = len([r for r in priority_list if r["risk_level"] == "🔴 High"])
+        med_risk = len([r for r in priority_list if r["risk_level"] == "🟡 Medium"])
+        low_risk = len([r for r in priority_list if r["risk_level"] == "🟢 Low"])
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Below Goal", len(priority_list))
+        col2.metric("🔴 High Risk", high_risk)
+        col3.metric("🟡 Medium Risk", med_risk)
+        col4.metric("🟢 Low Risk", low_risk)
+
+        st.divider()
+
+        # Display table
+        table_data = []
+        for r in priority_list:
+            table_data.append({
+                "Risk": r["risk_level"],
+                "Name": r["name"],
+                "Department": r["department"],
+                "Current": r["avg_uph"],
+                "Target": r["target_uph"],
+                "Trend": r["trend"],
+                "Streak": f"{r['risk_details']['under_goal_streak']}d",
+                "Score": r["risk_score"],
+            })
+
+        df_prio = pd.DataFrame(table_data)
+        
+        def _color_risk(val):
+            if "🔴" in str(val):
+                return "background-color: #ffcccc; color: #8b0000"
+            elif "🟡" in str(val):
+                return "background-color: #fff9e6; color: #ff6600"
+            elif "🟢" in str(val):
+                return "background-color: #e6ffe6; color: #008000"
+            return ""
+
+        styled = df_prio.style.applymap(_color_risk, subset=["Risk"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+        # Download
+        csv_buf = df_prio.to_csv(index=False)
+        st.download_button("⬇️ Download priority list", csv_buf, f"priority_list_{date.today()}.csv", "text/csv")
+
+    # ── COACHING CORNER ───────────────────────────────────────────────────────────
+    elif chosen_prod == "🧑‍🏫 Coaching":
+        st.subheader("🧑‍🏫 Who Needs Coaching?")
+        st.caption("Top 3 employees who need performance coaching based on trend + goal status + context.")
+
+        # Define available context tags
+        CONTEXT_TAGS = [
+            "New employee",
+            "Cross-training",
+            "Equipment issues",
+            "Shift change",
+            "Short staffed",
+        ]
+
+        if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
+            _build_archived_productivity()
+
+        gs = st.session_state.get("goal_status", [])
+        history = st.session_state.get("history", [])
+        if not gs:
+            st.info("No productivity data. Import data first.")
+            return
+
+        # Filter for below_goal employees
+        coaching_candidates = [r for r in gs if r.get("goal_status") == "below_goal"]
+        if not coaching_candidates:
+            st.success("✅ All employees are meeting their goals! Great work!")
+            return
+
+        # Load active flags and their context tags
+        active_flags_data = get_active_flags()
+
+        # Calculate coaching score for each candidate
+
+
+        def _calc_coaching_score(emp, context_tags):
+            """Score an employee for coaching need. Higher = more urgent.
+            Context tags reduce urgency (e.g., new employees need coaching but lower priority).
+            Also returns whether they meet strict auto-flag criteria."""
+            score = 0.0
+            reasons = []
+
+            # Factor 1: How far below goal
+            target = emp.get("Target UPH") or 0
+            avg_uph = emp.get("Average UPH") or 0
+            under_goal = False
+            if target and target != "—":
+                try:
+                    target = float(target)
+                    avg_uph = float(avg_uph)
+                    pct_below = ((target - avg_uph) / target * 100) if target > 0 else 0
+                    score += abs(pct_below) * 0.5  # 0.5 points per percent below
+                    reasons.append(f"{pct_below:.1f}% below target")
+                    under_goal = True
+                except (ValueError, TypeError):
+                    pass
+
+            # Factor 2: Negative trend (direction + magnitude)
+            trend = emp.get("trend", "insufficient_data")
+            change_pct = emp.get("change_pct", 0.0)
+            trending_down = False
+            try:
+                change_pct = float(change_pct)
+            except (ValueError, TypeError):
+                change_pct = 0.0
+
+            if trend == "down":
+                score += 5  # Declining is a red flag
+                reasons.append(f"Declining trend ({change_pct:+.1f}%)")
+                trending_down = True
+            elif trend == "flat":
+                score += 2  # Flat is concerning when below goal
+                if change_pct <= -3 or change_pct >= 3:
+                    reasons.append(f"Flat trend ({change_pct:+.1f}%)")
+                else:
+                    reasons.append("Flat trend")
+            elif change_pct < 0:
+                score += 1  # Slight decline
+                reasons.append(f"Slight decline ({change_pct:+.1f}%)")
+
+            # Factor 3: Streak (consecutive entries below their average)
+            emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+            streak = 0
+            emp_avg = avg_uph
+            if history and emp_avg:
+                emp_history = [r for r in history
+                               if str(r.get("EmployeeID", r.get("Employee Name", ""))) == emp_id]
+                if emp_history:
+                    # Sort by date/week if available
+                    sorted_hist = sorted(emp_history,
+                                        key=lambda r: (r.get("Date", "") or r.get("Week", "")))
+                    # Count consecutive entries below the employee's average
+                    for r in reversed(sorted_hist):
+                        try:
+                            uph_val = float(r.get("UPH", 0) or 0)
+                            if uph_val < emp_avg:
+                                streak += 1
+                            else:
+                                break
+                        except (ValueError, TypeError):
+                            break
+                    if streak >= 3:
+                        score += streak * 0.3
+                        reasons.append(f"{streak} consecutive entries below avg")
+
+            # Strict auto-flag criteria: under goal AND trending down AND multi-day streak
+            meets_auto_flag_criteria = (under_goal and trending_down and streak >= 3)
+
+            # Factor 4: Context modifier — reduce urgency based on situational factors
+            context_impact = []
+            if "New employee" in context_tags:
+                score *= 0.5  # New employees are less urgent
+                context_impact.append("(New — expect ramp-up period)")
+            if "Cross-training" in context_tags:
+                score *= 0.6  # Cross-training reduces urgency
+                context_impact.append("(In cross-training)")
+            if "Equipment issues" in context_tags:
+                score *= 0.4  # Equipment issues are not coaching-related
+                context_impact.append("(Address equipment first)")
+            if "Shift change" in context_tags:
+                score *= 0.5  # Shift changes take time to adjust
+                context_impact.append("(Recent shift change)")
+            if "Short staffed" in context_tags:
+                score *= 0.7  # Staffing is a workload not coaching issue
+                context_impact.append("(Team capacity issue)")
+
+            return score, reasons, context_impact, meets_auto_flag_criteria
+
+        # Score and rank all candidates
+        scored = []
+        for emp in coaching_candidates:
+            emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+            # Get context tags for this employee from their flag
+            emp_context = []
+            if emp_id in active_flags_data:
+                flag_info = active_flags_data[emp_id]
+                emp_context = flag_info.get("context_tags", [])
+
+            score, reasons, context_impact, meets_auto_flag_criteria = _calc_coaching_score(emp, emp_context)
+            risk_level, risk_score, risk_details = _calc_risk_level(emp, history)
+            
+            emp_name = emp.get("Employee", emp.get("Employee Name", "Unknown"))
+            scored.append({
+                "employee": emp_name,
+                "department": emp.get("Department", ""),
+                "emp_id": emp_id,
+                "avg_uph": round(float(emp.get("Average UPH", 0) or 0), 2),
+                "target_uph": emp.get("Target UPH", "—"),
+                "trend": emp.get("trend", "—"),
+                "change_pct": emp.get("change_pct", 0.0),
+                "score": score,
+                "reasons": reasons,
+                "context_tags": emp_context,
+                "context_impact": context_impact,
+                "meets_auto_flag_criteria": meets_auto_flag_criteria,
+                "risk_level": risk_level,
+                "risk_score": risk_score,
+                "risk_details": risk_details,
+            })
+
+        # Sort by score (descending) and take top 3
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        top_3 = scored[:3]
+
+        if not top_3:
+            st.success("✅ All employees are meeting their goals!")
+            return
+
+        # Display each in an expandable card
+        for idx, emp in enumerate(top_3, 1):
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([2, 1, 1])
+                col1.markdown(f"### #{idx} — {emp['employee']}")
+                col2.markdown(f"**{emp['department']}**")
+
+                # Status badge
+                if emp['context_tags']:
+                    status_text = "Under goal BUT " + ", ".join(emp['context_tags']).lower()
+                    col3.markdown(f"*{status_text}*")
+                else:
+                    col3.markdown("⚠️ **Needs coaching**")
+
+                st.divider()
+
+                # Current performance
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("Current UPH", f"{emp['avg_uph']}", delta=f"{emp['change_pct']:+.1f}%")
+                mc2.metric("Target UPH", emp['target_uph'] if emp['target_uph'] != "—" else "—")
+                mc3.metric("Trend", emp['trend'].replace("_", " ").title())
+                mc4.markdown(f"<div style='text-align: center; padding: 10px;'><div style='font-size: 2em;'>{emp['risk_level'].split()[0]}</div><div style='font-size: 0.8em;'>Risk</div></div>", unsafe_allow_html=True)
+
+                # Risk breakdown (collapsed)
+                with st.expander("📊 Risk breakdown", expanded=False):
+                    rd = emp['risk_details']
+                    rc1, rc2, rc3 = st.columns(3)
+                    rc1.metric("Trend score", rd['trend_score'])
+                    rc2.metric("Under-goal streak", f"{rd['under_goal_streak']} days")
+                    rc3.metric("Variance", f"{rd.get('variance_pct', 0):.1f}%")
+                    st.caption(f"Total risk score: {rd['total_score']}")
+
+                # Context tags display
+                if emp['context_tags']:
+                    st.markdown("#### Context")
+                    tag_cols = st.columns(len(emp['context_tags']))
+                    for tag_col, tag in zip(tag_cols, emp['context_tags']):
+                        tag_col.markdown(f"🏷️ **{tag}**", help="This context reduces coaching priority")
+
+                # Why they need coaching
+                st.markdown("#### Performance Issues")
+                for reason in emp["reasons"]:
+                    st.markdown(f"• {reason}")
+
+                # Context impact notes
+                if emp['context_impact']:
+                    st.markdown("#### Context Notes")
+                    for note in emp['context_impact']:
+                        st.info(note, icon="📌")
+
+                # Suggested actions based on trend and gap
+                st.markdown("#### Suggested Actions")
+                actions = []
+
+                # Equipment-specific action
+                if "Equipment issues" in emp['context_tags']:
+                    actions.append("**Fix the equipment first** — Resolve tool/system issues before coaching on performance.")
+
+                # New employee specific action
+                if "New employee" in emp['context_tags']:
+                    actions.append("**Structured onboarding check** — Ensure they have proper training and mentoring.")
+
+                # Cross-training specific action
+                if "Cross-training" in emp['context_tags']:
+                    actions.append("**Support the transition** — Provide extra mentoring during skill-building phase.")
+
+                # Shift change specific action
+                if "Shift change" in emp['context_tags']:
+                    actions.append("**Allow adjustment time** — Follow up in 2 weeks to see if new rhythm improves performance.")
+
+                # Staffing specific action
+                if "Short staffed" in emp['context_tags']:
+                    actions.append("**Increase team capacity** — Hiring or task redistribution may solve this faster than coaching.")
+
+                # Trend-based actions (only if not covered by context)
+                if not any(tag in emp['context_tags'] for tag in ["Equipment issues", "Short staffed"]):
+                    if emp["trend"] == "down":
+                        actions.append("**Identify obstacles** — Ask what's changed. Look for workload spikes or personal issues.")
+                    elif emp["trend"] == "flat":
+                        actions.append("**Break the plateau** — Try new training, task rotation, or peer mentoring.")
+
+                # Gap-based actions
+                try:
+                    target = float(emp["target_uph"]) if emp["target_uph"] != "—" else 0
+                    if target > 0:
+                        gap = target - emp["avg_uph"]
+                        if gap > 5 and "New employee" not in emp['context_tags']:
+                            actions.append("**Major gap** — Structured improvement plan with weekly check-ins.")
+                        elif gap > 2 and "New employee" not in emp['context_tags']:
+                            actions.append("**1-on-1 coaching** — Discuss goals and what support they need.")
+                except (ValueError, TypeError):
+                    pass
+
+                # Default actions
+                if not actions:
+                    actions.append("**1-on-1 conversation** — Discuss performance, barriers, and support.")
+
+                for action in actions:
+                    st.markdown(f"→ {action}")
+
+                st.divider()
+
+                # Context tagging section
+                st.markdown("#### Add Context")
+                st.caption("Select tags that explain underperformance (coaching urgency will adjust):")
+                selected_context = st.multiselect(
+                    "Context tags:",
+                    CONTEXT_TAGS,
+                    default=emp['context_tags'],
+                    key=f"context_{emp['emp_id']}",
+                    label_visibility="collapsed",
+                )
+
+                # Save context tags if changed
+                if selected_context != emp['context_tags']:
+                    try:
+                        flags = get_active_flags()
+                        if emp['emp_id'] in flags:
+                            flags[emp['emp_id']]["context_tags"] = selected_context
+                            # Save back to goals
+                            goals_data = load_goals()
+                            if emp['emp_id'] in goals_data["flagged_employees"]:
+                                goals_data["flagged_employees"][emp['emp_id']]["context_tags"] = selected_context
+                                save_goals(goals_data)
+                            st.success("✓ Context tags updated")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Error saving context: {e}")
+
+                # Add quick coaching note button
+                note_text = st.text_input(
+                    f"Quick note for {emp['employee']}:",
+                    key=f"coach_note_{emp['emp_id']}",
+                    placeholder="e.g. 'Discussed new tools, plan to follow up Friday'",
+                )
+                if note_text:
+                    if st.button(f"Log note", key=f"coach_save_{emp['emp_id']}", use_container_width=True):
+                        try:
+                            add_note(emp['emp_id'], note_text)
+                            st.success(f"✅ Note saved for {emp['employee']}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error saving note: {e}")
+
+                # Flag employee
+                is_flagged = emp['emp_id'] in active_flags_data
+                
+                # Show auto-flag criteria status
+                if not is_flagged:
+                    if emp['meets_auto_flag_criteria']:
+                        st.success("✅ Meets auto-flag criteria: under goal + trending down + multi-day streak", icon="✅")
+                    else:
+                        # Explain what's missing
+                        missing = []
+                        if emp['trend'] != "down":
+                            missing.append("not trending down")
+                        if not any(r for r in emp['reasons'] if "consecutive" in r):
+                            missing.append("no multi-day streak")
+                        missing_text = " + ".join(missing) if missing else "one or more criteria"
+                        st.warning(f"⚠️ Doesn't meet auto-flag criteria ({missing_text}). Coaching may still help.", icon="⚠️")
+
+                flag_col1, flag_col2 = st.columns([1, 1])
+                if is_flagged:
+                    if flag_col1.button(f"🚩 Unflag", key=f"unflag_{emp['emp_id']}", use_container_width=True):
+                        try:
+                            unflag_employee(emp['emp_id'])
+                            st.success(f"✓ {emp['employee']} unflagged")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error unflagging: {e}")
+                else:
+                    if flag_col1.button(f"🚩 Flag for tracking", key=f"flag_{emp['emp_id']}", use_container_width=True):
+                        try:
+                            flag_employee(emp['emp_id'], emp['employee'], emp['department'],
+                                         reason="Coaching priority: " + ", ".join(emp["reasons"][:2]))
+                            # Save context tags with the flag
+                            goals_data = load_goals()
+                            if emp['emp_id'] in goals_data["flagged_employees"]:
+                                goals_data["flagged_employees"][emp['emp_id']]["context_tags"] = selected_context
+                                save_goals(goals_data)
+                            st.success(f"✓ {emp['employee']} flagged for tracking")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error flagging: {e}")
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3130,6 +4286,58 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
     on_g  = sum(1 for r in scope_gs if r["goal_status"] == "on_goal")
     below = sum(1 for r in scope_gs if r["goal_status"] == "below_goal")
 
+    # Calculate risk levels for email (quick version)
+    def _email_risk_level(emp, history_all):
+        """Quick risk calculation for email."""
+        risk_score = 0.0
+        trend = emp.get("trend", "insufficient_data")
+        if trend == "down":
+            risk_score += 4
+        elif trend == "flat":
+            risk_score += 1
+        elif trend == "up":
+            risk_score -= 2
+        
+        # Approximation: use goal_status to estimate streak
+        emp_id = emp.get("EmployeeID", "")
+        if history_all and emp.get("Target UPH") != "—":
+            try:
+                target = float(emp.get("Target UPH"))
+                emp_hist = [r for r in history_all if r.get("emp_id") == emp_id]
+                streak = 0
+                for r in reversed(emp_hist[-10:]):  # Check last 10 entries only
+                    try:
+                        uph = float(r.get("uph") or 0)
+                        if uph < target:
+                            streak += 1
+                        else:
+                            break
+                    except:
+                        break
+                if streak >= 3:
+                    risk_score += 3
+            except:
+                pass
+        
+        if risk_score >= 7:
+            return "🔴 High"
+        elif risk_score >= 4:
+            return "🟡 Medium"
+        else:
+            return "🟢 Low"
+
+    # Get recent history for risk calculation in email
+    _email_hist = []
+    try:
+        _sb = _get_db_client()
+        from database import _tq as _tq_hist
+        from datetime import timedelta
+        _recent = (d_end - timedelta(days=30)).isoformat()
+        _r = _tq_hist(_sb.table("uph_history").select("emp_id, uph, work_date").gte("work_date", _recent)).execute()
+        _email_hist = _r.data or []
+    except:
+        pass
+
     # Top 3 performers
     _top3 = scope_gs[:3]
     _top3_html = ""
@@ -3139,20 +4347,75 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
             _top3_html += f"<li><strong>{t['Employee Name']}</strong> ({t['Department']}) — {t['Average UPH']} UPH</li>"
         _top3_html += "</ol>"
 
-    # Bottom 3 performers (with targets)
+    # Bottom 3 performers (with targets & risk)
     _bottom = [r for r in reversed(scope_gs) if r["goal_status"] == "below_goal"][:3]
     _bottom_html = ""
     if _bottom:
-        _bottom_html = "<h3>⚠️ Needs Coaching</h3><ol>"
+        _bottom_html = "<h3>⚠️ Needs Coaching</h3><table style='width:100%; border-collapse: collapse;'>"
+        _bottom_html += "<tr style='background: #f5f5f5;'><th style='padding: 8px; text-align: left; border: 1px solid #ddd;'>Employee</th><th style='text-align: center; border: 1px solid #ddd;'>Risk</th><th style='text-align: right; border: 1px solid #ddd;'>UPH</th></tr>"
         for b in _bottom:
+            _risk = _email_risk_level(b, _email_hist)
             _tgt = b.get('Target UPH', '—')
             _diff = ""
             try:
-                _diff = f" ({round(float(b['Average UPH']) - float(_tgt), 1)} vs target)"
+                _diff = f" (vs {_tgt})"
             except (ValueError, TypeError):
                 pass
-            _bottom_html += f"<li><strong>{b['Employee Name']}</strong> ({b['Department']}) — {b['Average UPH']} UPH{_diff}</li>"
-        _bottom_html += "</ol>"
+            _bottom_html += f"<tr><td style='padding: 8px; border: 1px solid #ddd;'><strong>{b['Employee Name']}</strong><br/><span style='font-size: 0.9em; color: #666;'>{b['Department']}</span></td><td style='text-align: center; border: 1px solid #ddd;'>{_risk}</td><td style='text-align: right; border: 1px solid #ddd;'>{b['Average UPH']}{_diff}</td></tr>"
+        _bottom_html += "</table>"
+
+    # ACTION SECTION 1: TODAY's critical attention (🔴 High risk)
+    _critical_html = ""
+    _critical_list = []
+    for r in scope_gs:
+        if r["goal_status"] == "below_goal":
+            _risk = _email_risk_level(r, _email_hist)
+            if "🔴" in _risk:
+                _critical_list.append(r)
+    
+    if _critical_list:
+        _critical_html = "<h3 style='color: #8b0000;'>🔴 PRIORITY: Needs Attention TODAY</h3>"
+        _critical_html += "<div style='background: #ffe6e6; border-left: 4px solid #8b0000; padding: 12px; margin-bottom: 16px;'>"
+        for c in _critical_list[:3]:  # Top 3 critical
+            _crit_risk = _email_risk_level(c, _email_hist)
+            _action = ""
+            try:
+                _cur = float(c.get("Average UPH") or 0)
+                _tgt = float(c.get("Target UPH") or 0)
+                _gap = _tgt - _cur
+                if _gap > 5:
+                    _action = "👉 <strong>Action:</strong> Schedule 1-on-1. Discuss specific goals & support needed."
+                else:
+                    _action = "👉 <strong>Action:</strong> Check in on any blockers or issues."
+            except:
+                _action = "👉 <strong>Action:</strong> Check in immediately."
+            
+            _critical_html += f"<div style='margin-bottom: 12px;'><strong>{c['Employee Name']}</strong> ({c['Department']}) — {c['Average UPH']} UPH<br/>{_action}</div>"
+        _critical_html += "</div>"
+
+    # ACTION SECTION 2: Who improved this week (trend = up)
+    _improved_html = ""
+    _improved_list = [r for r in scope_gs if r.get("trend") == "up" and r.get("change_pct", 0) > 0]
+    if _improved_list:
+        _improved_html = "<h3 style='color: #008000;'>🟢 Recognition: Who Improved This Week</h3>"
+        _improved_html += "<div style='background: #e6ffe6; border-left: 4px solid #008000; padding: 12px; margin-bottom: 16px;'>"
+        for imp in _improved_list[:3]:  # Top 3 improvers
+            _pct = imp.get("change_pct", 0)
+            _improved_html += f"<div style='margin-bottom: 8px;'><strong>✓ {imp['Employee Name']}</strong> ({imp['Department']}) — <span style='color: green;'>+{_pct:.1f}%</span> trending up<br/>👉 <strong>Action:</strong> Recognize this improvement. Ask what's working & how to sustain it.</div>"
+        _improved_html += "</div>"
+
+    # ACTION SECTION 3: Who is trending down (early warning)
+    _trending_down_html = ""
+    _trending_down = [r for r in scope_gs if r.get("trend") == "down" and r.get("goal_status") != "no_goal"]
+    if _trending_down:
+        _trending_down_html = "<h3 style='color: #ff6600;'>⚠️ Early Warning: Trending Down</h3>"
+        _trending_down_html += "<div style='background: #fff9e6; border-left: 4px solid #ff6600; padding: 12px; margin-bottom: 16px;'>"
+        _trending_down_html += f"<p><strong>{len(_trending_down)} employee(s) showing declining performance:</strong></p>"
+        for td in _trending_down[:5]:  # Show up to 5
+            _pct = td.get("change_pct", 0)
+            _status = "at risk" if td.get("goal_status") == "below_goal" else "still on track"
+            _trending_down_html += f"<div style='margin-bottom: 8px;'><strong>• {td['Employee Name']}</strong> ({td['Department']}) — {_pct:.1f}% down ({_status})<br/>👉 <strong>Action:</strong> Proactive check-in. Address trend early before it worsens.</div>"
+        _trending_down_html += "</div>"
 
     # Average UPH across all employees
     _avg_all = round(sum(r["Average UPH"] for r in scope_gs) / len(scope_gs), 1) if scope_gs else 0
@@ -3162,9 +4425,14 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
              f"Avg UPH: <strong>{_avg_all}</strong> · "
              f"<strong style='color:green'>{on_g} on goal</strong> · "
              f"<strong style='color:red'>{below} below goal</strong></p>"
+             f"<hr/>"
              f"{_top3_html}"
+             f"{_critical_html}"
+             f"{_improved_html}"
+             f"{_trending_down_html}"
              f"{_bottom_html}"
-             f"<p>See the attached Excel report for full details.</p>")
+             f"<hr/>"
+             f"<p style='font-size: 0.9em; color: #666;'>See the attached Excel report for full details and department breakdown.</p>")
 
     xl_data = None
     try:
@@ -3366,14 +4634,27 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
             if not cfg2.get("username"):
                 st.warning("Save your email address first.")
             else:
-                with st.spinner("Sending test…"):
+                with st.spinner("Sending test email to yourself…"):
                     ok, err = send_report_email(
                         [cfg2["username"]],
                         "Productivity Planner — Test Email",
                         "<p>Your email configuration is working correctly! 🎉</p>",
                     )
-                if ok: st.success(f"✓ Test email sent to {cfg2['username']}")
-                else:  st.error(f"Failed: {err}")
+                if ok:
+                    st.success(f"✓ Test email sent to {cfg2['username']}")
+                    st.caption("💡 If you don't see it in 1-2 minutes, check your spam folder.")
+                else:
+                    st.error(f"❌ Send failed")
+                    # Parse error to provide actionable help
+                    err_lower = str(err).lower()
+                    if "authentication" in err_lower or "535" in err_lower:
+                        st.warning("**Incorrect email or app password.** Review your SMTP settings and make sure you're using an app-specific password (not your email password).")
+                    elif "timeout" in err_lower or "connection" in err_lower or "refused" in err_lower:
+                        st.warning("**Connection failed.** Check that the server and port are correct. Try port 465 (SSL) in Advanced settings instead.")
+                    elif "certificate" in err_lower or "tls" in err_lower:
+                        st.warning("**Encryption error.** Try unchecking 'Use TLS encryption' in Advanced settings, or switch to port 465 (SSL).")
+                    else:
+                        st.caption(f"Technical details: {err}")
 
     # ── Recipients ────────────────────────────────────────────────────────────
     with tab_recip:
@@ -3428,6 +4709,11 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
     # ── Schedules ─────────────────────────────────────────────────────────────
     with tab_sched:
         st.subheader("Automated send schedules")
+        # Show current timezone setting
+        from settings import Settings as _SchedTzS
+        _sched_tz = _SchedTzS().get("timezone", "")
+        _tz_display = _sched_tz if _sched_tz else "(Server local time)"
+        st.caption(f"📍 Timezone: {_tz_display}")
 
         _all_recips = get_recipients()
         _recip_labels = [f"{r['name']} <{r['email']}>" for r in _all_recips]
@@ -3450,7 +4736,10 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                     if assigned:
                         st.caption(f"Recipients: {', '.join(assigned)}")
                     else:
-                        st.caption("No recipients assigned — all recipients will receive this.")
+                        if not _all_recips:
+                            st.warning("⚠️ No recipients configured. Add them in the Recipients tab before this schedule will send.")
+                        else:
+                            st.caption("No recipients assigned — all recipients will receive this.")
                     # Edit recipients inline
                     cur_labels = [lbl for lbl, em in _recip_emails.items() if em in assigned]
                     new_labels = st.multiselect("Recipients for this schedule",
@@ -3464,10 +4753,11 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                         st.toast("✓ Recipients updated", icon="✅")
                         st.rerun()
                     if sc2.button("▶ Test now", key=f"sched_test_{s['name']}", use_container_width=True):
+                        st.info(f"ℹ️ This will send a **REAL report** to {len(assigned or _all_recips)} recipient(s). Use this to verify the schedule works before relying on it.")
                         _test_to = assigned or [r["email"] for r in _all_recips]
                         if not _test_to:
                             st.warning("No recipients to send to.")
-                        else:
+                        elif st.button("✓ Confirm: Send test report", key=f"confirm_test_{s['name']}"):
                             _gs  = st.session_state.get("goal_status", [])
                             _tgts = _cached_targets()
                             _depts = sorted({r.get("Department","") for r in _gs if r.get("Department")})
@@ -3514,6 +4804,11 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                 _sch_start = _sch_end = None
 
             srecips = st.multiselect("Recipients", _recip_labels)
+            if not srecips and _recip_labels:
+                st.warning("⚠️ No recipients selected. This schedule will use all global recipients when it runs.")
+            elif not srecips and not _recip_labels:
+                st.warning("⚠️ **No recipients available.** Add recipients in the Recipients tab before creating this schedule.")
+            
             st.caption("**Send on these days**")
             daily   = st.checkbox("Every day")
             if not daily:
@@ -3738,6 +5033,22 @@ def page_settings():
             _save_val = "" if _sel_tz.startswith("(") else _sel_tz
             _tzs.set("timezone", _save_val)
             st.success(f"✓ Timezone set to '{_save_val or 'server local time'}'.")
+
+        st.divider()
+        st.subheader("💰 Labor Cost Settings")
+        st.caption("Used to calculate the financial impact of performance gaps.")
+        _cur_wage = _tzs.get("avg_hourly_wage", 18.0)
+        _wage_input = st.number_input(
+            "Average hourly wage ($)",
+            min_value=0.0,
+            value=_cur_wage,
+            step=1.0,
+            key="settings_hourly_wage",
+            help="Used to calculate labor cost impact across all reports and dashboards"
+        )
+        if st.button("Save wage settings", key="save_wage"):
+            _tzs.set("avg_hourly_wage", float(_wage_input))
+            st.success(f"✓ Average hourly wage set to ${_wage_input:.2f}")
 
         st.divider()
         st.info("Shift comparison and attendance tracking — coming in a future release.")
@@ -4312,16 +5623,21 @@ def _check_session_timeout():
 def _verify_checkout_and_activate():
     """After Stripe checkout, verify payment and create subscription in DB."""
     import requests as _req
-    from database import get_tenant_id, get_client, _get_config, PLAN_LIMITS
+    from database import get_tenant_id, get_client, _get_config, PLAN_LIMITS, get_user_id
     _debug = []
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     tid = get_tenant_id()
+    uid = get_user_id()
     if not stripe_key:
         _debug.append("no STRIPE_SECRET_KEY")
         st.session_state["_verify_debug"] = _debug
         return False
     if not tid:
         _debug.append("no tenant_id")
+        st.session_state["_verify_debug"] = _debug
+        return False
+    if not uid:
+        _debug.append("no user_id")
         st.session_state["_verify_debug"] = _debug
         return False
 
@@ -4381,6 +5697,7 @@ def _verify_checkout_and_activate():
     # Upsert subscription in our DB
     try:
         _sub_row = {
+            "user_id": uid,
             "tenant_id": tid,
             "stripe_customer_id": cust_id,
             "stripe_subscription_id": stripe_sub["id"],
@@ -4638,7 +5955,10 @@ def main():
             _log_app_error("email", f"Schedule check error: {_eml_err}", detail=traceback.format_exc())
 
     page = render_sidebar()
-    if   page.startswith("📁"): page_import()
+    if   page.startswith("👔"): page_supervisor()
+
+    elif page.startswith("�"): page_dashboard()
+    elif page.startswith("�📁"): page_import()
     elif page.startswith("👥"): page_employees()
     elif page.startswith("📈"): page_productivity()
     elif page.startswith("📧"): page_email()

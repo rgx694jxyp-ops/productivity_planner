@@ -9,6 +9,7 @@ See SETUP.md for configuration instructions.
 """
 
 import json
+import math
 import os
 from datetime import date, datetime
 from typing import Optional
@@ -108,11 +109,11 @@ def get_client():
         )
 
 
-def get_tenant_id() -> str:
-    """Return the current user's tenant_id from session state."""
+def get_user_id() -> str:
+    """Return the current user's id from session state."""
     try:
         import streamlit as st
-        return st.session_state.get("tenant_id", "")
+        return st.session_state.get("user_id", "")
     except Exception:
         return ""
 
@@ -512,6 +513,16 @@ def batch_store_uph_history(records: list[dict]):
     """
     if not records:
         return
+
+    def _json_safe_value(v):
+        if isinstance(v, float):
+            return v if math.isfinite(v) else 0.0
+        if isinstance(v, list):
+            return [_json_safe_value(x) for x in v]
+        if isinstance(v, dict):
+            return {k: _json_safe_value(val) for k, val in v.items()}
+        return v
+
     sb  = get_client()
     # Only inject tenant_id if not already present in the records
     if not records[0].get("tenant_id"):
@@ -521,14 +532,46 @@ def batch_store_uph_history(records: list[dict]):
 
     for i in range(0, len(records), 500):
         chunk = records[i:i+500]
+        safe_chunk = []
+        for r in chunk:
+            try:
+                uph_val = float(r.get("uph", 0) or 0)
+            except (TypeError, ValueError):
+                uph_val = 0.0
+            if not math.isfinite(uph_val):
+                uph_val = 0.0
+
+            try:
+                units_val = float(r.get("units", 0) or 0)
+            except (TypeError, ValueError):
+                units_val = 0.0
+            if not math.isfinite(units_val):
+                units_val = 0.0
+
+            try:
+                hours_val = float(r.get("hours_worked", 0) or 0)
+            except (TypeError, ValueError):
+                hours_val = 0.0
+            if not math.isfinite(hours_val):
+                hours_val = 0.0
+
+            safe_chunk.append({
+                **r,
+                "uph": uph_val,
+                "units": units_val,
+                "hours_worked": hours_val,
+            })
+        safe_chunk = [_json_safe_value(r) for r in safe_chunk]
         try:
+            # Fail fast with a clear error if anything non-JSON-safe remains.
+            json.dumps(safe_chunk, allow_nan=False)
             sb.table("uph_history").upsert(
-                chunk,
+                safe_chunk,
                 on_conflict="tenant_id,emp_id,work_date,department",
             ).execute()
         except Exception as _e:
             log_error("uph_history", f"UPH batch upsert failed: {_e}",
-                      detail=f"chunk_size={len(chunk)}, sample={chunk[0] if chunk else 'empty'}",
+                      detail=f"chunk_size={len(safe_chunk)}, sample={safe_chunk[0] if safe_chunk else 'empty'}",
                       severity="error")
             raise
 
