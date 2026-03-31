@@ -164,8 +164,8 @@ serve(async (req) => {
       case "customer.subscription.updated": {
         const sub = event.data.object;
         const customerId = sub.customer;
-        const plan = resolvePlan(sub);
-        const limit = PLAN_LIMITS[plan] ?? 25;
+        let plan = resolvePlan(sub);
+        let limit = PLAN_LIMITS[plan] ?? 25;
 
         // Find tenant by stripe_customer_id
         const { data: tenants } = await supabase
@@ -181,6 +181,23 @@ serve(async (req) => {
 
         const tenantId = tenants[0].id;
 
+        // If Stripe has a pending update (common for end-of-period downgrades),
+        // keep current access until the cycle actually flips.
+        const hasPendingUpdate = !!sub.pending_update;
+        if (hasPendingUpdate) {
+          const { data: curRows } = await supabase
+            .from("subscriptions")
+            .select("plan, employee_limit")
+            .eq("tenant_id", tenantId)
+            .limit(1);
+          if (curRows?.length) {
+            const currentPlan = curRows[0].plan;
+            const currentLimit = curRows[0].employee_limit;
+            if (currentPlan) plan = currentPlan;
+            if (typeof currentLimit === "number") limit = currentLimit;
+          }
+        }
+
         await supabase
           .from("subscriptions")
           .update({
@@ -194,7 +211,7 @@ serve(async (req) => {
           })
           .eq("tenant_id", tenantId);
 
-        console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${plan}`);
+        console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${plan}, pending=${hasPendingUpdate}`);
         break;
       }
 

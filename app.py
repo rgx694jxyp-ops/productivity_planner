@@ -865,17 +865,36 @@ def _get_current_plan() -> str:
             return "admin"
     except Exception:
         pass
-    # Check cached plan
-    if st.session_state.get("_current_plan"):
-        return st.session_state["_current_plan"]
+    # Refresh cached plan periodically so open tabs don't retain stale access.
+    _cached_plan = st.session_state.get("_current_plan")
+    _cached_ts = float(st.session_state.get("_current_plan_ts", 0) or 0)
+    if _cached_plan and (time.time() - _cached_ts) < 60:
+        return _cached_plan
     try:
         from database import get_subscription
         sub = get_subscription()
         plan = sub.get("plan", "starter") if sub else "starter"
         st.session_state["_current_plan"] = plan
+        st.session_state["_current_plan_ts"] = time.time()
         return plan
     except Exception:
         return "starter"
+
+
+def _plan_rank(plan: str) -> int:
+    return {"starter": 1, "pro": 2, "business": 3, "admin": 99}.get((plan or "").lower(), 1)
+
+
+def _has_plan(min_plan: str) -> bool:
+    return _plan_rank(_get_current_plan()) >= _plan_rank(min_plan)
+
+
+def _plan_gate(min_plan: str, feature_name: str) -> bool:
+    if _has_plan(min_plan):
+        return True
+    st.info(f"{feature_name} is available on **{min_plan.capitalize()}** and above.")
+    st.caption("Upgrade in Settings → Subscription to unlock this feature.")
+    return False
 
 
 def render_sidebar() -> str:
@@ -3095,9 +3114,19 @@ def page_productivity():
         st.error(f"Productivity module error: {e}"); return
 
     # Nav buttons (no tabs — avoids running all content simultaneously)
-    PROD_OPTS = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "💰 Labor Cost", "📋 Priority List", "🧑‍🏫 Coaching"]
+    _plan_now = _get_current_plan()
+    _all_opts = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "💰 Labor Cost", "📋 Priority List", "🧑‍🏫 Coaching"]
+    if _plan_now in ("pro", "business", "admin"):
+        PROD_OPTS = _all_opts
+    else:
+        # Starter tier: core weekly output + ranking-focused view.
+        PROD_OPTS = ["📅 Weekly", "📋 Priority List"]
+
     if "prod_view" not in st.session_state:
-        st.session_state.prod_view = "🎯 Dept Goals"
+        st.session_state.prod_view = PROD_OPTS[0]
+
+    if st.session_state.prod_view not in PROD_OPTS:
+        st.session_state.prod_view = PROD_OPTS[0]
 
     chosen_prod = st.session_state.prod_view
     cols = st.columns(len(PROD_OPTS))
@@ -3178,6 +3207,8 @@ def page_productivity():
 
     # ── DEPT GOALS ────────────────────────────────────────────────────────────
     if chosen_prod == "🎯 Dept Goals":
+        if not _plan_gate("pro", "Department Goals"):
+            return
         st.subheader("Department UPH targets")
         st.caption("Set a UPH target for each department. Type a value and press Enter — it saves immediately and updates all charts.")
 
@@ -3289,6 +3320,8 @@ def page_productivity():
 
     # ── GOAL STATUS ───────────────────────────────────────────────────────────
     elif chosen_prod == "📊 Goal Status":
+        if not _plan_gate("pro", "Goal Status"):
+            return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity()
         gs = st.session_state.get("goal_status", [])
@@ -3454,6 +3487,8 @@ def page_productivity():
 
     # ── TRENDS ────────────────────────────────────────────────────────────────
     elif chosen_prod == "📈 Trends":
+        if not _plan_gate("pro", "Trend Analysis"):
+            return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity()
         trends = st.session_state.dept_trends
@@ -3513,6 +3548,8 @@ def page_productivity():
 
     # ── ROLLING AVG ───────────────────────────────────────────────────────────
     elif chosen_prod == "📉 Rolling Avg":
+        if not _plan_gate("pro", "Rolling Averages"):
+            return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity()
         rolling = st.session_state.get("employee_rolling_avg", [])
@@ -3647,10 +3684,7 @@ def page_productivity():
                            key="dl_weekly")
 
     elif chosen_prod == "💰 Labor Cost":
-        _plan = _get_current_plan()
-        if _plan not in ("pro", "business", "admin"):
-            st.info("💰 Labor Cost Impact is available on **Pro** and **Business** plans.")
-            st.caption("Upgrade in Settings → Subscription to unlock this feature.")
+        if not _plan_gate("pro", "Labor Cost Impact"):
             return
 
         st.subheader("Labor Cost Impact Analysis")
@@ -3670,9 +3704,9 @@ def page_productivity():
         # Build labor cost table
         _lc_rows = []
         for r in gs:
-            name = r.get("Employee", "")
+            name = r.get("Employee", r.get("Employee Name", ""))
             dept = r.get("Department", "")
-            uph  = r.get("Avg UPH")
+            uph  = r.get("Avg UPH", r.get("Average UPH"))
             target = r.get("Target UPH")
             hours = r.get("Hours Worked") or r.get("HoursWorked")
 
@@ -3959,6 +3993,8 @@ def page_productivity():
 
     # ── COACHING CORNER ───────────────────────────────────────────────────────────
     elif chosen_prod == "🧑‍🏫 Coaching":
+        if not _plan_gate("pro", "Coaching"):
+            return
         st.subheader("🧑‍🏫 Who Needs Coaching?")
         st.caption("Top 3 employees who need performance coaching based on trend + goal status + context.")
 
@@ -4825,6 +4861,8 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
 
     # ── Schedules ─────────────────────────────────────────────────────────────
     with tab_sched:
+        if not _plan_gate("pro", "Automated Schedules"):
+            return
         st.subheader("Automated send schedules")
         # Show current timezone setting
         from settings import Settings as _SchedTzS
@@ -4870,11 +4908,10 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                         st.toast("✓ Recipients updated", icon="✅")
                         st.rerun()
                     if sc2.button("▶ Test now", key=f"sched_test_{s['name']}", use_container_width=True):
-                        st.info(f"ℹ️ This will send a **REAL report** to {len(assigned or _all_recips)} recipient(s). Use this to verify the schedule works before relying on it.")
                         _test_to = assigned or [r["email"] for r in _all_recips]
                         if not _test_to:
                             st.warning("No recipients to send to.")
-                        elif st.button("✓ Confirm: Send test report", key=f"confirm_test_{s['name']}"):
+                        else:
                             _gs  = st.session_state.get("goal_status", [])
                             _tgts = _cached_targets()
                             _depts = sorted({r.get("Department","") for r in _gs if r.get("Department")})
@@ -4921,10 +4958,10 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                 _sch_start = _sch_end = None
 
             srecips = st.multiselect("Recipients", _recip_labels)
-            if not srecips and _recip_labels:
-                st.warning("⚠️ No recipients selected. This schedule will use all global recipients when it runs.")
-            elif not srecips and not _recip_labels:
+            if not _recip_labels:
                 st.warning("⚠️ **No recipients available.** Add recipients in the Recipients tab before creating this schedule.")
+            else:
+                st.caption("If none are selected, this schedule will use all global recipients.")
             
             st.caption("**Send on these days**")
             daily   = st.checkbox("Every day")
