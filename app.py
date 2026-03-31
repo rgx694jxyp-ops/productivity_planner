@@ -5953,13 +5953,38 @@ def _verify_checkout_and_activate():
 
     _debug.append(f"found stripe sub {stripe_sub['id'][:16]}...")
 
-    # Determine plan from price metadata
-    plan = "starter"
+    # Determine plan: try price metadata first, then match price ID against secrets
+    plan = ""
     try:
-        price_meta = stripe_sub["items"]["data"][0]["price"].get("metadata", {})
-        plan = price_meta.get("plan", "starter")
-    except Exception:
-        pass
+        price_obj  = stripe_sub["items"]["data"][0]["price"]
+        price_meta = price_obj.get("metadata", {})
+        plan       = price_meta.get("plan", "").lower().strip()
+        _debug.append(f"plan from metadata: '{plan}'")
+    except Exception as _pe:
+        _debug.append(f"price metadata err: {_pe}")
+
+    # Fallback: match against price IDs stored in secrets
+    if not plan or plan not in PLAN_LIMITS:
+        try:
+            _price_id = stripe_sub["items"]["data"][0]["price"]["id"]
+            _sec_starter  = _get_config("STRIPE_PRICE_STARTER")  or ""
+            _sec_pro      = _get_config("STRIPE_PRICE_PRO")      or ""
+            _sec_business = _get_config("STRIPE_PRICE_BUSINESS") or ""
+            if _price_id and _sec_business and _price_id == _sec_business:
+                plan = "business"
+            elif _price_id and _sec_pro and _price_id == _sec_pro:
+                plan = "pro"
+            elif _price_id and _sec_starter and _price_id == _sec_starter:
+                plan = "starter"
+            else:
+                plan = plan or "starter"  # last resort default
+            _debug.append(f"plan from price ID match: '{plan}'")
+        except Exception as _pie:
+            _debug.append(f"price ID fallback err: {_pie}")
+            plan = plan or "starter"
+
+    if not plan:
+        plan = "starter"
     limit = PLAN_LIMITS.get(plan, 25)
     _debug.append(f"plan={plan} limit={limit}")
 
@@ -6224,9 +6249,20 @@ def main():
     if st.query_params.get("portal") == "return":
         st.query_params.clear()
         st.session_state.pop("_sub_active", None)
+        st.session_state.pop("_portal_synced_plan", None)
+        _bust_cache()
         with st.spinner("Refreshing your subscription…"):
             try:
-                _verify_checkout_and_activate()
+                _synced_ok = _verify_checkout_and_activate()
+            except Exception:
+                _synced_ok = False
+        if _synced_ok:
+            # Read back what was written so we can show a confirmation
+            try:
+                from database import get_subscription as _gs
+                _new_sub = _gs()
+                if _new_sub:
+                    st.session_state["_portal_synced_plan"] = _new_sub.get("plan", "").capitalize()
             except Exception:
                 pass
         st.rerun()
@@ -6266,6 +6302,11 @@ def main():
 
     # Start background email thread (idempotent — only creates once per process)
     _start_email_thread()
+
+    # Show confirmation if we just synced a plan from the billing portal
+    if st.session_state.get("_portal_synced_plan"):
+        _synced_label = st.session_state.pop("_portal_synced_plan")
+        st.toast(f"Subscription updated — you're now on the {_synced_label} plan.", icon="✅")
 
     # Check email schedules at most once per 60 seconds (not every click)
     _now = time.time()
