@@ -21,6 +21,28 @@ const PLAN_LIMITS: Record<string, number> = {
   business: -1, // unlimited
 };
 
+// Price ID → plan name mapping (set via: supabase secrets set STRIPE_PRICE_STARTER=price_xxx etc.)
+const PRICE_PLAN_MAP: Record<string, string> = {};
+const _ps = Deno.env.get("STRIPE_PRICE_STARTER");
+const _pp = Deno.env.get("STRIPE_PRICE_PRO");
+const _pb = Deno.env.get("STRIPE_PRICE_BUSINESS");
+if (_ps) PRICE_PLAN_MAP[_ps] = "starter";
+if (_pp) PRICE_PLAN_MAP[_pp] = "pro";
+if (_pb) PRICE_PLAN_MAP[_pb] = "business";
+
+function resolvePlan(sub: any): string {
+  // 1. Subscription-level metadata
+  const metaPlan = sub.metadata?.plan?.toLowerCase?.();
+  if (metaPlan && PLAN_LIMITS[metaPlan] !== undefined) return metaPlan;
+  // 2. Price-level metadata
+  const priceMetaPlan = sub.items?.data?.[0]?.price?.metadata?.plan?.toLowerCase?.();
+  if (priceMetaPlan && PLAN_LIMITS[priceMetaPlan] !== undefined) return priceMetaPlan;
+  // 3. Match price ID against known secrets
+  const priceId = sub.items?.data?.[0]?.price?.id;
+  if (priceId && PRICE_PLAN_MAP[priceId]) return PRICE_PLAN_MAP[priceId];
+  return "starter";
+}
+
 async function verifyStripeSignature(
   body: string,
   signature: string
@@ -109,7 +131,7 @@ serve(async (req) => {
 
         // Fetch full subscription from Stripe
         const sub = await getSubscriptionDetails(subscriptionId);
-        const plan = sub.metadata?.plan || sub.items?.data?.[0]?.price?.metadata?.plan || "starter";
+        const plan = resolvePlan(sub);
         const limit = PLAN_LIMITS[plan] ?? 25;
 
         // Upsert subscription
@@ -142,7 +164,7 @@ serve(async (req) => {
       case "customer.subscription.updated": {
         const sub = event.data.object;
         const customerId = sub.customer;
-        const plan = sub.metadata?.plan || sub.items?.data?.[0]?.price?.metadata?.plan || "starter";
+        const plan = resolvePlan(sub);
         const limit = PLAN_LIMITS[plan] ?? 25;
 
         // Find tenant by stripe_customer_id
@@ -220,6 +242,66 @@ serve(async (req) => {
             .eq("tenant_id", tenants[0].id);
 
           console.log(`Payment failed for tenant ${tenants[0].id}`);
+        }
+        break;
+      }
+
+      // Renewal succeeded — refresh period end and ensure status is active.
+      case "invoice.paid": {
+        const invoice = event.data.object;
+        if (invoice.billing_reason === "subscription_create") break; // already handled by checkout.session.completed
+        const customerId = invoice.customer;
+        const subscriptionId = invoice.subscription;
+        if (!subscriptionId) break;
+
+        const { data: tenants } = await supabase
+          .from("tenants")
+          .select("id")
+          .eq("stripe_customer_id", customerId)
+          .limit(1);
+
+        if (tenants?.length) {
+          const renewedSub = await getSubscriptionDetails(subscriptionId);
+          const plan = resolvePlan(renewedSub);
+          const limit = PLAN_LIMITS[plan] ?? 25;
+          await supabase
+            .from("subscriptions")
+            .update({
+              status: "active",
+              plan: plan,
+              employee_limit: limit,
+              current_period_end: new Date(renewedSub.current_period_end * 1000).toISOString(),
+              cancel_at_period_end: renewedSub.cancel_at_period_end || false,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("tenant_id", tenants[0].id);
+
+          console.log(`Renewal synced for tenant ${tenants[0].id}, plan: ${plan}`);
+        }
+        break;
+      }
+
+      // 3DS / SCA authentication required — card needs action before subscription activates.
+      case "invoice.payment_action_required": {
+        const invoice = event.data.object;
+        const customerId = invoice.customer;
+
+        const { data: tenants } = await supabase
+          .from("tenants")
+          .select("id")
+          .eq("stripe_customer_id", customerId)
+          .limit(1);
+
+        if (tenants?.length) {
+          await supabase
+            .from("subscriptions")
+            .update({
+              status: "incomplete",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("tenant_id", tenants[0].id);
+
+          console.log(`Payment action required for tenant ${tenants[0].id}`);
         }
         break;
       }
