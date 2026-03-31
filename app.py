@@ -5184,8 +5184,7 @@ def page_settings():
                             st.markdown("")
                             if _portal_url:
                                 st.link_button(f"Upgrade to {_pi['label']} →", _portal_url,
-                                               use_container_width=True, type="primary",
-                                               key=f"sub_link_{_pk}")
+                                               use_container_width=True, type="primary")
                         else:  # downgrade
                             _delta = _GAINS.get((_pk, _plan_raw), [])
                             if _delta:
@@ -5197,7 +5196,7 @@ def page_settings():
                             st.markdown("")
                             if _portal_url:
                                 st.link_button(f"Downgrade to {_pi['label']}", _portal_url,
-                                               use_container_width=True, key=f"sub_link_{_pk}")
+                                               use_container_width=True)
             else:
                 st.info("No active subscription found.")
                 _app_url = st.context.headers.get("Origin", "http://localhost:8501")
