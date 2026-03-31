@@ -1801,9 +1801,14 @@ def _import_step2():
                 with cb:
                     d_shift = _sel("Shift",                    "Shift",       False, cb)
 
+                    # Determine initial source from saved mapping (per file)
+                    _map_has_uph = bool(m.get("UPH"))
+                    _map_has_calc = bool(m.get("Units") and m.get("HoursWorked"))
+
                     # Read saved radio choice so it persists across rerenders
                     uph_src_key = f"uph_src_{idx}"
-                    saved_src   = st.session_state.get(uph_src_key, "Calculate: Units ÷ Hours")
+                    _default_src = "Already have UPH column" if (_map_has_uph and not _map_has_calc) else "Calculate: Units ÷ Hours"
+                    saved_src   = st.session_state.get(uph_src_key, _default_src)
                     uph_src     = cb.radio(
                         "UPH source",
                         ["Calculate: Units ÷ Hours", "Already have UPH column"],
@@ -1811,11 +1816,25 @@ def _import_step2():
                         key=uph_src_key,
                     )
 
+                    # If user toggles source, clear stale values from the opposite mode
+                    # so only the correct boxes and state are active.
+                    _prev_key = f"uph_src_prev_{idx}"
+                    _prev_src = st.session_state.get(_prev_key, uph_src)
+                    if _prev_src != uph_src:
+                        if "Already" in uph_src:
+                            st.session_state.pop(f"fm_{idx}_Units_un", None)
+                            st.session_state.pop(f"fm_{idx}_HoursWorked_h", None)
+                        else:
+                            st.session_state.pop(f"fm_{idx}_UPH_u", None)
+                    st.session_state[_prev_key] = uph_src
+
                     if "Already" in uph_src:
+                        cb.caption("Using your existing UPH column.")
                         d_uph   = _sel("UPH column",   "UPH",         True,  cb, "u")
                         d_units = ""
                         d_hrs   = ""
                     else:
+                        cb.caption("UPH will be calculated from Units ÷ Hours Worked.")
                         d_uph   = ""
                         d_units = _sel("Units",        "Units",       True,  cb, "un")
                         d_hrs   = _sel("Hours Worked", "HoursWorked", True,  cb, "h")
