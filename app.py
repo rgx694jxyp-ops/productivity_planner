@@ -2877,8 +2877,10 @@ def _build_archived_productivity():
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date'])
         df = df.sort_values('Date')
+        df = df.set_index('Date')
         df['7DayRollingAvg'] = df['UPH'].rolling('7D', min_periods=1).mean()
         df['14DayRollingAvg'] = df['UPH'].rolling('14D', min_periods=1).mean()
+        df = df.reset_index()
         for _, row in df.iterrows():
             employee_rolling_avg.append({
                 'Date': row['Date'].strftime('%Y-%m-%d'),
