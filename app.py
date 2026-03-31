@@ -311,6 +311,8 @@ def _bg_send_scheduled_emails():
                 tz = s.get("timezone", "")
                 due = get_schedules_due_now(timezone=tz, tenant_id=tid)
                 if not due:
+                    if scheds:
+                        _email_log(f"[{tid[:8]}] Has {len(scheds)} schedule(s) but none are due now (tz={tz or 'not set'})")
                     continue
 
                 _email_log(f"[{tid[:8]}] Found {len(due)} schedule(s) due (tz={tz})")
@@ -5139,6 +5141,53 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                                  send_time.strftime("%H:%M"), subj, speriod,
                                  sel_emails, _ds_str, _de_str)
                     _success_then_rerun(f"✓ Schedule '{sname}' created.")
+
+        # ── Debug: Check Due Schedules ──────────────────────────────────────
+        st.divider()
+        with st.expander("🐛 Debug: Check what's due right now"):
+            from datetime import datetime as _debug_dt
+            from settings import Settings as _DebugTzS
+            _dbg_tz = _DebugTzS().get("timezone", "")
+            if _dbg_tz:
+                try:
+                    from zoneinfo import ZoneInfo
+                    _dbg_now = _debug_dt.now(ZoneInfo(_dbg_tz))
+                except Exception:
+                    _dbg_now = _debug_dt.now()
+            else:
+                _dbg_now = _debug_dt.now()
+            _dbg_day = _dbg_now.strftime("%A")
+            _dbg_time = _dbg_now.strftime("%H:%M")
+            
+            def _add_window_dbg(h_m: str, mins: int) -> str:
+                try:
+                    h, m = map(int, h_m.split(":"))
+                    total = h * 60 + m + mins
+                    return f"{total // 60:02d}:{total % 60:02d}"
+                except:
+                    return h_m
+            
+            st.caption(f"Current time in your zone: **{_dbg_now.strftime('%Y-%m-%d %H:%M:%S %Z')}** ({_dbg_day})")
+            st.caption(f"Timezone setting in Email page: **{_dbg_tz or 'Not set'}**")
+            
+            _dbg_due = get_schedules_due_now(timezone=_dbg_tz)
+            if _dbg_due:
+                st.success(f"✓ **{len(_dbg_due)} schedule(s) are due RIGHT NOW:**")
+                for _dbg_s in _dbg_due:
+                    st.write(f"- **{_dbg_s.get('name')}** send time: {_dbg_s.get('send_time')} on {_dbg_s.get('days')}")
+            else:
+                st.info(f"❌ No schedules due right now. Configured schedules:")
+                _all_scheds = get_schedules()
+                if _all_scheds:
+                    for _dbg_s in _all_scheds:
+                        _dbg_st = _dbg_s.get('send_time', '?')
+                        _dbg_da = _dbg_s.get('days', [])
+                        _dbg_match_day = _dbg_day in _dbg_da or 'Daily' in _dbg_da
+                        _dbg_match_time = _dbg_st <= _dbg_time <= _add_window_dbg(_dbg_st, 5) if _dbg_st else False
+                        _dbg_status = ('✓ Matches time' if _dbg_match_time else f'⏳ Wait until {_dbg_st}') if _dbg_match_day else '❌ Wrong day'
+                        st.write(f"- **{_dbg_s.get('name')}** {_dbg_st} on {_dbg_da} → {_dbg_status}")
+                else:
+                    st.info("No schedules configured yet. Create one in the 'Schedules' section above.")
 
         # ── Scheduler log viewer ─────────────────────────────────────────────
         st.divider()
