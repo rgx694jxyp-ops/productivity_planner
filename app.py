@@ -1966,7 +1966,7 @@ def _import_step3():
         # Run productivity pipeline
         try:
             from data_processor import process_data
-            from ranker         import rank_employees, build_department_report
+            from ranker         import rank_employees, build_department_report, calculate_employee_risk
             from trends         import calculate_department_trends, build_weekly_summary, calculate_employee_rolling_average
             from error_log      import ErrorLog
             from goals          import analyse_trends, build_goal_status, get_all_targets
