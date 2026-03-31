@@ -1983,7 +1983,7 @@ def _import_step3():
             from ranker         import rank_employees, build_department_report, calculate_employee_risk
             from trends         import calculate_department_trends, build_weekly_summary, calculate_employee_rolling_average
             from error_log      import ErrorLog
-            from goals          import analyse_trends, build_goal_status, get_all_targets
+            from goals          import analyse_trends, build_goal_status
 
             class _PS:
                 def get(self, k, d=None): return st.session_state.get(k, d)
@@ -2033,25 +2033,13 @@ def _import_step3():
                     f"{uph_rejected_count} invalid UPH value(s) ignored."
                 )
 
-            bar.progress(40, text="Ranking employees…")
+            bar.progress(40, text="Preparing import data…")
 
             existing = st.session_state.history
             existing.extend(processed)
             st.session_state.history = existing
 
-            ranked = rank_employees(existing, all_mapping, ps, log)
-            bar.progress(60, text="Calculating goals…")
-
-            targets     = _cached_targets()
-            trend_data  = analyse_trends(existing, all_mapping, weeks=st.session_state.trend_weeks)
-            goal_status = build_goal_status(ranked, targets, trend_data)
-            dept_report = build_department_report(ranked, ps, log)
-            dept_trends = calculate_department_trends(existing, all_mapping, ps, log)
-            weekly      = build_weekly_summary(existing, all_mapping, ps, log)
-            rolling_avg = calculate_employee_rolling_average(existing, all_mapping, ps, log)
-            risk_scores = calculate_employee_risk(existing, all_mapping, ps, log)
-
-            bar.progress(85, text="Storing UPH history…")
+            bar.progress(60, text="Storing UPH history…")
 
             # Aggregate per employee — handle multiple files with different column names
             # Aggregate per (emp_id, order_number, date) so that:
@@ -2225,7 +2213,20 @@ def _import_step3():
             # so that a second import doesn't lose the first import's data.
             bar.progress(90, text="Rebuilding full productivity view…")
             _full_ok = _build_archived_productivity()
+            _ranked_count = len(st.session_state.get("top_performers", []))
             if not _full_ok:
+                # Fallback path: only compute heavy analytics when archived rebuild fails.
+                ranked = rank_employees(existing, all_mapping, ps, log)
+                targets = _cached_targets()
+                trend_data = analyse_trends(existing, all_mapping, weeks=st.session_state.trend_weeks)
+                goal_status = build_goal_status(ranked, targets, trend_data)
+                dept_report = build_department_report(ranked, ps, log)
+                dept_trends = calculate_department_trends(existing, all_mapping, ps, log)
+                weekly = build_weekly_summary(existing, all_mapping, ps, log)
+                rolling_avg = calculate_employee_rolling_average(existing, all_mapping, ps, log)
+                risk_scores = calculate_employee_risk(existing, all_mapping, ps, log)
+                _ranked_count = len(ranked)
+
                 # Fallback: use only current import's data
                 st.session_state.update({
                     "top_performers":    ranked,
@@ -2233,7 +2234,6 @@ def _import_step3():
                     "dept_trends":       dept_trends,
                     "weekly_summary":    weekly,
                     "employee_rolling_avg": rolling_avg,
-                    "employee_risk":     risk_scores,
                     "employee_risk":     risk_scores,
                     "goal_status":       goal_status,
                     "trend_data":        trend_data,
@@ -2249,7 +2249,7 @@ def _import_step3():
             })
             bar.progress(100, text="Done!")
             _unique_emp_count = len({r["emp_id"] for r in alloc_rows})
-            st.toast(f"✓ {len(ranked)} employees ranked · {_unique_emp_count} employees processed", icon="✅")
+            st.toast(f"✓ {_ranked_count} employees ranked · {_unique_emp_count} employees processed", icon="✅")
             st.session_state.goto_page = "productivity"
             st.rerun()
 
