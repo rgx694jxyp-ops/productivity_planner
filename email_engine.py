@@ -462,6 +462,21 @@ def build_dept_email_body(
     if not below and not trending_down:
         alerts = '<p style="color:#28a745;margin:4px 0;">✓ All employees on track</p>'
 
+    # Supervisor intelligence section
+    on_goal_count = len([r for r in dept_rows if r.get("goal_status") == "on_goal"])
+    total_count = len(dept_rows)
+    health_pct = round((on_goal_count / total_count * 100) if total_count > 0 else 0)
+
+    supervisor_section = f"""
+    <div style="background:#fff3cd;border-left:4px solid #ffc107;padding:12px 16px;margin:12px 0;border-radius:4px;">
+      <p style="margin:0 0 8px;font-weight:600;color:#856404;">📊 Department Summary</p>
+      <p style="margin:4px 0;font-size:13px;color:#333;">
+        <strong>{on_goal_count}/{total_count}</strong> employees meeting goals ({health_pct}% health)
+      </p>
+      {f'<p style="margin:4px 0;font-size:13px;color:#333;"><strong>{len(top3)} top performers:</strong> {", ".join(_esc(e.get("Employee Name","")) for e in top3)}</p>' if top3 else ''}
+    </div>
+    """
+
     return f"""
     <html><body style="font-family:Arial,sans-serif;color:#333;max-width:700px;margin:0 auto;">
       <div style="background:#1F497D;padding:20px 24px;border-radius:6px 6px 0 0;">
@@ -471,6 +486,7 @@ def build_dept_email_body(
       <div style="background:#f8f9fa;padding:16px 24px;border:1px solid #e0e0e0;">
         {alerts}
       </div>
+      {supervisor_section}
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
         <tr style="background:#f0f4f8;">
           <th style="padding:8px 10px;text-align:left;">Employee</th>

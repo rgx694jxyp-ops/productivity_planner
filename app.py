@@ -1779,12 +1779,38 @@ def _import_step2():
                 unsafe_allow_html=True,
             )
 
+            # ── UPH Source Selection (OUTSIDE form for immediate rerun) ──
+            m = s.get("mapping") or {}
+            _map_has_uph = bool(m.get("UPH"))
+            _map_has_calc = bool(m.get("Units") and m.get("HoursWorked"))
+            uph_src_key = f"uph_src_{idx}"
+            _default_src = "Already have UPH column" if (_map_has_uph and not _map_has_calc) else "Calculate: Units ÷ Hours"
+            saved_src   = st.session_state.get(uph_src_key, _default_src)
+            
+            # Clear stale values when source changes
+            _prev_key = f"uph_src_prev_{idx}"
+            _prev_src = st.session_state.get(_prev_key, saved_src)
+            if _prev_src != saved_src:
+                if "Already" in saved_src:
+                    st.session_state.pop(f"fm_{idx}_Units_un", None)
+                    st.session_state.pop(f"fm_{idx}_HoursWorked_h", None)
+                else:
+                    st.session_state.pop(f"fm_{idx}_UPH_u", None)
+            st.session_state[_prev_key] = saved_src
+            
+            uph_src = st.radio(
+                "UPH source",
+                ["Calculate: Units ÷ Hours", "Already have UPH column"],
+                index=1 if "Already" in saved_src else 0,
+                key=uph_src_key,
+                horizontal=True,
+            )
+
             with st.form(f"mapping_form_{idx}"):
                 ca, cb = st.columns(2)
-                m = s.get("mapping") or {}
 
                 def _sel(label, field, req, col, extra=""):
-                    cur = m.get(field) or auto.get(field, "")
+                    cur = m.get(field) or _auto_detect(headers).get(field, "")
                     idx2 = options.index(cur) if cur in options else 0
                     dot  = "🔴" if req else "⚪"
                     v    = col.selectbox(f"{dot} {label}", options, index=idx2,
@@ -1801,40 +1827,13 @@ def _import_step2():
                 with cb:
                     d_shift = _sel("Shift",                    "Shift",       False, cb)
 
-                    # Determine initial source from saved mapping (per file)
-                    _map_has_uph = bool(m.get("UPH"))
-                    _map_has_calc = bool(m.get("Units") and m.get("HoursWorked"))
-
-                    # Read saved radio choice so it persists across rerenders
-                    uph_src_key = f"uph_src_{idx}"
-                    _default_src = "Already have UPH column" if (_map_has_uph and not _map_has_calc) else "Calculate: Units ÷ Hours"
-                    saved_src   = st.session_state.get(uph_src_key, _default_src)
-                    uph_src     = cb.radio(
-                        "UPH source",
-                        ["Calculate: Units ÷ Hours", "Already have UPH column"],
-                        index=1 if "Already" in saved_src else 0,
-                        key=uph_src_key,
-                    )
-
-                    # If user toggles source, clear stale values from the opposite mode
-                    # so only the correct boxes and state are active.
-                    _prev_key = f"uph_src_prev_{idx}"
-                    _prev_src = st.session_state.get(_prev_key, uph_src)
-                    if _prev_src != uph_src:
-                        if "Already" in uph_src:
-                            st.session_state.pop(f"fm_{idx}_Units_un", None)
-                            st.session_state.pop(f"fm_{idx}_HoursWorked_h", None)
-                        else:
-                            st.session_state.pop(f"fm_{idx}_UPH_u", None)
-                    st.session_state[_prev_key] = uph_src
-
                     if "Already" in uph_src:
-                        cb.caption("Using your existing UPH column.")
+                        st.caption("Using your existing UPH column.")
                         d_uph   = _sel("UPH column",   "UPH",         True,  cb, "u")
                         d_units = ""
                         d_hrs   = ""
                     else:
-                        cb.caption("UPH will be calculated from Units ÷ Hours Worked.")
+                        st.caption("UPH will be calculated from Units ÷ Hours Worked.")
                         d_uph   = ""
                         d_units = _sel("Units",        "Units",       True,  cb, "un")
                         d_hrs   = _sel("Hours Worked", "HoursWorked", True,  cb, "h")
@@ -4742,9 +4741,71 @@ def page_email():
     except ImportError:
         st.error("Email module not found."); return
 
-    tab_smtp, tab_recip, tab_sched, tab_send = st.tabs([
-        "1️⃣ SMTP Setup", "2️⃣ Recipients", "3️⃣ Schedules", "📤 Send Now"
+    tab_tz, tab_smtp, tab_recip, tab_sched, tab_send = st.tabs([
+        "0️⃣ Timezone (Required)", "1️⃣ SMTP Setup", "2️⃣ Recipients", "3️⃣ Schedules", "📤 Send Now"
     ])
+
+    # ── TIMEZONE (REQUIRED FIRST) ─────────────────────────────────────────────
+    with tab_tz:
+        st.subheader("🕐 Set Your Timezone")
+        st.caption("This is CRITICAL for scheduled emails to work correctly. Your timezones determines when emails are sent.")
+
+        from settings import Settings as _TzS
+        _tzs    = _TzS()
+        _cur_tz = _tzs.get("timezone", "")
+        _tz_options = [
+            # ── United States ──
+            "America/New_York",
+            "America/Chicago",
+            "America/Denver",
+            "America/Phoenix",
+            "America/Los_Angeles",
+            "America/Anchorage",
+            "Pacific/Honolulu",
+            # ── Canada ──
+            "America/Toronto",
+            "America/Vancouver",
+            "America/Winnipeg",
+            "America/Halifax",
+            # ── Europe ──
+            "Europe/London",
+            "Europe/Paris",
+            "Europe/Berlin",
+            "Europe/Madrid",
+            "Europe/Rome",
+            "Europe/Amsterdam",
+            "Europe/Zurich",
+            "Europe/Stockholm",
+            "Europe/Warsaw",
+            "Europe/Istanbul",
+            # ── Asia / Pacific ──
+            "Asia/Dubai",
+            "Asia/Kolkata",
+            "Asia/Bangkok",
+            "Asia/Singapore",
+            "Asia/Shanghai",
+            "Asia/Tokyo",
+            "Asia/Seoul",
+            "Australia/Sydney",
+            "Australia/Melbourne",
+            "Pacific/Auckland",
+            # ── UTC ──
+            "UTC",
+        ]
+        _tz_display = ["(Server local time — no timezone set)"] + _tz_options
+        _cur_idx    = (_tz_options.index(_cur_tz) + 1) if _cur_tz in _tz_options else 0
+        _sel_tz     = st.selectbox(
+            "Select your timezone", _tz_display, index=_cur_idx, key="email_timezone",
+        )
+        if st.button("Save timezone", key="save_email_tz", type="primary", use_container_width=True):
+            _save_val = "" if _sel_tz.startswith("(") else _sel_tz
+            _tzs.set("timezone", _save_val)
+            st.success(f"✓ Timezone set to '{_save_val or 'server local time'}'.")
+
+        if _cur_tz:
+            st.info(f"✓ Current timezone: **{_cur_tz}**")
+        else:
+            st.warning("⚠️ No timezone set yet. Scheduled emails may not fire at the right time.")
 
     # ── SMTP ─────────────────────────────────────────────────────────────────
     with tab_smtp:
@@ -5366,62 +5427,7 @@ def page_settings():
         st.session_state.smart_merge  = True   # always on
 
         st.divider()
-        st.subheader("🕐 Timezone")
-        st.caption("Used for scheduled email delivery — ensures emails fire at the right local time.")
-        from settings import Settings as _TzS
-        _tzs    = _TzS()
-        _cur_tz = _tzs.get("timezone", "")
-        _tz_options = [
-            # ── United States ──
-            "America/New_York",
-            "America/Chicago",
-            "America/Denver",
-            "America/Phoenix",
-            "America/Los_Angeles",
-            "America/Anchorage",
-            "Pacific/Honolulu",
-            # ── Canada ──
-            "America/Toronto",
-            "America/Vancouver",
-            "America/Winnipeg",
-            "America/Halifax",
-            # ── Europe ──
-            "Europe/London",
-            "Europe/Paris",
-            "Europe/Berlin",
-            "Europe/Madrid",
-            "Europe/Rome",
-            "Europe/Amsterdam",
-            "Europe/Zurich",
-            "Europe/Stockholm",
-            "Europe/Warsaw",
-            "Europe/Istanbul",
-            # ── Asia / Pacific ──
-            "Asia/Dubai",
-            "Asia/Kolkata",
-            "Asia/Bangkok",
-            "Asia/Singapore",
-            "Asia/Shanghai",
-            "Asia/Tokyo",
-            "Asia/Seoul",
-            "Australia/Sydney",
-            "Australia/Melbourne",
-            "Pacific/Auckland",
-            # ── UTC ──
-            "UTC",
-        ]
-        _tz_display = ["(Server local time — no timezone set)"] + _tz_options
-        _cur_idx    = (_tz_options.index(_cur_tz) + 1) if _cur_tz in _tz_options else 0
-        _sel_tz     = st.selectbox(
-            "Timezone", _tz_display, index=_cur_idx, key="settings_timezone",
-        )
-        if st.button("Save timezone", key="save_tz"):
-            _save_val = "" if _sel_tz.startswith("(") else _sel_tz
-            _tzs.set("timezone", _save_val)
-            st.success(f"✓ Timezone set to '{_save_val or 'server local time'}'.")
-
-        st.divider()
-        st.subheader("💰 Labor Cost Settings")
+        st.subheader(" Labor Cost Settings")
         st.caption("Used to calculate the financial impact of performance gaps.")
         _cur_wage = _tzs.get("avg_hourly_wage", 18.0)
         _wage_input = st.number_input(
