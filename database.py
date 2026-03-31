@@ -118,6 +118,15 @@ def get_user_id() -> str:
         return ""
 
 
+def get_tenant_id() -> str:
+    """Return the current tenant id from session state."""
+    try:
+        import streamlit as st
+        return st.session_state.get("tenant_id", "")
+    except Exception:
+        return ""
+
+
 def _tenant_fields() -> dict:
     """Return {'tenant_id': value} only if a tenant_id is set, else empty dict.
     This lets inserts work cleanly when auth is bypassed."""
@@ -129,6 +138,15 @@ def _tq(query):
     """Apply tenant_id filter to a Supabase query if a tenant is set."""
     tid = get_tenant_id()
     return query.eq("tenant_id", tid) if tid else query
+
+
+def _finite_float(value, default: float = 0.0) -> float:
+    """Return a JSON-safe finite float."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if math.isfinite(out) else default
 
 
 # ── Clients ───────────────────────────────────────────────────────────────────
@@ -387,6 +405,9 @@ def submit_units(order_id: str, emp_id: str, units: float,
                  uph: float, hours_worked: float,
                  work_date: str, source_file: str = "") -> dict:
     sb = get_client()
+    units = _finite_float(units)
+    uph = _finite_float(uph)
+    hours_worked = _finite_float(hours_worked)
     r  = sb.table("unit_submissions").insert({
         "order_id":    order_id,
         "emp_id":      emp_id,
@@ -423,9 +444,9 @@ def bulk_submit_units(subs: list, source_file: str = "") -> tuple:
     sub_rows = [{
         "order_id":    s["order_id"],
         "emp_id":      s["emp_id"],
-        "units":       s["units"],
-        "uph":         s["uph"],
-        "hours_worked":s["hours"],
+        "units":       _finite_float(s.get("units", 0)),
+        "uph":         _finite_float(s.get("uph", 0)),
+        "hours_worked":_finite_float(s.get("hours", 0)),
         "work_date":   s.get("date", ""),
         "source_file": source_file,
         **_tf,
@@ -440,9 +461,9 @@ def bulk_submit_units(subs: list, source_file: str = "") -> tuple:
     uph_rows = [{
         "emp_id":      s["emp_id"],
         "work_date":   s.get("date", ""),
-        "uph":         s["uph"],
-        "units":       s["units"],
-        "hours_worked":s["hours"],
+        "uph":         _finite_float(s.get("uph", 0)),
+        "units":       _finite_float(s.get("units", 0)),
+        "hours_worked":_finite_float(s.get("hours", 0)),
         "department":  s.get("dept", ""),
         "order_id":    s["order_id"],
         **_tf,
@@ -494,6 +515,9 @@ def store_uph_history(emp_id: str, work_date: str, uph: float,
                       department: str = "", order_id: str = None):
     """Insert or update a single UPH history record (dedup on tenant+emp+date+dept)."""
     sb = get_client()
+    uph = _finite_float(uph)
+    units = _finite_float(units)
+    hours_worked = _finite_float(hours_worked)
     sb.table("uph_history").upsert({
         "emp_id":       emp_id,
         "work_date":    work_date,
@@ -856,7 +880,7 @@ def export_client_to_dict(client_id: str) -> dict:
     return {"client": client, "orders": orders, "trends": trends}
 
 
-# ── Tenant Goals (DB-backed) ──────────────���─────────────────────────────────
+# ── Tenant Goals (DB-backed) ───────────────────────────────────────────────
 
 def load_goals_db(tenant_id: str = "") -> dict:
     """Load goals from tenant_goals table. Returns {dept_targets:{}, flagged_employees:{}}."""
@@ -893,7 +917,7 @@ def save_goals_db(data: dict, tenant_id: str = ""):
         print(f"[Warning] Could not save goals to DB: {e}")
 
 
-# ── Tenant Settings (DB-backed) ──────────────��──────────────────────────────
+# ── Tenant Settings (DB-backed) ────────────────────────────────────────────
 
 def load_settings_db(tenant_id: str = "") -> dict:
     """Load settings from tenant_settings table."""

@@ -93,6 +93,7 @@ try:
         get_employees, get_employee, upsert_employee,
         get_uph_history, get_avg_uph,
         add_coaching_note, get_coaching_notes, delete_coaching_note, archive_coaching_notes,
+        get_client as _get_db_client,
         batch_store_uph_history, get_all_uph_history,
         batch_upsert_employees,
     )
@@ -111,6 +112,15 @@ except ImportError as e:
 except Exception as e:
     DB_AVAILABLE = False
     DB_ERROR     = f"Unexpected error loading database module: {type(e).__name__}: {e}"
+
+# Backward-compatible DB client shim. Prevents NameError in production if
+# _get_db_client was not imported due to an older deployment/import path.
+try:
+    _get_db_client  # type: ignore[name-defined]
+except NameError:
+    def _get_db_client():
+        from database import get_client as _db_get_client
+        return _db_get_client()
 
 from data_loader import (REQUIRED_FIELDS,
                          auto_detect as _dl_auto_detect,
@@ -879,29 +889,52 @@ def render_sidebar() -> str:
 
         st.divider()
 
-        # Build nav based on plan
-        NAV_OPTS = [
-            "👔  Supervisor",
-            "�  Dashboard",
-            "�📁  Import Data",
-            "👥  Employees",
-            "📈  Productivity",
+        # Build nav with stable internal keys so routing does not depend on
+        # emoji rendering/encoding.
+        nav_items = [
+            ("supervisor", "👔  Supervisor"),
+            ("dashboard", "📊  Dashboard"),
+            ("import", "📁  Import Data"),
+            ("employees", "👥  Employees"),
+            ("productivity", "📈  Productivity"),
+            ("email", "📧  Email Setup"),
         ]
-        # Pro+ gets email setup
-        if _plan in ("pro", "business", "admin"):
-            NAV_OPTS.append("📧  Email Setup")
-        NAV_OPTS.append("⚙️  Settings")
-        # Allow programmatic navigation via st.session_state.goto_page
-        goto = st.session_state.pop("goto_page", None)
-        if goto and goto in NAV_OPTS:
-            st.session_state["_current_page"] = goto
-        # Persist the last-selected page so it survives reruns
-        current = st.session_state.get("_current_page", NAV_OPTS[0])
-        default_idx = NAV_OPTS.index(current) if current in NAV_OPTS else 0
-        page = st.radio("Navigation", NAV_OPTS,
-                        index=default_idx,
-                        label_visibility="collapsed")
-        st.session_state["_current_page"] = page
+        nav_items.append(("settings", "⚙️  Settings"))
+
+        nav_keys = [k for k, _ in nav_items]
+        nav_labels = {k: lbl for k, lbl in nav_items}
+
+        goto = str(st.session_state.pop("goto_page", "") or "").lower()
+        if goto:
+            if goto in nav_keys:
+                st.session_state["_current_page_key"] = goto
+            elif "supervisor" in goto:
+                st.session_state["_current_page_key"] = "supervisor"
+            elif "dashboard" in goto:
+                st.session_state["_current_page_key"] = "dashboard"
+            elif "import" in goto:
+                st.session_state["_current_page_key"] = "import"
+            elif "employee" in goto:
+                st.session_state["_current_page_key"] = "employees"
+            elif "productivity" in goto:
+                st.session_state["_current_page_key"] = "productivity"
+            elif "email" in goto:
+                st.session_state["_current_page_key"] = "email"
+            elif "setting" in goto:
+                st.session_state["_current_page_key"] = "settings"
+
+        current_key = st.session_state.get("_current_page_key", nav_keys[0])
+        if current_key not in nav_keys:
+            current_key = nav_keys[0]
+
+        page = st.radio(
+            "Navigation",
+            nav_keys,
+            index=nav_keys.index(current_key),
+            format_func=lambda k: nav_labels.get(k, k.title()),
+            label_visibility="collapsed",
+        )
+        st.session_state["_current_page_key"] = page
 
         st.divider()
         if st.button("↺ Refresh data", use_container_width=True, key="sb_refresh"):
@@ -2156,7 +2189,7 @@ def _import_step3():
             bar.progress(100, text="Done!")
             _unique_emp_count = len({r["emp_id"] for r in alloc_rows})
             st.toast(f"✓ {len(ranked)} employees ranked · {_unique_emp_count} employees processed", icon="✅")
-            st.session_state.goto_page = "📈  Productivity"
+            st.session_state.goto_page = "productivity"
             st.rerun()
 
         except Exception as _pipe_err:
@@ -2725,7 +2758,11 @@ def _build_archived_productivity():
     emp_name = {eid: e.get("name", eid)    for eid, e in emps.items()}
 
     # Don't bail if employees table is empty — UPH history has dept/emp info
-    sb = _get_db_client()
+    try:
+        sb = _get_db_client()
+    except NameError:
+        from database import get_client as _db_get_client
+        sb = _db_get_client()
 
     # ── Per-employee aggregates (avg UPH, total units, record count) ──────────
     # Use running sum+count instead of growing lists to keep memory constant.
@@ -4935,13 +4972,14 @@ def page_settings():
         st.subheader("Your Subscription")
         try:
             from database import get_subscription, get_employee_count, get_employee_limit, create_billing_portal_url
-            sub = get_subscription()
+            _tid_local = st.session_state.get("tenant_id", "")
+            sub = get_subscription(_tid_local)
             if sub:
                 _plan = sub.get("plan", "unknown").capitalize()
                 _status = sub.get("status", "unknown")
                 _limit = sub.get("employee_limit", 0)
                 _limit_str = "Unlimited" if _limit == -1 else str(_limit)
-                _emp_count = get_employee_count()
+                _emp_count = get_employee_count(_tid_local)
                 _period_end = sub.get("current_period_end", "")
 
                 col1, col2, col3 = st.columns(3)
@@ -5623,11 +5661,17 @@ def _check_session_timeout():
 def _verify_checkout_and_activate():
     """After Stripe checkout, verify payment and create subscription in DB."""
     import requests as _req
-    from database import get_tenant_id, get_client, _get_config, PLAN_LIMITS, get_user_id
+    import database as _db
     _debug = []
+    get_client = _db.get_client
+    _get_config = _db._get_config
+    PLAN_LIMITS = _db.PLAN_LIMITS
+    _get_tid = getattr(_db, "get_tenant_id", lambda: st.session_state.get("tenant_id", ""))
+    _get_uid = getattr(_db, "get_user_id", lambda: st.session_state.get("user_id", ""))
+
     stripe_key = _get_config("STRIPE_SECRET_KEY")
-    tid = get_tenant_id()
-    uid = get_user_id()
+    tid = _get_tid()
+    uid = _get_uid()
     if not stripe_key:
         _debug.append("no STRIPE_SECRET_KEY")
         st.session_state["_verify_debug"] = _debug
@@ -5955,14 +5999,40 @@ def main():
             _log_app_error("email", f"Schedule check error: {_eml_err}", detail=traceback.format_exc())
 
     page = render_sidebar()
-    if   page.startswith("👔"): page_supervisor()
+    handlers = {
+        "supervisor": page_supervisor,
+        "dashboard": page_dashboard,
+        "import": page_import,
+        "employees": page_employees,
+        "productivity": page_productivity,
+        "email": page_email,
+        "settings": page_settings,
+    }
+    handler = handlers.get(page, page_import)
+    try:
+        handler()
+    except Exception as _page_err:
+        _tb = traceback.format_exc()
+        _log_app_error(
+            "page",
+            f"Page render failed ({page}): {_page_err}",
+            detail=_tb,
+            severity="error",
+        )
+        st.error("This page encountered an unexpected error.")
+        with st.expander("Technical details"):
+            st.code(_tb)
 
-    elif page.startswith("�"): page_dashboard()
-    elif page.startswith("�📁"): page_import()
-    elif page.startswith("👥"): page_employees()
-    elif page.startswith("📈"): page_productivity()
-    elif page.startswith("📧"): page_email()
-    elif page.startswith("⚙️"): page_settings()
 
-
-main()
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as _fatal_err:
+        _fatal_tb = traceback.format_exc()
+        try:
+            _log_app_error("fatal", f"Unhandled app error: {_fatal_err}", detail=_fatal_tb)
+        except Exception:
+            pass
+        st.error("A fatal app error occurred. Please refresh or contact support.")
+        with st.expander("Technical details"):
+            st.code(_fatal_tb)

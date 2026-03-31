@@ -16,14 +16,15 @@ pip install streamlit supabase openpyxl matplotlib pandas
 1. Go to [supabase.com](https://supabase.com) and create a new project
 2. Note your **Project URL** and **anon/public API key** from Settings > API
 
-## 3. Run the database migration
+## 3. Run the database migrations
 
 1. In your Supabase dashboard, go to **SQL Editor**
 2. Open `migrations/001_setup.sql` from this repo
-3. Paste the entire contents into the SQL Editor
-4. Click **Run**
+3. Paste the entire contents into the SQL Editor and click **Run**
+4. Open `migrations/002_subscriptions.sql` from this repo
+5. Paste the entire contents into the SQL Editor and click **Run**
 
-This creates all tables, enables row-level security, sets up tenant isolation policies, and creates the `provision_tenant` function for automatic user onboarding.
+This creates all tables, enables row-level security, sets up tenant isolation policies, provisions subscription storage, and creates the `provision_tenant` function for automatic user onboarding.
 
 ## 4. Configure credentials
 

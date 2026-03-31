@@ -10,3 +10,6 @@ test_*.csv
 venv/
 .DS_Store
 .claude/
+legacy_app.py
+mv app.py
+scripts/*.local
