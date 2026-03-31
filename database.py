@@ -1182,11 +1182,39 @@ def create_billing_portal_url(
     elif flow == "subscription_update":
         if target_price_id and stripe_sub_id:
             # Preselect target plan while keeping Stripe's proration/confirmation UX.
-            payload["flow_data[type]"] = "subscription_update_confirm"
-            payload["flow_data[subscription_update_confirm][subscription]"] = stripe_sub_id
-            payload["flow_data[subscription_update_confirm][items][0][price]"] = target_price_id
-            payload["flow_data[after_completion][type]"] = "redirect"
-            payload["flow_data[after_completion][redirect][return_url]"] = return_url
+            # Stripe expects the subscription item id for update_confirm flows.
+            sub_item_id = ""
+            sub_item_qty = ""
+            try:
+                sub_get = requests.get(
+                    f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
+                    auth=(stripe_key, ""),
+                    timeout=10,
+                )
+                if sub_get.status_code == 200:
+                    sub_obj = sub_get.json()
+                    items = ((sub_obj.get("items") or {}).get("data") or [])
+                    if items:
+                        sub_item_id = items[0].get("id") or ""
+                        _qty = items[0].get("quantity")
+                        if _qty is not None:
+                            sub_item_qty = str(_qty)
+            except Exception:
+                sub_item_id = ""
+
+            if sub_item_id:
+                payload["flow_data[type]"] = "subscription_update_confirm"
+                payload["flow_data[subscription_update_confirm][subscription]"] = stripe_sub_id
+                payload["flow_data[subscription_update_confirm][items][0][id]"] = sub_item_id
+                payload["flow_data[subscription_update_confirm][items][0][price]"] = target_price_id
+                if sub_item_qty:
+                    payload["flow_data[subscription_update_confirm][items][0][quantity]"] = sub_item_qty
+                payload["flow_data[after_completion][type]"] = "redirect"
+                payload["flow_data[after_completion][redirect][return_url]"] = return_url
+            else:
+                # If item lookup fails, degrade to subscription_update so the page still opens.
+                payload["flow_data[type]"] = "subscription_update"
+                payload["flow_data[subscription_update][subscription]"] = stripe_sub_id
         elif stripe_sub_id:
             payload["flow_data[type]"] = "subscription_update"
             payload["flow_data[subscription_update][subscription]"] = stripe_sub_id
