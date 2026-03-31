@@ -208,6 +208,8 @@ def _bust_cache():
     _raw_cached_all_coaching_notes.clear()
     _raw_cached_active_flags.clear()
     _raw_cached_coaching_notes_for.clear()
+    # Also invalidate derived subscription plan cache used by sidebar badges.
+    st.session_state.pop("_current_plan", None)
 
 
 def _success_then_rerun(msg: str, delay: float = 0):
@@ -5092,7 +5094,26 @@ def page_settings():
                     st.warning("Your subscription will cancel at the end of the current period.")
 
                 _app_url    = st.context.headers.get("Origin", "http://localhost:8501")
-                _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
+                _return_url = _app_url + "/?portal=return"
+                _portal_url = create_billing_portal_url(return_url=_return_url)
+
+                # Plan-targeted deep links so Stripe opens the intended update flow.
+                _price_map = {
+                    "starter": st.secrets.get("STRIPE_PRICE_STARTER", ""),
+                    "pro": st.secrets.get("STRIPE_PRICE_PRO", ""),
+                    "business": st.secrets.get("STRIPE_PRICE_BUSINESS", ""),
+                }
+                _plan_portal_urls = {}
+                if _portal_url:
+                    for _plan_key in ("starter", "pro", "business"):
+                        _target_price = _price_map.get(_plan_key, "")
+                        _target_url = create_billing_portal_url(
+                            return_url=_return_url,
+                            target_price_id=_target_price,
+                            flow="subscription_update",
+                        )
+                        _plan_portal_urls[_plan_key] = _target_url or _portal_url
+
                 if _portal_url:
                     st.link_button("Manage Subscription (billing, cancel, update card)",
                                    _portal_url, use_container_width=True, type="primary")
@@ -5182,8 +5203,9 @@ def page_settings():
                                     st.markdown(f"<div style='font-size:12px;color:#16a34a;line-height:1.8;'>+ {_g}</div>",
                                                 unsafe_allow_html=True)
                             st.markdown("")
-                            if _portal_url:
-                                st.link_button(f"Upgrade to {_pi['label']} →", _portal_url,
+                            _target_url = _plan_portal_urls.get(_pk)
+                            if _target_url:
+                                st.link_button(f"Upgrade to {_pi['label']} →", _target_url,
                                                use_container_width=True, type="primary")
                         else:  # downgrade
                             _delta = _GAINS.get((_pk, _plan_raw), [])
@@ -5194,8 +5216,9 @@ def page_settings():
                                     st.markdown(f"<div style='font-size:12px;color:#dc2626;line-height:1.8;'>− {_l}</div>",
                                                 unsafe_allow_html=True)
                             st.markdown("")
-                            if _portal_url:
-                                st.link_button(f"Downgrade to {_pi['label']}", _portal_url,
+                            _target_url = _plan_portal_urls.get(_pk)
+                            if _target_url:
+                                st.link_button(f"Downgrade to {_pi['label']}", _target_url,
                                                use_container_width=True)
             else:
                 st.info("No active subscription found.")
@@ -5928,12 +5951,12 @@ def _verify_checkout_and_activate():
 
     _debug.append(f"stripe_customer={cust_id[:12]}...")
 
-    # List recent subscriptions for this customer
+    # List recent subscriptions for this customer and pick the best candidate
     try:
         sub_resp = _req.get(
             "https://api.stripe.com/v1/subscriptions",
             auth=(stripe_key, ""),
-            params={"customer": cust_id, "status": "active", "limit": 1},
+            params={"customer": cust_id, "status": "all", "limit": 10},
             timeout=10,
         )
         if sub_resp.status_code != 200:
@@ -5942,10 +5965,19 @@ def _verify_checkout_and_activate():
             return False
         subs = sub_resp.json().get("data", [])
         if not subs:
-            _debug.append("no active subscriptions in Stripe")
+            _debug.append("no subscriptions found in Stripe")
             st.session_state["_verify_debug"] = _debug
             return False
-        stripe_sub = subs[0]
+
+        # Prefer active/trialing/past_due, newest first.
+        _preferred = ["active", "trialing", "past_due", "unpaid", "incomplete"]
+        subs_sorted = sorted(
+            subs,
+            key=lambda s: (_preferred.index(s.get("status")) if s.get("status") in _preferred else 999,
+                           -(s.get("created") or 0)),
+        )
+        stripe_sub = subs_sorted[0]
+        _debug.append(f"stripe status picked: {stripe_sub.get('status')}")
     except Exception as e:
         _debug.append(f"stripe API err: {e}")
         st.session_state["_verify_debug"] = _debug
@@ -5996,7 +6028,7 @@ def _verify_checkout_and_activate():
             "stripe_customer_id": cust_id,
             "stripe_subscription_id": stripe_sub["id"],
             "plan": plan,
-            "status": "active",
+            "status": stripe_sub.get("status", "active"),
             "employee_limit": limit,
             "cancel_at_period_end": stripe_sub.get("cancel_at_period_end", False),
         }
@@ -6006,6 +6038,7 @@ def _verify_checkout_and_activate():
             _sub_row["current_period_end"] = datetime.fromtimestamp(_cpe, tz=timezone.utc).isoformat()
         sb.table("subscriptions").upsert(_sub_row, on_conflict="tenant_id").execute()
         _debug.append("DB upsert SUCCESS")
+        st.session_state["_current_plan"] = plan
         st.session_state["_verify_debug"] = _debug
         return True
     except Exception as e:
@@ -6070,8 +6103,14 @@ def _subscription_page():
 
     _app_url    = st.context.headers.get("Origin", "http://localhost:8501")
     _portal_url = None
+    _price_map = {}
     try:
         _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
+        _price_map = {
+            "starter": st.secrets.get("STRIPE_PRICE_STARTER", ""),
+            "pro": st.secrets.get("STRIPE_PRICE_PRO", ""),
+            "business": st.secrets.get("STRIPE_PRICE_BUSINESS", ""),
+        }
     except Exception:
         pass
 
@@ -6207,8 +6246,13 @@ def _subscription_page():
             # CTA
             _price_id = _prices.get(_pk, "")
             if _is_prev and _portal_url:
-                # Reactivate via portal (no new checkout)
-                st.link_button(f"Reactivate {_pi['label']} →", _portal_url,
+                # Reactivate via plan-targeted portal flow (safe fallback to generic portal).
+                _reactivate_url = create_billing_portal_url(
+                    return_url=_app_url + "/?portal=return",
+                    target_price_id=_price_map.get(_pk, ""),
+                    flow="subscription_update",
+                ) or _portal_url
+                st.link_button(f"Reactivate {_pi['label']} →", _reactivate_url,
                                use_container_width=True, type="primary")
             elif _price_id:
                 _btn_label  = f"Get {_pi['label']}"

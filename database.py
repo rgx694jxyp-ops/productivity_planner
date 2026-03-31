@@ -1129,8 +1129,21 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
     return None, f"Checkout creation failed: {checkout_resp.status_code} {checkout_resp.text[:200]}"
 
 
-def create_billing_portal_url(return_url: str, tenant_id: str = "") -> Optional[str]:
-    """Create a Stripe Billing Portal session for the current tenant."""
+def create_billing_portal_url(
+    return_url: str,
+    tenant_id: str = "",
+    target_price_id: str = "",
+    flow: str = "",
+) -> Optional[str]:
+    """Create a Stripe Billing Portal session for the current tenant.
+
+    Args:
+        return_url: URL users return to from Stripe portal.
+        tenant_id: Optional tenant override.
+        target_price_id: Optional Stripe Price ID for plan-targeted update flow.
+        flow: Optional deep-link flow: "subscription_update", "subscription_cancel",
+            or "payment_method_update".
+    """
     import requests
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     if not stripe_key:
@@ -1147,14 +1160,57 @@ def create_billing_portal_url(return_url: str, tenant_id: str = "") -> Optional[
     if not stripe_cid:
         return None
 
+    stripe_sub_id = ""
+    try:
+        sub_resp = (
+            sb.table("subscriptions")
+            .select("stripe_subscription_id")
+            .eq("tenant_id", tid)
+            .execute()
+        )
+        if sub_resp.data:
+            stripe_sub_id = sub_resp.data[0].get("stripe_subscription_id") or ""
+    except Exception:
+        stripe_sub_id = ""
+
+    payload = {"customer": stripe_cid, "return_url": return_url}
+    if flow == "payment_method_update":
+        payload["flow_data[type]"] = "payment_method_update"
+    elif flow == "subscription_cancel" and stripe_sub_id:
+        payload["flow_data[type]"] = "subscription_cancel"
+        payload["flow_data[subscription_cancel][subscription]"] = stripe_sub_id
+    elif flow == "subscription_update":
+        if target_price_id and stripe_sub_id:
+            # Preselect target plan while keeping Stripe's proration/confirmation UX.
+            payload["flow_data[type]"] = "subscription_update_confirm"
+            payload["flow_data[subscription_update_confirm][subscription]"] = stripe_sub_id
+            payload["flow_data[subscription_update_confirm][items][0][price]"] = target_price_id
+            payload["flow_data[after_completion][type]"] = "redirect"
+            payload["flow_data[after_completion][redirect][return_url]"] = return_url
+        elif stripe_sub_id:
+            payload["flow_data[type]"] = "subscription_update"
+            payload["flow_data[subscription_update][subscription]"] = stripe_sub_id
+
     portal_resp = requests.post(
         "https://api.stripe.com/v1/billing_portal/sessions",
         auth=(stripe_key, ""),
-        data={"customer": stripe_cid, "return_url": return_url},
+        data=payload,
         timeout=10,
     )
     if portal_resp.status_code == 200:
         return portal_resp.json().get("url")
+
+    # Fallback to the generic portal if deep-link flow params are rejected.
+    if flow:
+        fallback_resp = requests.post(
+            "https://api.stripe.com/v1/billing_portal/sessions",
+            auth=(stripe_key, ""),
+            data={"customer": stripe_cid, "return_url": return_url},
+            timeout=10,
+        )
+        if fallback_resp.status_code == 200:
+            return fallback_resp.json().get("url")
+
     return None
 
 
