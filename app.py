@@ -5053,39 +5053,161 @@ def page_settings():
             _tid_local = st.session_state.get("tenant_id", "")
             sub = get_subscription(_tid_local)
             if sub:
-                _plan = sub.get("plan", "unknown").capitalize()
-                _status = sub.get("status", "unknown")
-                _limit = sub.get("employee_limit", 0)
-                _limit_str = "Unlimited" if _limit == -1 else str(_limit)
-                _emp_count = get_employee_count(_tid_local)
+                _plan_raw   = sub.get("plan", "unknown").lower()
+                _plan_label = _plan_raw.capitalize()
+                _status     = sub.get("status", "unknown")
+                _limit      = sub.get("employee_limit", 0)
+                _limit_str  = "Unlimited" if _limit == -1 else str(_limit)
+                _emp_count  = get_employee_count(_tid_local)
                 _period_end = sub.get("current_period_end", "")
 
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Plan", _plan)
-                col2.metric("Status", _status.replace("_", " ").title())
-                col3.metric("Employees", f"{_emp_count} / {_limit_str}")
-
+                # ── Current plan banner ───────────────────────────────
+                _pc = {"starter": "#6b7280", "pro": "#2563eb", "business": "#7c3aed"}.get(_plan_raw, "#6b7280")
+                _renew_str = ""
                 if _period_end:
                     try:
-                        from datetime import datetime
                         _pe = datetime.fromisoformat(_period_end.replace("Z", "+00:00"))
-                        st.caption(f"Current period ends: {_pe.strftime('%B %d, %Y')}")
+                        _renew_str = _pe.strftime("%b %d, %Y")
                     except Exception:
                         pass
+                st.markdown(f"""
+                <div style="background:{_pc}12;border:2px solid {_pc};border-radius:10px;
+                            padding:14px 20px;margin-bottom:4px;display:flex;
+                            align-items:center;gap:16px;">
+                  <div>
+                    <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+                                letter-spacing:.07em;color:{_pc};">Your Current Plan</div>
+                    <div style="font-size:24px;font-weight:800;color:#111;
+                                line-height:1.15;">{_plan_label}</div>
+                  </div>
+                  <div style="margin-left:auto;text-align:right;line-height:1.6;">
+                    <div style="font-size:12px;color:#444;">{_emp_count} / {_limit_str} employees used</div>
+                    <div style="font-size:12px;color:#444;">{_status.replace("_"," ").title()}</div>
+                    {"<div style='font-size:12px;color:#888;'>Renews " + _renew_str + "</div>" if _renew_str else ""}
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
 
                 if sub.get("cancel_at_period_end"):
                     st.warning("Your subscription will cancel at the end of the current period.")
 
-                st.markdown("---")
-                _app_url = st.context.headers.get("Origin", "http://localhost:8501")
+                _app_url    = st.context.headers.get("Origin", "http://localhost:8501")
                 _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
                 if _portal_url:
-                    st.link_button("Manage Subscription (upgrade, cancel, update card)", _portal_url,
-                                    use_container_width=True, type="primary")
+                    st.link_button("Manage Subscription (billing, cancel, update card)",
+                                   _portal_url, use_container_width=True, type="primary")
                 else:
                     st.info("Billing portal not available. Contact support.")
+
+                # ── Plan comparison ───────────────────────────────────
+                st.markdown("---")
+                st.markdown("##### Compare Plans")
+
+                _PORD  = ["starter", "pro", "business"]
+                _PINFO = {
+                    "starter":  {"label": "Starter",  "price": "$49/mo",  "emp": "Up to 25",  "clr": "#6b7280"},
+                    "pro":      {"label": "Pro",       "price": "$149/mo", "emp": "Up to 100", "clr": "#2563eb"},
+                    "business": {"label": "Business",  "price": "$299/mo", "emp": "Unlimited", "clr": "#7c3aed"},
+                }
+                _FEATS = {
+                    "starter":  ["CSV upload & auto-detection", "Dashboard & rankings",
+                                 "Dept-level UPH tracking", "Weekly email reports", "Excel & PDF exports"],
+                    "pro":      ["Everything in Starter", "Goal setting & UPH targets",
+                                 "Employee trend analysis", "Underperformer flagging & alerts",
+                                 "Scheduled automated reports", "Custom date range reports",
+                                 "Coaching notes per employee"],
+                    "business": ["Everything in Pro", "Order & client tracking",
+                                 "Submission plans & progress", "Client trend recording",
+                                 "Multi-department management", "Priority email support"],
+                }
+                # What you GAIN when moving from key[0] → key[1]
+                _GAINS = {
+                    ("starter", "pro"):      ["75 more employee slots (25 → 100)", "Goal setting & UPH targets",
+                                              "Employee trend analysis", "Underperformer alerts",
+                                              "Scheduled automated reports", "Custom date ranges",
+                                              "Coaching notes per employee"],
+                    ("pro", "business"):     ["Unlimited employees (100 → ∞)", "Order & client tracking",
+                                              "Submission plans & progress", "Client trend recording",
+                                              "Multi-department management", "Priority email support"],
+                    ("starter", "business"): ["Unlimited employees", "Goal setting & UPH targets",
+                                              "Employee trend analysis", "Underperformer alerts",
+                                              "Scheduled reports & custom date ranges",
+                                              "Coaching notes", "Order & client tracking",
+                                              "Submission plans", "Priority email support"],
+                    ("pro", "starter"):      ["75 employee slots (100 → 25)", "Goal setting & UPH targets",
+                                              "Employee trend analysis", "Underperformer alerts",
+                                              "Scheduled reports", "Custom date ranges",
+                                              "Coaching notes per employee"],
+                    ("business", "pro"):     ["Unlimited employees (capped at 100)", "Order & client tracking",
+                                              "Submission plans & progress", "Client trend recording",
+                                              "Multi-department management", "Priority email support"],
+                    ("business", "starter"): ["Unlimited employees", "Goal setting & UPH targets",
+                                              "Employee trend analysis", "Underperformer alerts",
+                                              "Scheduled reports", "Coaching notes",
+                                              "Order & client tracking", "Submission plans",
+                                              "Priority email support"],
+                }
+
+                _cur_idx = _PORD.index(_plan_raw) if _plan_raw in _PORD else -1
+                _pcols   = st.columns(3)
+                for _ci, _pk in enumerate(_PORD):
+                    _pi    = _PINFO[_pk]
+                    _is_cur = _pk == _plan_raw
+                    _is_up  = _ci > _cur_idx >= 0
+                    _is_dn  = _ci < _cur_idx
+                    with _pcols[_ci]:
+                        if _is_cur:
+                            _badge_html = f"<div style='color:{_pc};font-size:11px;font-weight:700;text-transform:uppercase;'>✓ Your Plan</div>"
+                        elif _is_up:
+                            _badge_html = "<div style='color:#16a34a;font-size:11px;font-weight:700;text-transform:uppercase;'>↑ Upgrade</div>"
+                        else:
+                            _badge_html = "<div style='color:#dc2626;font-size:11px;font-weight:700;text-transform:uppercase;'>↓ Downgrade</div>"
+                        st.markdown(_badge_html, unsafe_allow_html=True)
+                        st.markdown(f"**{_pi['label']}** &nbsp; {_pi['price']}")
+                        st.caption(_pi['emp'] + " employees")
+
+                        if _is_cur:
+                            for _f in _FEATS.get(_pk, []):
+                                st.markdown(f"<div style='font-size:12px;color:#555;line-height:1.8;'>✓ {_f}</div>",
+                                            unsafe_allow_html=True)
+                            st.markdown("")
+                            st.button("Current Plan", disabled=True,
+                                      use_container_width=True, key=f"sub_btn_{_pk}")
+                        elif _is_up:
+                            _delta = _GAINS.get((_plan_raw, _pk), [])
+                            if _delta:
+                                st.markdown("<div style='font-size:12px;font-weight:600;margin-top:4px;'>You'd gain:</div>",
+                                            unsafe_allow_html=True)
+                                for _g in _delta:
+                                    st.markdown(f"<div style='font-size:12px;color:#16a34a;line-height:1.8;'>+ {_g}</div>",
+                                                unsafe_allow_html=True)
+                            st.markdown("")
+                            if _portal_url:
+                                st.link_button(f"Upgrade to {_pi['label']} →", _portal_url,
+                                               use_container_width=True, type="primary",
+                                               key=f"sub_link_{_pk}")
+                        else:  # downgrade
+                            _delta = _GAINS.get((_pk, _plan_raw), [])
+                            if _delta:
+                                st.markdown("<div style='font-size:12px;font-weight:600;margin-top:4px;'>You'd lose:</div>",
+                                            unsafe_allow_html=True)
+                                for _l in _delta:
+                                    st.markdown(f"<div style='font-size:12px;color:#dc2626;line-height:1.8;'>− {_l}</div>",
+                                                unsafe_allow_html=True)
+                            st.markdown("")
+                            if _portal_url:
+                                st.link_button(f"Downgrade to {_pi['label']}", _portal_url,
+                                               use_container_width=True, key=f"sub_link_{_pk}")
             else:
                 st.info("No active subscription found.")
+                _app_url = st.context.headers.get("Origin", "http://localhost:8501")
+                try:
+                    _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
+                    if _portal_url:
+                        st.link_button("Manage Subscription", _portal_url,
+                                       use_container_width=True, type="primary")
+                except Exception:
+                    pass
         except Exception as _sub_err:
             st.error(f"Could not load subscription info: {_sub_err}")
 
@@ -5904,7 +6026,7 @@ def _subscription_page():
         </div>
       </div>
       <h2 style="margin-top:24px;color:#000;">Choose Your Plan</h2>
-      <p style="color:#555;">Start optimizing your warehouse productivity today.</p>
+      <p style="color:#555;">You don't have an active plan yet. Pick one below to get started.</p>
     </div>
     """, unsafe_allow_html=True)
 
