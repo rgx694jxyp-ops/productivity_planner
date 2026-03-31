@@ -116,7 +116,7 @@ except Exception as e:
 # Backward-compatible DB client shim. Prevents NameError in production if
 # _get_db_client was not imported due to an older deployment/import path.
 try:
-    _get_db_client  # type: ignore[name-defined]
+    _ = _get_db_client  # type: ignore[name-defined]  # assignment suppresses Streamlit magic rendering
 except NameError:
     def _get_db_client():
         from database import get_client as _db_get_client
@@ -5078,7 +5078,7 @@ def page_settings():
 
                 st.markdown("---")
                 _app_url = st.context.headers.get("Origin", "http://localhost:8501")
-                _portal_url = create_billing_portal_url(return_url=_app_url)
+                _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
                 if _portal_url:
                     st.link_button("Manage Subscription (upgrade, cancel, update card)", _portal_url,
                                     use_container_width=True, type="primary")
@@ -5913,7 +5913,7 @@ def _subscription_page():
     if existing_sub and existing_sub.get("status") == "past_due":
         st.warning("Your payment is past due. Please update your payment method to continue.")
         _portal_url = create_billing_portal_url(
-            return_url=st.context.headers.get("Origin", "http://localhost:8501")
+            return_url=st.context.headers.get("Origin", "http://localhost:8501") + "/?portal=return"
         )
         if _portal_url:
             st.link_button("Update Payment Method", _portal_url, use_container_width=True)
@@ -6038,6 +6038,17 @@ def main():
         st.info("Session expired due to inactivity. Please sign in again.")
         _login_page()
         st.stop()
+
+    # ── Billing portal return — force subscription re-sync ────────────────
+    if st.query_params.get("portal") == "return":
+        st.query_params.clear()
+        st.session_state.pop("_sub_active", None)
+        with st.spinner("Refreshing your subscription…"):
+            try:
+                _verify_checkout_and_activate()
+            except Exception:
+                pass
+        st.rerun()
 
     # ── Subscription gate ─────────────────────────────────────────────────
     # Admin bypass: add ADMIN_EMAILS in secrets to skip subscription check
