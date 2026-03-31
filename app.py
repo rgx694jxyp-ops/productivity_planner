@@ -5929,9 +5929,7 @@ def _verify_checkout_and_activate():
         st.session_state["_verify_debug"] = _debug
         return False
     if not uid:
-        _debug.append("no user_id")
-        st.session_state["_verify_debug"] = _debug
-        return False
+        _debug.append("no user_id in session; continuing tenant-level sync")
 
     _debug.append(f"tenant_id={tid[:8]}...")
 
@@ -6022,8 +6020,16 @@ def _verify_checkout_and_activate():
 
     # Upsert subscription in our DB
     try:
+        _existing_user_id = ""
+        if not uid:
+            try:
+                _prev = sb.table("subscriptions").select("user_id").eq("tenant_id", tid).execute()
+                if _prev.data:
+                    _existing_user_id = _prev.data[0].get("user_id") or ""
+            except Exception:
+                _existing_user_id = ""
+
         _sub_row = {
-            "user_id": uid,
             "tenant_id": tid,
             "stripe_customer_id": cust_id,
             "stripe_subscription_id": stripe_sub["id"],
@@ -6032,6 +6038,9 @@ def _verify_checkout_and_activate():
             "employee_limit": limit,
             "cancel_at_period_end": stripe_sub.get("cancel_at_period_end", False),
         }
+        _row_user_id = uid or _existing_user_id
+        if _row_user_id:
+            _sub_row["user_id"] = _row_user_id
         _cpe = stripe_sub.get("current_period_end")
         if _cpe:
             from datetime import datetime, timezone
@@ -6310,6 +6319,18 @@ def main():
             except Exception:
                 pass
         st.rerun()
+
+    # ── Periodic Stripe sync (heals stale DB plan/status) ─────────────────
+    _now_sync = time.time()
+    _last_sub_sync = float(st.session_state.get("_last_sub_sync_ts", 0) or 0)
+    if _now_sync - _last_sub_sync > 300:
+        try:
+            _sync_ok = _verify_checkout_and_activate()
+            if _sync_ok:
+                _bust_cache()
+        except Exception:
+            pass
+        st.session_state["_last_sub_sync_ts"] = _now_sync
 
     # ── Subscription gate ─────────────────────────────────────────────────
     # Admin bypass: add ADMIN_EMAILS in secrets to skip subscription check
