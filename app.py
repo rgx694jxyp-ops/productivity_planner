@@ -4822,7 +4822,7 @@ def page_email():
         st.error("Email module not found."); return
 
     tab_smtp, tab_recip, tab_sched, tab_send = st.tabs([
-        "1️⃣ SMTP Setup", "2️⃣ Recipients", "3️⃣ Schedules", "📤 Send Now"
+        "1️⃣ Email Delivery (Easy Setup)", "2️⃣ Recipients", "3️⃣ Schedules", "📤 Send Now"
     ])
 
     # ── SMTP ─────────────────────────────────────────────────────────────────
