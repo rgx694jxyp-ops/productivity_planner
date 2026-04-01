@@ -811,9 +811,16 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.1em;
-    color: #FFFFFF;
+        color: #FFFFFF !important;
     margin-bottom: 6px;
   }
+    .dpd-rail-label,
+    .dpd-rail-label span,
+    .dpd-rail-label p,
+    .dpd-rail .stMarkdown span,
+    .dpd-rail .stMarkdown p {
+        color: #FFFFFF !important;
+    }
   .dpd-rail-name {
     font-size: 18px;
     font-weight: 700;
@@ -1433,11 +1440,14 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
     _why  = _h.escape(rec["why"])
     _dept_str = f" · {_dept}" if _dept else ""
     _n_remaining = len(remaining)
-    _remaining_note = f"<span class='dpd-rail-label'>⬇ {_n_remaining - 1} more below goal</span>" if _n_remaining > 1 else ""
+    _remaining_note = (
+        f"<div class='dpd-rail-label' style='color:#FFFFFF !important;'>⬇ {_n_remaining - 1} more below goal</div>"
+        if _n_remaining > 1 else ""
+    )
 
     st.markdown(
         f'<div class="dpd-rail">'
-        f'<div class="dpd-rail-label">▶ Recommended Action</div>'
+        f'<div class="dpd-rail-label" style="color:#FFFFFF !important;">▶ Recommended Action</div>'
         f'<div class="dpd-rail-name">{_name}{_dept_str}</div>'
         f'<div class="dpd-rail-why">{_why}</div>'
         f'{_remaining_note}'
