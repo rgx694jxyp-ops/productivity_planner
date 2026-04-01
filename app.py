@@ -811,7 +811,7 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.1em;
-    color: #7FB9F5;
+    color: #FFFFFF;
     margin-bottom: 6px;
   }
   .dpd-rail-name {
@@ -2016,9 +2016,9 @@ def page_dashboard():
     card_view = st.checkbox("Card view (mobile-friendly)", value=False, key="dash_card_view")
     if compact:
         df_compact = df[["Risk", "Name", "Current UPH", "Streak"]]
-        styled = df_compact.style.applymap(_color_risk, subset=["Risk"])
+        styled = df_compact.style.map(_color_risk, subset=["Risk"])
     else:
-        styled = df.style.applymap(_color_risk, subset=["Risk"])
+        styled = df.style.map(_color_risk, subset=["Risk"])
     st.markdown('<div class="dpd-table-view">', unsafe_allow_html=True)
     st.dataframe(styled, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
@@ -4450,7 +4450,7 @@ def page_productivity():
             except: pass
             return ""
 
-        styled = df_lc.style.applymap(_color_impact, subset=["$ Impact", "UPH Diff"])
+        styled = df_lc.style.map(_color_impact, subset=["$ Impact", "UPH Diff"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
         # Department summary
@@ -4642,7 +4642,7 @@ def page_productivity():
         else:
             df_show = df_prio
 
-        styled = df_show.style.applymap(_color_risk, subset=["Risk"])
+        styled = df_show.style.map(_color_risk, subset=["Risk"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
         st.markdown("##### Quick actions")
@@ -6278,12 +6278,50 @@ def page_settings():
                 st.divider()
 
                 _SEV_ICON = {"error": "🔴", "warning": "🟡", "info": "🔵"}
+
+                def _fmt_ts(raw_ts: str) -> str:
+                    """Convert UTC ISO timestamp to browser-local time via JS offset stored in session."""
+                    try:
+                        from datetime import timezone as _tz, timedelta as _td
+                        import datetime as _dt_mod
+                        raw = str(raw_ts or "").replace("Z", "+00:00")
+                        if not raw:
+                            return ""
+                        _utc_dt = _dt_mod.datetime.fromisoformat(raw)
+                        if _utc_dt.tzinfo is None:
+                            _utc_dt = _utc_dt.replace(tzinfo=_tz.utc)
+                        # Use tz offset (minutes) stored from JS component, if available
+                        _tz_offset_min = int(st.session_state.get("_tz_offset_min", 0))
+                        _local_dt = _utc_dt.astimezone(_tz(offset=_td(minutes=-_tz_offset_min)))
+                        return _local_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        return str(raw_ts or "")[:19].replace("T", " ")
+
+                # Capture browser UTC offset once via query params (survives rerun)
+                _tz_qp = st.query_params.get("_tz", None)
+                if _tz_qp is not None:
+                    try:
+                        st.session_state["_tz_offset_min"] = int(_tz_qp)
+                    except Exception:
+                        pass
+                if "_tz_offset_min" not in st.session_state:
+                    st.components.v1.html(
+                        "<script>"
+                        "const off = new Date().getTimezoneOffset();"
+                        "const url = new URL(window.parent.location.href);"
+                        "url.searchParams.set('_tz', off);"
+                        "window.parent.history.replaceState(null,'',url.toString());"
+                        "window.parent.location.reload();"
+                        "</script>",
+                        height=0,
+                    )
+
                 for err in errors:
                     sev = err.get("severity", "error")
                     icon = _SEV_ICON.get(sev, "⚪")
                     cat = err.get("category", "unknown")
                     msg = err.get("message", "")
-                    ts = err.get("created_at", "")[:19].replace("T", " ")
+                    ts = _fmt_ts(err.get("created_at", ""))
                     user = err.get("user_email", "")
 
                     with st.expander(f"{icon} **[{cat}]** {msg[:120]}{'…' if len(msg) > 120 else ''} — {ts}"):
