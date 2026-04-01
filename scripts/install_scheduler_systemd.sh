@@ -28,6 +28,17 @@ if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_KEY:-}" ]]; then
   exit 1
 fi
 
+if [[ "$SUPABASE_URL" == *"YOUR_PROJECT_REF"* || "$SUPABASE_URL" == *"localhost"* || "$SUPABASE_URL" != https://*.supabase.co* ]]; then
+  echo "ERROR: SUPABASE_URL looks invalid: '$SUPABASE_URL'"
+  echo "Expected format: https://<project-ref>.supabase.co"
+  exit 1
+fi
+
+if [[ "$SUPABASE_KEY" == *"YOUR_"* || ${#SUPABASE_KEY} -lt 40 ]]; then
+  echo "ERROR: SUPABASE_KEY looks invalid (placeholder or too short)."
+  exit 1
+fi
+
 mkdir -p "$LOG_DIR"
 
 cat > "$SERVICE_FILE" <<SERVICE

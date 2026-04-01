@@ -70,15 +70,17 @@ def _decrypt(value: str) -> str:
         return value  # return as-is if decryption fails (key changed, etc.)
 
 
-def _email_config_file() -> str:
+def _email_config_file(tenant_id: str = "") -> str:
     """Return a tenant-specific email config path, falling back to the shared file."""
-    try:
-        import streamlit as st
-        tid = st.session_state.get("tenant_id", "")
-        if tid:
-            return os.path.join(_BASE_DIR, f"dpd_email_config_{tid}.json")
-    except Exception:
-        pass
+    tid = (tenant_id or "").strip()
+    if not tid:
+        try:
+            import streamlit as st
+            tid = st.session_state.get("tenant_id", "")
+        except Exception:
+            tid = ""
+    if tid:
+        return os.path.join(_BASE_DIR, f"dpd_email_config_{tid}.json")
     return os.path.join(_BASE_DIR, "dpd_email_config.json")
 
 
@@ -101,7 +103,7 @@ def load_email_config(tenant_id: str = "") -> dict:
     except Exception:
         pass
     # Fallback to file
-    ecf = _email_config_file()
+    ecf = _email_config_file(tenant_id)
     if not os.path.exists(ecf):
         return _empty_config()
     try:
@@ -128,7 +130,7 @@ def save_email_config(data: dict, tenant_id: str = ""):
         pass
     # Also save to file as backup
     try:
-        with open(_email_config_file(), "w", encoding="utf-8") as f:
+        with open(_email_config_file(tenant_id), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except IOError:
         pass

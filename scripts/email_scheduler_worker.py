@@ -11,9 +11,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
+import json
 import os
 import sys
 import time
+import traceback
 from datetime import date, timedelta
 from typing import Dict, List, Tuple
 
@@ -209,6 +212,20 @@ def _run_once() -> None:
     )
 
     if not cfg_rows:
+        pattern = os.path.join(ROOT_DIR, "dpd_email_config_*.json")
+        for path in glob.glob(pattern):
+            try:
+                tenant_id = os.path.basename(path)[len("dpd_email_config_"):-len(".json")]
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                cfg_rows.append({
+                    "tenant_id": tenant_id,
+                    "schedules": data.get("schedules") or [],
+                })
+            except Exception:
+                continue
+
+    if not cfg_rows:
         _log("No tenant email configs found")
         return
 
@@ -277,6 +294,7 @@ def main() -> None:
             _run_once()
         except Exception as e:
             _log(f"Unhandled worker error: {e}")
+            _log(traceback.format_exc().strip())
         time.sleep(max(args.interval, 15))
 
 

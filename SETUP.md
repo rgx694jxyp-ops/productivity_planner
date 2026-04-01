@@ -66,37 +66,16 @@ Copy `.env.example` to `.env` and fill in your values. Use a library like `pytho
 streamlit run app.py
 ```
 
-## 8. Reliable Scheduled Emails (Cross-platform Worker)
+## 8. Email Reports (Manual Sending)
 
-For guaranteed schedule delivery (even with no active browser/session), run the standalone worker.
+Email reports are currently configured for manual sending from inside the app.
 
-Worker script:
-```bash
-python3 scripts/email_scheduler_worker.py --once
-python3 scripts/email_scheduler_worker.py --interval 60
-```
+Use the app's **Email Setup** page to:
+- configure delivery settings (SMTP or Resend)
+- add recipients
+- send reports from the **Send Now** tab
 
-### macOS (launchd)
-```bash
-export SUPABASE_URL="https://your-project.supabase.co"
-export SUPABASE_KEY="your-anon-key-here"
-./scripts/install_scheduler_launchd.sh
-```
-
-### Linux (systemd)
-```bash
-export SUPABASE_URL="https://your-project.supabase.co"
-export SUPABASE_KEY="your-anon-key-here"
-sudo ./scripts/install_scheduler_systemd.sh
-```
-
-### Windows (Task Scheduler)
-Open PowerShell in the repo root and run:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduler_windows.ps1 -SupabaseUrl "https://your-project.supabase.co" -SupabaseKey "your-anon-key-here"
-```
-
-Log files are written under `logs/`.
+No background scheduler setup is required.
 
 Sign in with the email/password you created. On first login, the app automatically:
 - Creates a tenant (organization) for you
@@ -146,7 +125,7 @@ ranker.py           — Employee UPH ranking
 trends.py           — Monthly/weekly trend aggregation
 goals.py            — Department targets and employee flagging
 settings.py         — User preferences
-email_engine.py     — Email recipients, schedules, SMTP sending
+email_engine.py     — Email recipients, delivery, SMTP sending
 exporter.py         — Excel/PDF export
 charts.py           — Matplotlib charts
 error_log.py        — Pipeline error logging

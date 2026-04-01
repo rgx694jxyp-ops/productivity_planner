@@ -83,6 +83,9 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Temporary product decision: keep manual email only, disable automated schedules.
+EMAIL_SCHEDULER_ENABLED = False
+
 # ════════════════════════════════════════════════════════════════════════════════
 # IMPORTS FROM INTERNAL MODULES
 # ════════════════════════════════════════════════════════════════════════════════
@@ -295,6 +298,9 @@ def _email_timezone_options() -> list[str]:
 def _run_scheduled_reports_for_tenant(tenant_id: str = "", force_now: bool = False,
                                       schedule_names: list[str] | None = None) -> list[dict]:
     """Send scheduled reports for one tenant and return per-schedule results."""
+    if not EMAIL_SCHEDULER_ENABLED:
+        return []
+
     from email_engine import (
         get_schedules_due_now, get_schedules, send_report_email,
         mark_schedule_sent, load_email_config,
@@ -371,6 +377,9 @@ def _run_scheduled_reports_for_tenant(tenant_id: str = "", force_now: bool = Fal
 def _bg_send_scheduled_emails():
     """Called by the background thread every 60 s to fire due email schedules.
     Iterates over ALL tenants with email configs — no st.session_state needed."""
+    if not EMAIL_SCHEDULER_ENABLED:
+        return
+
     try:
         from database    import SUPABASE_URL as _BG_URL, SUPABASE_KEY as _BG_KEY
         from supabase    import create_client as _bg_create
@@ -412,6 +421,9 @@ _email_thread_started = False
 
 def _start_email_thread():
     """Start a background thread that checks email schedules every 60 s. Idempotent."""
+    if not EMAIL_SCHEDULER_ENABLED:
+        return None
+
     global _email_thread_started
     if _email_thread_started:
         return
@@ -4810,19 +4822,17 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
 
 def page_email():
     st.title("📧 Email Setup")
-    st.caption("Configure who receives reports, when they are sent, and send manual reports.")
+    st.caption("Configure who receives reports and send manual reports.")
     try:
         from email_engine import (save_smtp_config, get_smtp_config, add_recipient,
-                                   remove_recipient, get_recipients, add_schedule,
-                                   remove_schedule, get_schedules, get_schedules_due_now, send_report_email,
+                                   remove_recipient, get_recipients, send_report_email,
                                    save_email_delivery_config, get_email_delivery_config,
-                                   build_dept_email_body, DAY_NAMES,
-                                   import_recipients_from_csv)
+                                   build_dept_email_body, import_recipients_from_csv)
     except ImportError:
         st.error("Email module not found."); return
 
-    tab_smtp, tab_recip, tab_sched, tab_send = st.tabs([
-        "1️⃣ Email Delivery (Easy Setup)", "2️⃣ Recipients", "3️⃣ Schedules", "📤 Send Now"
+    tab_smtp, tab_recip, tab_send = st.tabs([
+        "1️⃣ Email Delivery (Easy Setup)", "2️⃣ Recipients", "📤 Send Now"
     ])
 
     # ── SMTP ─────────────────────────────────────────────────────────────────
@@ -4890,7 +4900,7 @@ def page_email():
             st.divider()
             st.markdown("##### Resend Quick Setup")
             st.caption("1) Create Resend account. 2) Verify sender domain. 3) Create API key. 4) Paste key. 5) Send test.")
-            st.success("Once saved, all scheduled emails use this method automatically.")
+            st.success("Once saved, all emails sent from this app use this method.")
 
         if "own email" in mode:
             st.caption("Recommended for most users: enter your own inbox email + app password. We auto-fill most server settings.")
@@ -5124,223 +5134,10 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
             else:
                 st.warning("Enter at least one name and email before saving.")
 
-    # ── Schedules ─────────────────────────────────────────────────────────────
-    with tab_sched:
-        if not _plan_gate("pro", "Automated Schedules"):
-            return
-        st.subheader("Automated send schedules")
-        from settings import Settings as _SchedTzS
-        _sched_settings = _SchedTzS()
-        _sched_tz = _sched_settings.get("timezone", "")
-        _tz_options = _email_timezone_options()
-        _tz_display = ["(Select a timezone)"] + _tz_options
-        _tz_idx = (_tz_options.index(_sched_tz) + 1) if _sched_tz in _tz_options else 0
-
-        st.markdown("##### Timezone")
-        _tz_col1, _tz_col2 = st.columns([3, 1])
-        _sched_tz_choice = _tz_col1.selectbox(
-            "Timezone used for schedules",
-            _tz_display,
-            index=_tz_idx,
-            key="sched_timezone_select",
-        )
-        if _tz_col2.button("Save timezone", key="save_sched_tz", type="primary", use_container_width=True):
-            _new_tz = "" if _sched_tz_choice.startswith("(") else _sched_tz_choice
-            _sched_settings.set("timezone", _new_tz)
-            st.success(f"✓ Timezone set to '{_new_tz or 'server local time'}'.")
-            st.rerun()
-        if _sched_tz:
-            st.caption(f"📍 Current timezone: {_sched_tz}")
-        else:
-            st.warning("Select and save a timezone before relying on automated schedules.")
-
-        _dbg_now = datetime.now()
-        if _sched_tz:
-            try:
-                from zoneinfo import ZoneInfo
-                _dbg_now = datetime.now(ZoneInfo(_sched_tz))
-            except Exception:
-                pass
-        _dbg_day = _dbg_now.strftime("%A")
-        _dbg_time = _dbg_now.strftime("%H:%M")
-        st.info(f"Scheduler local time: {_dbg_now.strftime('%Y-%m-%d %H:%M:%S %Z')} ({_dbg_day})")
-
-        _debug_cols = st.columns(2)
-        if _debug_cols[0].button("Run due schedules now", key="run_due_sched_now", use_container_width=True):
-            _results = _run_scheduled_reports_for_tenant(force_now=False)
-            if _results:
-                _ok_count = sum(1 for r in _results if r.get("ok"))
-                st.success(f"Ran {_ok_count}/{len(_results)} due schedule(s).")
-                for _res in _results:
-                    if _res.get("ok"):
-                        st.write(f"✓ {_res.get('name')} → {', '.join(_res.get('recipients', []))}")
-                    else:
-                        st.write(f"✕ {_res.get('name')} → {_res.get('error')}")
-            else:
-                st.info("No schedules are due right now.")
-        if _debug_cols[1].button("Send all active schedules now", key="force_all_sched_now", use_container_width=True):
-            _results = _run_scheduled_reports_for_tenant(force_now=True)
-            if _results:
-                _ok_count = sum(1 for r in _results if r.get("ok"))
-                st.success(f"Sent {_ok_count}/{len(_results)} active schedule(s).")
-                for _res in _results:
-                    if _res.get("ok"):
-                        st.write(f"✓ {_res.get('name')} → {', '.join(_res.get('recipients', []))}")
-                    else:
-                        st.write(f"✕ {_res.get('name')} → {_res.get('error')}")
-            else:
-                st.info("No active schedules found to send.")
-
-        _all_recips = get_recipients()
-        _recip_labels = [f"{r['name']} <{r['email']}>" for r in _all_recips]
-        _recip_emails = {f"{r['name']} <{r['email']}>": r["email"] for r in _all_recips}
-
-        schedules = get_schedules()
-        if schedules:
-            for s in schedules:
-                _last = s.get("last_sent","Never")
-                _sper = s.get("report_period", "Prior day")
-                if _sper == "Custom":
-                    _ds = s.get("date_start", "?")
-                    _de = s.get("date_end", "?")
-                    _period_lbl = _ds if _ds == _de else f"{_ds} → {_de}"
-                else:
-                    _period_lbl = _sper
-                with st.expander(f"**{s['name']}** · {', '.join(s.get('days',[]))} at {s.get('send_time','')} · {_period_lbl} · Last sent: {_last}"):
-                    # Show assigned recipients
-                    assigned = s.get("recipients", [])
-                    if assigned:
-                        st.caption(f"Recipients: {', '.join(assigned)}")
-                    else:
-                        if not _all_recips:
-                            st.warning("⚠️ No recipients configured. Add them in the Recipients tab before this schedule will send.")
-                        else:
-                            st.caption("No recipients assigned — all recipients will receive this.")
-                    # Edit recipients inline
-                    cur_labels = [lbl for lbl, em in _recip_emails.items() if em in assigned]
-                    new_labels = st.multiselect("Recipients for this schedule",
-                                                _recip_labels, default=cur_labels,
-                                                key=f"sched_recips_{s['name']}")
-                    sc1, sc2, sc3 = st.columns(3)
-                    if sc1.button("💾 Save recipients", key=f"sched_save_{s['name']}", use_container_width=True):
-                        new_emails = [_recip_emails[lbl] for lbl in new_labels if lbl in _recip_emails]
-                        from email_engine import update_schedule_recipients
-                        update_schedule_recipients(s["name"], new_emails)
-                        st.toast("✓ Recipients updated", icon="✅")
-                        st.rerun()
-                    if sc2.button("▶ Test now", key=f"sched_test_{s['name']}", use_container_width=True):
-                        with st.spinner("Building and sending test report…"):
-                            _results = _run_scheduled_reports_for_tenant(force_now=True, schedule_names=[s["name"]])
-                        if _results and _results[0].get("ok"):
-                            st.success(f"Test sent to {', '.join(_results[0].get('recipients', []))}")
-                        elif _results:
-                            st.error(f"Send failed: {_results[0].get('error')}")
-                        else:
-                            st.warning("No recipients to send to.")
-                    if sc3.button("🗑 Remove", key=f"sched_rm_{s['name']}", type="secondary", use_container_width=True):
-                        remove_schedule(s["name"])
-                        st.rerun()
-            st.divider()
-
-        st.subheader("Create new schedule")
-        with st.form("add_sched_form", clear_on_submit=True):
-            sname   = st.text_input("Schedule name", placeholder="e.g. Monday Morning Summary")
-
-            # Date range: pick custom dates or a rolling period
-            from datetime import timedelta as _sch_td
-            _sch_today = date.today()
-            speriod_mode = st.radio("Report covers",
-                                     ["Custom date range", "Rolling period"],
-                                     horizontal=True, key="sched_period_mode")
-            if speriod_mode == "Custom date range":
-                _sd1, _sd2 = st.columns(2)
-                _sch_start = _sd1.date_input("Start date", value=_sch_today - _sch_td(days=1),
-                                              key="sched_date_start")
-                _sch_end   = _sd2.date_input("End date (same for single day)",
-                                              value=_sch_start, key="sched_date_end")
-                speriod = "Custom"
-            else:
-                speriod = st.selectbox("Report period",
-                                        ["Prior day", "Prior week", "Prior month", "Current week"])
-                _sch_start = _sch_end = None
-
-            srecips = st.multiselect("Recipients", _recip_labels)
-            if not _recip_labels:
-                st.warning("⚠️ **No recipients available.** Add recipients in the Recipients tab before creating this schedule.")
-            else:
-                st.caption("If none are selected, this schedule will use all global recipients.")
-            
-            st.caption("**Send on these days**")
-            daily   = st.checkbox("Every day")
-            if not daily:
-                day_cols = st.columns(7)
-                sel_days = [d for i,d in enumerate(DAY_NAMES)
-                            if day_cols[i].checkbox(d[:3], key=f"sd_{d}")]
-            else:
-                sel_days = ["Daily"]
-            send_time = st.time_input("Send time",
-                                      value=datetime.strptime("08:00","%H:%M").time())
-            subj = st.text_input("Email subject (optional)",
-                                 placeholder="Weekly Performance Report")
-            if st.form_submit_button("Create schedule", type="primary", disabled=not bool(_sched_tz)):
-                if not sname.strip():
-                    st.warning("Give the schedule a name.")
-                elif not _sched_tz:
-                    st.warning("Select and save a timezone first.")
-                elif not sel_days:
-                    st.warning("Select at least one day.")
-                elif speriod == "Custom" and _sch_end < _sch_start:
-                    st.warning("End date cannot be before start date.")
-                else:
-                    sel_emails = [_recip_emails[lbl] for lbl in srecips if lbl in _recip_emails]
-                    _ds_str = _sch_start.isoformat() if _sch_start else ""
-                    _de_str = _sch_end.isoformat() if _sch_end else ""
-                    add_schedule(sname.strip(), [], sel_days,
-                                 send_time.strftime("%H:%M"), subj, speriod,
-                                 sel_emails, _ds_str, _de_str)
-                    _success_then_rerun(f"✓ Schedule '{sname}' created.")
-
-        st.markdown("##### Schedule timing check")
-        _dbg_due = get_schedules_due_now(timezone=_sched_tz)
-        if _dbg_due:
-            st.success(f"{len(_dbg_due)} schedule(s) are due right now.")
-            for _dbg_s in _dbg_due:
-                st.write(f"✓ {_dbg_s.get('name')} at {_dbg_s.get('send_time')} on {_dbg_s.get('days')}")
-        else:
-            _all_scheds = get_schedules()
-            if _all_scheds:
-                for _dbg_s in _all_scheds:
-                    _dbg_st = _dbg_s.get('send_time', '?')
-                    _dbg_da = _dbg_s.get('days', [])
-                    _dbg_match_day = _dbg_day in _dbg_da or 'Daily' in _dbg_da
-                    _dbg_status = 'Due now' if (_dbg_match_day and _dbg_time >= _dbg_st) else (f'Wait until {_dbg_st}' if _dbg_match_day else 'Wrong day')
-                    st.write(f"• {_dbg_s.get('name')} → {_dbg_status}")
-            else:
-                st.info("No schedules configured yet. Create one above.")
-
-        # ── Scheduler log viewer ─────────────────────────────────────────────
-        st.divider()
-        with st.expander("📄 Scheduler log"):
-            st.caption("Background email scheduler activity. Useful for debugging missed sends.")
-            try:
-                _log_path = _tenant_log_path("dpd_email_scheduler")
-                import os as _slos
-                if _slos.path.exists(_log_path):
-                    _lines = open(_log_path, encoding="utf-8").readlines()
-                    _recent = _lines[-30:] if len(_lines) > 30 else _lines
-                    st.code("".join(reversed(_recent)), language=None)
-                    if st.button("Clear log", key="clear_sched_log", type="secondary"):
-                        open(_log_path, "w").close()
-                        st.rerun()
-                else:
-                    st.info("No scheduler log yet — it will appear after the email background thread runs.")
-            except Exception as _sle:
-                st.warning(f"Could not read log: {_sle}")
-
     # ── Send Now ──────────────────────────────────────────────────────────────
     with tab_send:
         st.subheader("Send a report now")
-        st.caption("Manually send a department performance report without waiting for a schedule.")
+        st.caption("Manually send a department performance report.")
 
         # Load archived data if pipeline hasn't run this session
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
@@ -5548,7 +5345,7 @@ def page_settings():
                                  "Dept-level UPH tracking", "Weekly email reports", "Excel & PDF exports"],
                     "pro":      ["Everything in Starter", "Goal setting & UPH targets",
                                  "Employee trend analysis", "Underperformer flagging & alerts",
-                                 "Scheduled automated reports", "Custom date range reports",
+                                 "Custom date range reports",
                                  "Coaching notes per employee"],
                     "business": ["Everything in Pro", "Order & client tracking",
                                  "Submission plans & progress", "Client trend recording",
@@ -5558,26 +5355,26 @@ def page_settings():
                 _GAINS = {
                     ("starter", "pro"):      ["75 more employee slots (25 → 100)", "Goal setting & UPH targets",
                                               "Employee trend analysis", "Underperformer alerts",
-                                              "Scheduled automated reports", "Custom date ranges",
+                                              "Custom date ranges",
                                               "Coaching notes per employee"],
                     ("pro", "business"):     ["Unlimited employees (100 → ∞)", "Order & client tracking",
                                               "Submission plans & progress", "Client trend recording",
                                               "Multi-department management", "Priority email support"],
                     ("starter", "business"): ["Unlimited employees", "Goal setting & UPH targets",
                                               "Employee trend analysis", "Underperformer alerts",
-                                              "Scheduled reports & custom date ranges",
+                                              "Custom date ranges",
                                               "Coaching notes", "Order & client tracking",
                                               "Submission plans", "Priority email support"],
                     ("pro", "starter"):      ["75 employee slots (100 → 25)", "Goal setting & UPH targets",
                                               "Employee trend analysis", "Underperformer alerts",
-                                              "Scheduled reports", "Custom date ranges",
+                                              "Custom date ranges",
                                               "Coaching notes per employee"],
                     ("business", "pro"):     ["Unlimited employees (capped at 100)", "Order & client tracking",
                                               "Submission plans & progress", "Client trend recording",
                                               "Multi-department management", "Priority email support"],
                     ("business", "starter"): ["Unlimited employees", "Goal setting & UPH targets",
                                               "Employee trend analysis", "Underperformer alerts",
-                                              "Scheduled reports", "Coaching notes",
+                                              "Coaching notes",
                                               "Order & client tracking", "Submission plans",
                                               "Priority email support"],
                 }
@@ -6439,7 +6236,7 @@ def _subscription_page():
                      "Dept-level UPH tracking", "Weekly email reports", "Excel & PDF exports"],
         "pro":      ["Everything in Starter", "Goal setting & UPH targets",
                      "Employee trend analysis", "Underperformer flagging & alerts",
-                     "Scheduled automated reports", "Custom date range reports",
+                     "Custom date range reports",
                      "Coaching notes per employee"],
         "business": ["Everything in Pro", "Order & client tracking",
                      "Submission plans & progress", "Client trend recording",
@@ -6728,23 +6525,25 @@ def main():
             # If subscription check fails (table missing, etc.), let user through
             st.session_state["_sub_active"] = True
 
-    # Start background email thread (idempotent — only creates once per process)
-    _start_email_thread()
+    # Start background email thread only when scheduling is enabled.
+    if EMAIL_SCHEDULER_ENABLED:
+        _start_email_thread()
 
     # Show confirmation if we just synced a plan from the billing portal
     if st.session_state.get("_portal_synced_plan"):
         _synced_label = st.session_state.pop("_portal_synced_plan")
         st.toast(f"Subscription updated — you're now on the {_synced_label} plan.", icon="✅")
 
-    # Check email schedules at most once per 60 seconds (not every click)
-    _now = time.time()
-    if _now - st.session_state.get("_last_email_check", 0) > 60:
-        st.session_state["_last_email_check"] = _now
-        try:
-            _run_scheduled_reports_for_tenant(force_now=False)
-        except Exception as _eml_err:
-            _email_log(f"Page-render email check error: {_eml_err}")
-            _log_app_error("email", f"Schedule check error: {_eml_err}", detail=traceback.format_exc())
+    # Check schedules only when scheduler is enabled.
+    if EMAIL_SCHEDULER_ENABLED:
+        _now = time.time()
+        if _now - st.session_state.get("_last_email_check", 0) > 60:
+            st.session_state["_last_email_check"] = _now
+            try:
+                _run_scheduled_reports_for_tenant(force_now=False)
+            except Exception as _eml_err:
+                _email_log(f"Page-render email check error: {_eml_err}")
+                _log_app_error("email", f"Schedule check error: {_eml_err}", detail=traceback.format_exc())
 
     page = render_sidebar()
     handlers = {

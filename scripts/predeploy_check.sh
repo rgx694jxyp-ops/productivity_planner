@@ -11,6 +11,7 @@ test -f migrations/001_setup.sql
 test -f migrations/002_subscriptions.sql
 test -f supabase/functions/stripe-webhook/index.ts
 test -f scripts/email_scheduler_worker.py
+test -f scripts/setup_scheduler.sh
 
 echo "[3/6] Known bad character scan (replacement chars)"
 if command -v rg >/dev/null 2>&1; then

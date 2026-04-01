@@ -24,6 +24,14 @@ if (-not $Python) {
     throw "Python not found. Install Python or create venv."
 }
 
+if ($SupabaseUrl -match "YOUR_PROJECT_REF" -or $SupabaseUrl -match "localhost" -or $SupabaseUrl -notmatch "^https://[A-Za-z0-9-]+\.supabase\.co/?$") {
+    throw "SupabaseUrl looks invalid. Expected format: https://<project-ref>.supabase.co"
+}
+
+if ($SupabaseKey -match "YOUR_" -or $SupabaseKey.Length -lt 40) {
+    throw "SupabaseKey looks invalid (placeholder or too short)."
+}
+
 $cmdContent = @"
 @echo off
 set SUPABASE_URL=$SupabaseUrl
