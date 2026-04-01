@@ -4828,21 +4828,21 @@ def page_email():
     # ── SMTP ─────────────────────────────────────────────────────────────────
     with tab_smtp:
         st.subheader("Email delivery settings")
-        st.caption("Recommended: use Resend API (no Gmail app password needed). SMTP is still available as fallback.")
+        st.caption("Use your own work or personal email with SMTP, or choose Resend API.")
 
         cfg = get_smtp_config()
         delivery_cfg = get_email_delivery_config()
-        mode_label = "Resend API (recommended)" if delivery_cfg.get("mode") == "resend" else "SMTP (traditional)"
+        mode_label = "Use Resend API (optional)" if delivery_cfg.get("mode") == "resend" else "Use my own email (work/personal)"
         mode = st.radio(
             "Delivery method",
-            ["Resend API (recommended)", "SMTP (traditional)"],
-            index=0 if "Resend" in mode_label else 1,
+            ["Use my own email (work/personal)", "Use Resend API (optional)"],
+            index=1 if "Resend" in mode_label else 0,
             horizontal=True,
             key="email_delivery_mode",
         )
 
         if "Resend" in mode:
-            st.info("Easiest setup: create one API key in Resend, verify sender domain, paste key here.")
+            st.info("Resend is optional. Choose this if you prefer API-key delivery over your own inbox credentials.")
             lr1, lr2 = st.columns(2)
             lr1.link_button("Create Resend Account", "https://resend.com", use_container_width=True)
             lr2.link_button("Verify Domain Guide", "https://resend.com/docs/dashboard/domains/introduction", use_container_width=True)
@@ -4892,8 +4892,8 @@ def page_email():
             st.caption("1) Create Resend account. 2) Verify sender domain. 3) Create API key. 4) Paste key. 5) Send test.")
             st.success("Once saved, all scheduled emails use this method automatically.")
 
-        if "SMTP" in mode:
-            st.caption("Pick your email provider below and we'll fill in the server details automatically.")
+        if "own email" in mode:
+            st.caption("Recommended for most users: enter your own inbox email + app password. We auto-fill most server settings.")
 
             # Provider quick-select
             providers = {
@@ -4999,6 +4999,8 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                     return "smtp.mail.yahoo.com", 587, True
                 if dom in {"icloud.com", "me.com", "mac.com"}:
                     return "smtp.mail.me.com", 587, True
+                if dom and "." in dom:
+                    return f"smtp.{dom}", 587, True
                 return "", 587, True
 
             _saved_user = cfg.get("username", "")
@@ -5015,6 +5017,7 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                 _det_server, _det_port, _det_tls = _infer_smtp_from_email(username)
                 if not cfg.get("server") and _det_server:
                     st.caption(f"Auto-detected SMTP: {_det_server}:{_det_port} (TLS {'on' if _det_tls else 'off'})")
+                st.caption("If your company uses Microsoft 365 or Google Workspace, this usually works as-is.")
                 password = st.text_input("App password", value=cfg.get("password",""),
                                           type="password", placeholder="16-character app password")
                 # Advanced — collapsed by default
@@ -5068,6 +5071,8 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                             st.warning("**Encryption error.** Try unchecking 'Use TLS encryption' in Advanced settings, or switch to port 465 (SSL).")
                         else:
                             st.caption(f"Technical details: {err}")
+        else:
+            st.info("Switch delivery method to 'Use my own email (work/personal)' if you want to send from your own inbox instead.")
 
     # ── Recipients ────────────────────────────────────────────────────────────
     with tab_recip:
