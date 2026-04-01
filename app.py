@@ -5030,7 +5030,7 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                         _prt = _auto_prt
                         _tls = _auto_tls
                 save_smtp_config(_svr, _prt, username, password, username, _tls)
-                    save_email_delivery_config(mode="smtp", provider="resend", from_addr=username)
+                save_email_delivery_config(mode="smtp", provider="resend", from_addr=username)
                 # Clear overrides now that they are saved
                 st.session_state.pop("smtp_server_override", None)
                 st.session_state.pop("smtp_port_override", None)
