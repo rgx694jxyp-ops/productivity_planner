@@ -793,6 +793,198 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
 
   /* ── Time input ── */
   .stTimeInput input { background: #ffffff !important; color: #1A2D42 !important; }
+
+  /* ════════════════════════════════════════════════════════════
+     DPD COMMAND BAR — Primary Action Rail
+     A visually dominant panel that anchors every key page.
+  ════════════════════════════════════════════════════════════ */
+  .dpd-rail {
+    background: linear-gradient(135deg, #0F2D52 0%, #1A4A8A 100%);
+    border-radius: 10px;
+    padding: 20px 24px 18px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 12px rgba(15,45,82,0.18);
+    border-left: 4px solid #4DA3FF;
+  }
+  .dpd-rail-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #7FB9F5;
+    margin-bottom: 6px;
+  }
+  .dpd-rail-name {
+    font-size: 18px;
+    font-weight: 700;
+    color: #FFFFFF;
+    margin-bottom: 4px;
+  }
+  .dpd-rail-why {
+    font-size: 13px;
+    color: #A8C8F0;
+    margin-bottom: 14px;
+  }
+  .dpd-rail-ok {
+    font-size: 15px;
+    font-weight: 600;
+    color: #6FE090;
+  }
+
+  /* ── Primary CTA: solid, large padding ── */
+  .dpd-rail .stButton > button[kind="primary"],
+  .dpd-rail button[data-testid="stBaseButton-primary"] {
+    background-color: #4DA3FF !important;
+    color: #002244 !important;
+    font-size: 14px !important;
+    font-weight: 700 !important;
+    padding: 10px 0 !important;
+    border: none !important;
+  }
+  .dpd-rail .stButton > button[kind="primary"]:hover,
+  .dpd-rail button[data-testid="stBaseButton-primary"]:hover {
+    background-color: #79BBFF !important;
+  }
+  .dpd-rail .stButton > button[kind="primary"] p,
+  .dpd-rail .stButton > button[kind="primary"] span,
+  .dpd-rail button[data-testid="stBaseButton-primary"] p,
+  .dpd-rail button[data-testid="stBaseButton-primary"] span { color: #002244 !important; }
+
+  /* ── Secondary CTA: outline ghost ── */
+  .dpd-rail .stButton > button:not([kind="primary"]),
+  .dpd-rail button[data-testid="stBaseButton-secondary"] {
+    background-color: transparent !important;
+    color: #A8C8F0 !important;
+    border: 1px solid #4DA3FF !important;
+    font-size: 13px !important;
+    padding: 9px 0 !important;
+  }
+  .dpd-rail .stButton > button:not([kind="primary"]):hover,
+  .dpd-rail button[data-testid="stBaseButton-secondary"]:hover {
+    background-color: rgba(77,163,255,0.12) !important;
+    color: #FFFFFF !important;
+  }
+  .dpd-rail .stButton > button:not([kind="primary"]) p,
+  .dpd-rail .stButton > button:not([kind="primary"]) span,
+  .dpd-rail button[data-testid="stBaseButton-secondary"] p,
+  .dpd-rail button[data-testid="stBaseButton-secondary"] span { color: inherit !important; }
+
+  /* ════════════════════════════════════════════════════════════
+     FILTER CHIPS
+  ════════════════════════════════════════════════════════════ */
+  .dpd-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 10px 0 4px;
+  }
+  .dpd-chip-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #5A7A9C;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-right: 4px;
+  }
+
+  /* ════════════════════════════════════════════════════════════
+     STICKY BOTTOM COMMAND BAR (bulk actions)
+  ════════════════════════════════════════════════════════════ */
+  .dpd-sticky-wrap {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 9999;
+    background: #0F2D52;
+    border-top: 2px solid #4DA3FF;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.2);
+  }
+  .dpd-sticky-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #FFFFFF;
+    white-space: nowrap;
+    margin-right: 8px;
+    flex-shrink: 0;
+  }
+  .dpd-sticky-wrap .stButton > button[kind="primary"],
+  .dpd-sticky-wrap button[data-testid="stBaseButton-primary"] {
+    background-color: #4DA3FF !important;
+    color: #002244 !important;
+    font-weight: 700 !important;
+    font-size: 13px !important;
+    border: none !important;
+    padding: 8px 18px !important;
+    border-radius: 6px !important;
+  }
+  .dpd-sticky-wrap .stButton > button:not([kind="primary"]),
+  .dpd-sticky-wrap button[data-testid="stBaseButton-secondary"] {
+    background-color: transparent !important;
+    color: #A8C8F0 !important;
+    border: 1px solid #4DA3FF !important;
+    font-size: 13px !important;
+    padding: 7px 16px !important;
+    border-radius: 6px !important;
+  }
+  /* Push main content up when bar is visible */
+  .dpd-sticky-spacer { height: 70px; }
+
+  /* ════════════════════════════════════════════════════════════
+     SESSION PROGRESS TRACKER
+  ════════════════════════════════════════════════════════════ */
+  .dpd-progress-bar {
+    background: #E8F0F9;
+    border-radius: 6px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 12px;
+    color: #0F2D52;
+    margin-bottom: 12px;
+    border: 1px solid #C5D4E8;
+  }
+  .dpd-progress-done { color: #2E7D32; font-weight: 700; }
+  .dpd-progress-left { color: #E65100; font-weight: 700; }
+
+  /* ════════════════════════════════════════════════════════════
+     SECTION RHYTHM — breathing space between major blocks
+  ════════════════════════════════════════════════════════════ */
+  .dpd-section { margin-top: 20px; margin-bottom: 6px; }
+  hr { margin-top: 20px !important; margin-bottom: 20px !important; }
+
+  /* ════════════════════════════════════════════════════════════
+     AUTO CARD MODE — responsive layout via media query
+     Under 900px: compact table hidden, card list shown.
+     Under 640px: sticky mobile bar shown.
+  ════════════════════════════════════════════════════════════ */
+  .dpd-table-view { display: block; }
+  .dpd-card-view  { display: none; }
+  @media (max-width: 899px) {
+    .dpd-table-view { display: none !important; }
+    .dpd-card-view  { display: block !important; }
+    .main .block-container { padding-left: 12px !important; padding-right: 12px !important; }
+  }
+  .dpd-mobile-bar {
+    display: none;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 9998;
+    background: #0F2D52;
+    border-top: 2px solid #4DA3FF;
+    padding: 10px 16px;
+    gap: 10px;
+  }
+  @media (max-width: 639px) {
+    .dpd-mobile-bar { display: flex !important; }
+    body { padding-bottom: 60px; }
+  }
 </style>
 """)
 
@@ -1158,23 +1350,166 @@ def _render_priority_strip(gs: list[dict], history: list[dict]):
         st.rerun()
 
 
-def _render_confidence_ux(history: list[dict] | None = None):
-    """Show trust cues so users know freshness and basis of insights."""
-    last_ts = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
-    if last_ts:
-        age_min = max(0, int((time.time() - last_ts) // 60))
-        st.caption(f"Last updated: {age_min} min ago")
-    else:
-        st.caption("Last updated: this session")
+def _get_primary_recommendation(gs: list[dict], history: list[dict]) -> dict | None:
+    """Pick one highest-impact coaching action with a rich 'why this person' justification."""
+    below = [r for r in gs if r.get("goal_status") == "below_goal"]
+    if not below:
+        return None
 
+    candidates = []
+    for row in below:
+        risk_level, risk_score, risk_details = _calc_risk_level(row, history)
+        trend = row.get("trend", "")
+        name = row.get("Employee", row.get("Employee Name", "Unknown"))
+        emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
+        dept = row.get("Department", "")
+
+        try:
+            change_pct = float(row.get("change_pct", 0) or 0)
+        except Exception:
+            change_pct = 0.0
+        try:
+            avg_uph = float(row.get("Average UPH", 0) or 0)
+            target  = float(row.get("Target UPH", 0) or 0)
+        except Exception:
+            avg_uph, target = 0.0, 0.0
+
+        # Build "why" justification phrases
+        why_parts = []
+        if trend == "down":
+            streak = risk_details.get("under_goal_streak", 0)
+            if streak >= 2:
+                why_parts.append(f"↓ {streak}-day downward streak")
+            else:
+                why_parts.append(f"↓ trending down {change_pct:+.0f}%")
+        if target > 0 and avg_uph > 0:
+            gap = target - avg_uph
+            if gap > 0:
+                why_parts.append(f"{gap:.1f} UPH below target")
+        if risk_level.startswith("🔴"):
+            why_parts.append("high risk score")
+        if not why_parts:
+            why_parts.append("below goal")
+
+        candidates.append({
+            "name": name,
+            "emp_id": emp_id,
+            "department": dept,
+            "risk_level": risk_level,
+            "risk_score": float(risk_score),
+            "why": " · ".join(why_parts),
+            "avg_uph": avg_uph,
+            "target": target,
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x["risk_score"], reverse=True)
+    return candidates[0]
+
+
+def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix: str):
+    """Dominant command-bar panel — visually anchors every key page with one clear action."""
+    rec = _get_primary_recommendation(gs, history)
+
+    # Count remaining below-goal staff for context
+    remaining = [r for r in gs if r.get("goal_status") == "below_goal"]
+
+    if not rec:
+        st.markdown(
+            '<div class="dpd-rail">'
+            '<div class="dpd-rail-label">▶ Recommended Action</div>'
+            '<div class="dpd-rail-ok">✓ All employees on track — no action needed</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    # Escape for HTML safety
+    import html as _h
+    _name = _h.escape(rec["name"])
+    _dept = _h.escape(rec.get("department", ""))
+    _why  = _h.escape(rec["why"])
+    _dept_str = f" · {_dept}" if _dept else ""
+    _n_remaining = len(remaining)
+    _remaining_note = f"<span class='dpd-rail-label'>⬇ {_n_remaining - 1} more below goal</span>" if _n_remaining > 1 else ""
+
+    st.markdown(
+        f'<div class="dpd-rail">'
+        f'<div class="dpd-rail-label">▶ Recommended Action</div>'
+        f'<div class="dpd-rail-name">{_name}{_dept_str}</div>'
+        f'<div class="dpd-rail-why">{_why}</div>'
+        f'{_remaining_note}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    col1, col2 = st.columns(2)
+    if col1.button("▶ Start Coaching", key=f"{key_prefix}_start_coach", type="primary", use_container_width=True):
+        st.session_state["goto_page"] = "employees"
+        st.session_state["emp_view"] = "Performance Journal"
+        st.session_state["cn_selected_emp"] = rec["emp_id"]
+        st.rerun()
+    if col2.button("View Context →", key=f"{key_prefix}_view_context", use_container_width=True):
+        st.session_state["goto_page"] = "dashboard"
+        st.rerun()
+    if _n_remaining > 1:
+        st.caption(f"{_n_remaining} employee(s) below goal · sorted by highest risk")
+
+
+def _render_confidence_ux(history: list[dict] | None = None, active_filters: dict | None = None):
+    """Show data trust cues: freshness, date range, and active filter context."""
+    last_ts = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
+    age_min = max(0, int((time.time() - last_ts) // 60)) if last_ts else None
+
+    if age_min is not None and age_min <= 5:
+        conf_label = "Data confidence: High"
+        age_str = f"updated {age_min} min ago"
+    elif age_min is not None:
+        conf_label = "Data confidence: Good"
+        age_str = f"updated {age_min} min ago"
+    else:
+        conf_label = "Data confidence: Medium"
+        age_str = "refreshed this session"
+
+    date_range_str = ""
     if history:
-        dates = []
-        for row in history:
-            d = row.get("Date") or row.get("work_date") or row.get("Week") or ""
-            if d:
-                dates.append(str(d))
+        dates = [str(row.get("Date") or row.get("work_date") or row.get("Week") or "") for row in history if row.get("Date") or row.get("work_date") or row.get("Week")]
         if dates:
-            st.caption(f"Based on data range: {min(dates)} to {max(dates)}")
+            date_range_str = f"· based on {min(dates)} → {max(dates)}"
+
+    filter_str = ""
+    if active_filters:
+        parts = []
+        for k, v in active_filters.items():
+            if v and v != "All departments":
+                parts.append(f"{k}: {v}")
+        if parts:
+            filter_str = f" · applies to {', '.join(parts)}"
+
+    st.caption(f"{conf_label} · {age_str} {date_range_str}{filter_str}")
+
+
+def _render_session_progress(gs: list[dict]):
+    """Render a small session progress tracker for coaching momentum."""
+    if not gs:
+        return
+    coached_today = int(st.session_state.get("_coached_today", 0))
+    below_total = len([r for r in gs if r.get("goal_status") == "below_goal"])
+    remaining = max(0, below_total - coached_today)
+
+    if coached_today == 0 and below_total == 0:
+        return
+
+    done_part = f'<span class="dpd-progress-done">✔ {coached_today} coached</span>' if coached_today > 0 else ''
+    left_part = f'<span class="dpd-progress-left">⚠ {remaining} remaining</span>' if remaining > 0 else '<span class="dpd-progress-done">✔ All coached today</span>'
+    sep = " &nbsp;|&nbsp; " if coached_today > 0 else ""
+
+    st.markdown(
+        f'<div class="dpd-progress-bar">Today:&nbsp;&nbsp;{done_part}{sep}{left_part}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1206,6 +1541,8 @@ def page_supervisor():
         st.info("No productivity data. Run Import Data to get started.")
         return
 
+    _render_session_progress(gs)
+    _render_primary_action_rail(gs, history, key_prefix="sup_primary")
     _render_priority_strip(gs, history)
     _render_confidence_ux(history)
     st.divider()
@@ -1214,7 +1551,7 @@ def page_supervisor():
     # SECTION 1: DEPARTMENT HEALTH SUMMARY
     # ────────────────────────────────────────────────────────────────────────────
     
-    st.subheader("📊 Team Health by Department")
+    st.subheader("📊 Team Health Snapshot")
     depts = sorted(set(r.get("Department", "") for r in gs if r.get("Department")))
     dept_cols = st.columns(len(depts) if depts else 1)
     
@@ -1233,9 +1570,16 @@ def page_supervisor():
             "health_pct": health_pct,
         }
     
-    for col, dept in zip(dept_cols, depts):
+    exception_depts = [d for d in depts if dept_summary[d]["below_goal"] > 0]
+    shown_depts = exception_depts or depts
+    if exception_depts:
+        st.caption("Showing exception departments only (at least one below-goal employee).")
+    else:
+        st.caption("No exceptions detected. Showing all departments.")
+
+    dept_cols = st.columns(len(shown_depts) if shown_depts else 1)
+    for col, dept in zip(dept_cols, shown_depts):
         s = dept_summary[dept]
-        health_color = "#28a745" if s["health_pct"] >= 75 else "#ffc107" if s["health_pct"] >= 50 else "#dc3545"
         col.metric(
             f"**{dept}**",
             f"{s['on_goal']}/{s['total']} on goal",
@@ -1285,9 +1629,9 @@ def page_supervisor():
                 "context_tags": flagged_info.get("context_tags", []),
             })
         
-        # Sort by risk score (highest first) and take top 10
+        # Sort by risk score (highest first) and take top 5
         risk_list.sort(key=lambda x: x["risk_score"], reverse=True)
-        top_risks = risk_list[:10]
+        top_risks = risk_list[:5]
         
         # Display each top risk
         for i, emp in enumerate(top_risks, 1):
@@ -1372,18 +1716,19 @@ def page_supervisor():
     # SECTION 3: TRENDING DOWN ALERTS
     # ────────────────────────────────────────────────────────────────────────────
     
-    st.subheader("⚠️ Trending Down — Proactive Check-In Recommended")
-    trending_down = [r for r in gs if r.get("trend") == "down" and r.get("goal_status") != "below_goal"]
-    
-    if trending_down:
-        st.caption(f"⚠️ {len(trending_down)} employee(s) showing downward trend but NOT yet below goal.")
-        for emp in trending_down[:5]:  # Show top 5 only
-            col1, col2, col3 = st.columns([2, 1, 2])
-            col1.write(f"**{emp.get('Employee Name', 'Unknown')}** ({emp.get('Department', '')})")
-            col2.write(f"↓ {emp.get('change_pct', 0):+.0f}%")
-            col3.write(f"{emp.get('Average UPH', 0):.1f} / {emp.get('Target UPH', '—')}")
-    else:
-        st.success("✅ No concerning trends detected.")
+    with st.expander("📉 Trends (collapsed by default)", expanded=False):
+        st.subheader("⚠️ Trending Down — Proactive Check-In Recommended")
+        trending_down = [r for r in gs if r.get("trend") == "down" and r.get("goal_status") != "below_goal"]
+        
+        if trending_down:
+            st.caption(f"⚠️ {len(trending_down)} employee(s) showing downward trend but NOT yet below goal.")
+            for emp in trending_down[:5]:  # Show top 5 only
+                col1, col2, col3 = st.columns([2, 1, 2])
+                col1.write(f"**{emp.get('Employee Name', 'Unknown')}** ({emp.get('Department', '')})")
+                col2.write(f"↓ {emp.get('change_pct', 0):+.0f}%")
+                col3.write(f"{emp.get('Average UPH', 0):.1f} / {emp.get('Target UPH', '—')}")
+        else:
+            st.success("✅ No concerning trends detected.")
     
     st.divider()
     
@@ -1524,8 +1869,19 @@ def page_dashboard():
         st.info("No productivity data. Run Import Data to get started.")
         return
 
+    _render_session_progress(gs)
     _render_priority_strip(gs, history)
-    _render_confidence_ux(history)
+
+    # Read active filter state for confidence cue (uses previous rerun values)
+    _active_risk = st.session_state.get("dash_risk_filter", ["🔴 High"])
+    _active_dept_raw = st.session_state.get("dash_dept_filter", ["All departments"])
+    _active_dept = [d for d in _active_dept_raw if d != "All departments"]
+    _conf_filters: dict = {}
+    if _active_risk and set(_active_risk) != {"🔴 High", "🟡 Medium", "🟢 Low"}:
+        _conf_filters["Risk"] = ", ".join(_active_risk)
+    if _active_dept:
+        _conf_filters["Dept"] = ", ".join(_active_dept)
+    _render_confidence_ux(history, active_filters=_conf_filters if _conf_filters else None)
     st.divider()
 
     # Filter for below_goal employees
@@ -1560,33 +1916,46 @@ def page_dashboard():
         })
 
     # Filter controls
-    col1, col2, col3 = st.columns([2, 2, 1])
-    
-    risk_filter = col1.multiselect(
-        "Filter by risk level",
-        ["🔴 High", "🟡 Medium", "🟢 Low"],
-        default=["🔴 High", "🟡 Medium", "🟢 Low"],
-        key="dash_risk_filter"
-    )
-    
-    dept_options = sorted(set(r["department"] for r in risk_list if r["department"]))
-    dept_filter = col2.multiselect(
-        "Filter by department",
-        ["All departments"] + dept_options,
-        default=["All departments"],
-        key="dash_dept_filter"
-    )
-    
-    sort_by = col3.selectbox(
-        "Sort by",
-        ["Risk (High → Low)", "UPH (Low → High)", "Streak (Longest)"],
-        key="dash_sort"
-    )
+    with st.expander("⚙️ Filters", expanded=False):
+        col1, col2, col3 = st.columns([2, 2, 1])
+        risk_filter = col1.multiselect(
+            "Filter by risk level",
+            ["🔴 High", "🟡 Medium", "🟢 Low"],
+            default=["🔴 High"],
+            key="dash_risk_filter"
+        )
+
+        dept_options = sorted(set(r["department"] for r in risk_list if r["department"]))
+        dept_filter = col2.multiselect(
+            "Filter by department",
+            ["All departments"] + dept_options,
+            default=["All departments"],
+            key="dash_dept_filter"
+        )
+
+        sort_by = col3.selectbox(
+            "Sort by",
+            ["Risk (High → Low)", "UPH (Low → High)", "Streak (Longest)"],
+            key="dash_sort"
+        )
 
     # Apply filters
     filtered = [r for r in risk_list if r["risk_level"] in risk_filter]
     if "All departments" not in dept_filter:
         filtered = [r for r in filtered if r["department"] in dept_filter]
+
+    # Active filter chips (persistent visible state: show what's active, allow quick clear)
+    _chip_parts = []
+    for chip in risk_filter:
+        _chip_parts.append(f'<span class="dpd-chip-label">{chip}</span>')
+    for dep in dept_filter:
+        if dep != "All departments":
+            _chip_parts.append(f'<span class="dpd-chip-label">{dep}</span>')
+    if _chip_parts:
+        st.markdown(
+            '<div class="dpd-chip-row">Active filters:&nbsp;' + "".join(_chip_parts) + "</div>",
+            unsafe_allow_html=True,
+        )
 
     # Sort
     if sort_by == "Risk (High → Low)":
@@ -1644,12 +2013,64 @@ def page_dashboard():
         return ""
 
     compact = st.checkbox("Compact table (small screens)", value=False, key="dash_compact")
+    card_view = st.checkbox("Card view (mobile-friendly)", value=False, key="dash_card_view")
     if compact:
         df_compact = df[["Risk", "Name", "Current UPH", "Streak"]]
         styled = df_compact.style.applymap(_color_risk, subset=["Risk"])
     else:
         styled = df.style.applymap(_color_risk, subset=["Risk"])
+    st.markdown('<div class="dpd-table-view">', unsafe_allow_html=True)
     st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="dpd-card-view">', unsafe_allow_html=True)
+    if card_view:
+        st.markdown("##### Expand rows")
+        for i, r in enumerate(filtered[:20]):
+            with st.expander(f"{r['name']} · {r['risk_level']} · {r['department'] or 'No dept'}", expanded=False):
+                st.caption(f"UPH: {r['avg_uph']} / {r['target_uph']} · Trend: {r['trend']} {r['change_pct']:+.0f}%")
+                ec1, ec2 = st.columns(2)
+                if ec1.button("Coach", key=f"dash_card_coach_{i}", use_container_width=True):
+                    st.session_state["goto_page"] = "employees"
+                    st.session_state["emp_view"] = "Performance Journal"
+                    st.rerun()
+                if ec2.button("History", key=f"dash_card_hist_{i}", use_container_width=True):
+                    st.session_state["goto_page"] = "employees"
+                    st.session_state["emp_view"] = "Employee History"
+                    st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    selected_names = st.multiselect(
+        "Select employees for bulk action",
+        [r["name"] for r in filtered],
+        key="dash_selected_names",
+    )
+    if selected_names:
+        _n_sel = len(selected_names)
+        st.markdown(
+            f'<div class="dpd-sticky-wrap">'
+            f'<span class="dpd-sticky-label">⚡ {_n_sel} employee{"s" if _n_sel != 1 else ""} selected</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        sb1, sb2, sb3 = st.columns(3)
+        if sb1.button("Coach", key="dash_bulk_coach", use_container_width=True, type="primary"):
+            st.session_state["goto_page"] = "employees"
+            st.session_state["emp_view"] = "Performance Journal"
+            st.rerun()
+        if sb2.button("Assign Task", key="dash_bulk_assign", use_container_width=True):
+            st.info("Task assignment workflow coming next. Coaching is available now.")
+        if sb3.button("Export", key="dash_bulk_export", use_container_width=True):
+            bulk_df = df[df["Name"].isin(selected_names)]
+            bulk_csv = bulk_df.to_csv(index=False)
+            st.download_button(
+                "Download selected CSV",
+                bulk_csv,
+                f"priority_selected_{date.today()}.csv",
+                "text/csv",
+                key="dash_export_selected",
+            )
+        st.markdown('<div class="dpd-sticky-spacer"></div>', unsafe_allow_html=True)
 
     st.markdown("##### Quick actions")
     for i, r in enumerate(filtered[:12]):
@@ -2451,7 +2872,12 @@ def _import_step3():
 
     if st.session_state.pipeline_done and st.session_state.alloc_rows:
         _uc = len({r["emp_id"] for r in st.session_state.alloc_rows})
-        col2.success(f"✓ {_uc} employees processed — view **📈 Productivity**")
+        _gs = st.session_state.get("goal_status", []) or []
+        _below = len([r for r in _gs if r.get("goal_status") == "below_goal"])
+        _risks = len([r for r in _gs if r.get("goal_status") == "below_goal" and r.get("trend") == "down"])
+        col2.success(
+            f"✓ {_uc} employees processed — {_below} below goal, {_risks} high-priority risks detected."
+        )
 
     if st.button("↺ Start fresh import", use_container_width=True):
         st.session_state.uploaded_sessions = []
@@ -2554,6 +2980,24 @@ def _build_coaching_recommendations():
 def page_employees():
     st.title("👥 Employees")
     if not require_db(): return
+
+    _sel_emp_id = st.session_state.get("cn_selected_emp")
+    if _sel_emp_id:
+        _emps = _cached_employees() or []
+        _sel_emp = next((e for e in _emps if str(e.get("emp_id", "")) == str(_sel_emp_id)), None)
+        _gs = st.session_state.get("goal_status", [])
+        _gs_match = next((r for r in _gs if str(r.get("EmployeeID", "")) == str(_sel_emp_id)), None)
+        if _sel_emp:
+            _name = _sel_emp.get("name", _sel_emp_id)
+            _dept = _sel_emp.get("department", "")
+            _status = ""
+            _trend = ""
+            if _gs_match:
+                _status = _gs_match.get("goal_status", "").replace("_", " ").title()
+                _trend = {"up": "↑", "down": "↓", "flat": "→"}.get(_gs_match.get("trend", ""), "")
+            st.markdown(f"**Selected Employee:** {_name} · {_dept} {_trend}")
+            if _status:
+                st.caption(f"Status: {_status}")
 
     _plan = _get_current_plan()
     try:
@@ -2856,8 +3300,8 @@ def _emp_coaching():
             selected_emp = filtered_emps[sel_rows[0]]
             st.session_state["cn_selected_emp"] = selected_emp["emp_id"]
         else:
-            st.session_state.pop("cn_selected_emp", None)
-            selected_emp = None
+            _persisted_id = st.session_state.get("cn_selected_emp")
+            selected_emp = next((e for e in filtered_emps if e["emp_id"] == _persisted_id), None)
 
     with col_detail:
         if not selected_emp:
@@ -2890,6 +3334,19 @@ def _emp_coaching():
                     f"</span>",
                     unsafe_allow_html=True)
 
+                st.markdown("##### ▶ Next Coaching Step")
+                _recent_notes = _cached_coaching_notes_for(emp_id)
+                if _recent_notes:
+                    _last_note = _recent_notes[0]
+                    _last_date = str(_last_note.get("created_at", ""))[:10]
+                    st.caption(f"Last note: {_last_date}")
+                if _emp_gs.get("trend", "") == "down" and _emp_gs.get("goal_status", "") == "below_goal":
+                    st.warning("Trend is worsening while below goal. Suggested: reinforce pick-rate standard and remove blockers.")
+                elif _emp_gs.get("trend", "") == "down":
+                    st.info("Trend is slipping. Suggested: quick check-in and reset daily focus target.")
+                else:
+                    st.info("Suggested: confirm current approach and set one measurable next-step target.")
+
             if is_flagged:
                 flag_info = flags.get(emp_id, {})
                 st.warning(f"🚩 Flagged for performance tracking since **{flag_info.get('flagged_on','')}**")
@@ -2919,7 +3376,28 @@ def _emp_coaching():
                     _raw_cached_all_coaching_notes.clear()
                     st.session_state.cn_note_val = ""
                     st.session_state.cn_by_val   = ""
-                    st.success("✓ Entry saved.")
+                    # Completion momentum — track session count + show next action
+                    st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
+                    _remaining_risk = [
+                        r for r in st.session_state.get("goal_status", [])
+                        if r.get("goal_status") == "below_goal"
+                        and str(r.get("EmployeeID", r.get("Employee Name", ""))) != str(emp_id)
+                    ]
+                    _n_rem = len(_remaining_risk)
+                    st.success("✅ Coaching logged — trend will refresh after the next data update.")
+                    if _n_rem > 0:
+                        st.info(
+                            f"**{_n_rem} more employee{'s' if _n_rem != 1 else ''} still below goal.** "
+                            f"Keep the momentum going."
+                        )
+                        if st.button("Continue Coaching →", key="continue_coaching_momentum", type="primary"):
+                            # Navigate to next employee
+                            _next = _remaining_risk[0]
+                            _next_id = str(_next.get("EmployeeID", _next.get("Employee Name", "")))
+                            st.session_state["cn_selected_emp"] = _next_id
+                            st.rerun()
+                    else:
+                        st.success("🏆 All high-risk employees coached today — great work!")
                     st.rerun()
                 else:
                     st.warning("Write something before saving the entry.")
@@ -3269,14 +3747,29 @@ def page_productivity():
     except ImportError as e:
         st.error(f"Productivity module error: {e}"); return
 
-    # Secondary page navigation: horizontal tab-like selector.
+    # Secondary page navigation: first choose mode, then choose view.
     _plan_now = _get_current_plan()
     _all_opts = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "💰 Labor Cost", "📋 Priority List", "🧑‍🏫 Coaching"]
     if _plan_now in ("pro", "business", "admin"):
-        PROD_OPTS = _all_opts
+        _monitor_opts = ["📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "📋 Priority List", "🧑‍🏫 Coaching"]
+        _plan_opts = ["🎯 Dept Goals", "💰 Labor Cost"]
     else:
         # Starter tier: core weekly output + ranking-focused view.
-        PROD_OPTS = ["📅 Weekly", "📋 Priority List"]
+        _monitor_opts = ["📅 Weekly", "📋 Priority List"]
+        _plan_opts = []
+
+    _mode_options = ["Monitor"] + (["Plan"] if _plan_opts else [])
+    _mode_default = st.session_state.get("prod_mode", "Monitor")
+    if _mode_default not in _mode_options:
+        _mode_default = "Monitor"
+    prod_mode = st.radio(
+        "Productivity mode",
+        _mode_options,
+        index=_mode_options.index(_mode_default),
+        horizontal=True,
+        key="prod_mode",
+    )
+    PROD_OPTS = _monitor_opts if prod_mode == "Monitor" else _plan_opts
 
     if "prod_view" not in st.session_state or st.session_state.prod_view not in PROD_OPTS:
         st.session_state.prod_view = PROD_OPTS[0]
@@ -3290,6 +3783,11 @@ def page_productivity():
         key="prod_view",
     )
 
+    _render_primary_action_rail(
+        st.session_state.get("goal_status", []),
+        st.session_state.get("history", []),
+        key_prefix="prod_primary",
+    )
     _render_confidence_ux(st.session_state.get("history", []))
 
     st.divider()
@@ -5244,8 +5742,8 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
 
     # ── Send Now ──────────────────────────────────────────────────────────────
     with tab_send:
-        st.subheader("Send a report now")
-        st.caption("Manually send a department performance report.")
+        st.subheader("Send Daily Report")
+        st.caption("Send an outcome-focused daily report to your recipients.")
 
         # Load archived data if pipeline hasn't run this session
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
@@ -5282,7 +5780,10 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
 
                 dept_choice = st.selectbox("Department", ["All departments"] + depts)
 
-                if st.button("Send report now", type="primary", use_container_width=True):
+                _risk_count = len([r for r in gs if r.get("goal_status") == "below_goal"])
+                st.info(f"This report currently includes {_risk_count} below-goal employee(s).")
+
+                if st.button("Send Daily Report Now", type="primary", use_container_width=True):
                     if not chosen:
                         st.warning("Select at least one recipient.")
                     elif _sn_end < _sn_start:
@@ -5321,6 +5822,7 @@ def page_settings():
     # ── Subscription tab ──────────────────────────────────────────────────
     with tab_billing:
         st.subheader("Your Subscription")
+        st.caption("Manage subscription, invoices, and plan limits.")
         try:
             from database import (
                 get_subscription, get_employee_count, get_employee_limit,
@@ -5556,6 +6058,7 @@ def page_settings():
     st.caption("Productivity Planner · Powered by Supply Chain Automation Co")
 
     with tab_team:
+        st.caption("Configure team-level behavior, labor assumptions, and cleanup tools.")
         st.session_state.chart_months = st.slider("History window used across charts (months)", 0, 60, st.session_state.chart_months)
         st.caption("This limits how many months of historical data are included in dashboard/productivity trend charts.")
         st.session_state.smart_merge  = True   # always on
@@ -5631,6 +6134,7 @@ def page_settings():
 
     with tab_account:
         st.subheader("Account")
+        st.caption("Manage your sign-in credentials and personal data controls.")
         _uname = st.session_state.get("user_name", "")
         _urole = st.session_state.get("user_role", "member")
         if _uname:
@@ -5741,6 +6245,7 @@ def page_settings():
     # ── Advanced tab ─────────────────────────────────────────────────────
     with tab_advanced:
         st.subheader("Error Log")
+        st.caption("Diagnostics and troubleshooting tools for admins.")
         st.caption("Recent errors and warnings logged by the application. Use this to diagnose issues.")
 
         # Filters
