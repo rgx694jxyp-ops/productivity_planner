@@ -4,12 +4,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "[1/6] Python syntax compile"
-python3 -m py_compile app.py database.py goals.py ranker.py trends.py settings.py
+python3 -m py_compile app.py database.py goals.py ranker.py trends.py settings.py scripts/email_scheduler_worker.py
 
 echo "[2/6] Required files present"
 test -f migrations/001_setup.sql
 test -f migrations/002_subscriptions.sql
 test -f supabase/functions/stripe-webhook/index.ts
+test -f scripts/email_scheduler_worker.py
 
 echo "[3/6] Known bad character scan (replacement chars)"
 if command -v rg >/dev/null 2>&1; then
