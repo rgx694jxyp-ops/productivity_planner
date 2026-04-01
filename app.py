@@ -4843,6 +4843,9 @@ def page_email():
 
         if "Resend" in mode:
             st.info("Easiest setup: create one API key in Resend, verify sender domain, paste key here.")
+            lr1, lr2 = st.columns(2)
+            lr1.link_button("Create Resend Account", "https://resend.com", use_container_width=True)
+            lr2.link_button("Verify Domain Guide", "https://resend.com/docs/dashboard/domains/introduction", use_container_width=True)
             _from_default = delivery_cfg.get("from") or cfg.get("from") or cfg.get("username", "")
             with st.form("resend_form"):
                 resend_from = st.text_input(
@@ -4886,33 +4889,35 @@ def page_email():
                         st.error(f"Send failed: {err}")
             st.divider()
             st.markdown("##### Resend Quick Setup")
-            st.caption("1) Create a free Resend account. 2) Verify your sender domain. 3) Create API key. 4) Paste key above.")
-        else:
+            st.caption("1) Create Resend account. 2) Verify sender domain. 3) Create API key. 4) Paste key. 5) Send test.")
+            st.success("Once saved, all scheduled emails use this method automatically.")
+
+        if "SMTP" in mode:
             st.caption("Pick your email provider below and we'll fill in the server details automatically.")
 
-        # Provider quick-select
-        providers = {
-            "Gmail":            ("smtp.gmail.com",      587),
-            "Outlook / Office 365": ("smtp.office365.com", 587),
-            "Yahoo":            ("smtp.mail.yahoo.com", 587),
-            "Custom":           ("", 587),
-        }
-        # Detect current provider from saved server
-        cur_server = cfg.get("server","")
-        detected = next((k for k,v in providers.items() if v[0] == cur_server), "Custom")
-        pcols = st.columns(len(providers))
-        for i,(pname,pvals) in enumerate(providers.items()):
-            active = (detected == pname)
-            if pcols[i].button(pname, key=f"prov_{i}",
-                               type="primary" if active else "secondary",
-                               use_container_width=True):
-                st.session_state["smtp_server_override"] = pvals[0]
-                st.session_state["smtp_port_override"]   = pvals[1]
-                st.rerun()
+            # Provider quick-select
+            providers = {
+                "Gmail":            ("smtp.gmail.com",      587),
+                "Outlook / Office 365": ("smtp.office365.com", 587),
+                "Yahoo":            ("smtp.mail.yahoo.com", 587),
+                "Custom":           ("", 587),
+            }
+            # Detect current provider from saved server
+            cur_server = cfg.get("server","")
+            detected = next((k for k,v in providers.items() if v[0] == cur_server), "Custom")
+            pcols = st.columns(len(providers))
+            for i,(pname,pvals) in enumerate(providers.items()):
+                active = (detected == pname)
+                if pcols[i].button(pname, key=f"prov_{i}",
+                                   type="primary" if active else "secondary",
+                                   use_container_width=True):
+                    st.session_state["smtp_server_override"] = pvals[0]
+                    st.session_state["smtp_port_override"]   = pvals[1]
+                    st.rerun()
 
-        # App password help
-        with st.expander("❓ How to get an App Password"):
-            st.markdown("""
+            # App password help
+            with st.expander("❓ How to get an App Password"):
+                st.markdown("""
 #### Gmail
 
 **Before you start:** You must have 2-Step Verification turned on — App Passwords won't appear without it.
@@ -4981,88 +4986,88 @@ If your email provider isn't listed above, select **Custom** and fill in the Adv
 
 You **cannot** use your regular login password for Gmail, Outlook, or Yahoo — they block it for third-party apps.
 App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
-            """)
+                """)
 
-        def _infer_smtp_from_email(addr: str) -> tuple[str, int, bool]:
-            """Best-effort SMTP defaults by common email domains."""
-            dom = (addr or "").split("@")[-1].lower().strip() if "@" in (addr or "") else ""
-            if dom in {"gmail.com", "googlemail.com"}:
-                return "smtp.gmail.com", 587, True
-            if dom in {"outlook.com", "hotmail.com", "live.com", "msn.com", "office365.com"}:
-                return "smtp.office365.com", 587, True
-            if dom.startswith("yahoo.") or dom == "yahoo.com":
-                return "smtp.mail.yahoo.com", 587, True
-            if dom in {"icloud.com", "me.com", "mac.com"}:
-                return "smtp.mail.me.com", 587, True
-            return "", 587, True
+            def _infer_smtp_from_email(addr: str) -> tuple[str, int, bool]:
+                """Best-effort SMTP defaults by common email domains."""
+                dom = (addr or "").split("@")[-1].lower().strip() if "@" in (addr or "") else ""
+                if dom in {"gmail.com", "googlemail.com"}:
+                    return "smtp.gmail.com", 587, True
+                if dom in {"outlook.com", "hotmail.com", "live.com", "msn.com", "office365.com"}:
+                    return "smtp.office365.com", 587, True
+                if dom.startswith("yahoo.") or dom == "yahoo.com":
+                    return "smtp.mail.yahoo.com", 587, True
+                if dom in {"icloud.com", "me.com", "mac.com"}:
+                    return "smtp.mail.me.com", 587, True
+                return "", 587, True
 
-        _saved_user = cfg.get("username", "")
-        _infer_server, _infer_port, _infer_tls = _infer_smtp_from_email(_saved_user)
+            _saved_user = cfg.get("username", "")
+            _infer_server, _infer_port, _infer_tls = _infer_smtp_from_email(_saved_user)
 
-        # Use override if provider button was just pressed; else use saved config; else infer.
-        server_val = st.session_state.get("smtp_server_override", cfg.get("server", "") or _infer_server)
-        port_val   = st.session_state.get("smtp_port_override", int(cfg.get("port", _infer_port)))
-        tls_val    = bool(cfg.get("use_tls", _infer_tls))
+            # Use override if provider button was just pressed; else use saved config; else infer.
+            server_val = st.session_state.get("smtp_server_override", cfg.get("server", "") or _infer_server)
+            port_val   = st.session_state.get("smtp_port_override", int(cfg.get("port", _infer_port)))
+            tls_val    = bool(cfg.get("use_tls", _infer_tls))
 
-        with st.form("smtp_form"):
-            username = st.text_input("Your email address", value=cfg.get("username",""),
-                                      placeholder="you@gmail.com")
-            _det_server, _det_port, _det_tls = _infer_smtp_from_email(username)
-            if not cfg.get("server") and _det_server:
-                st.caption(f"Auto-detected SMTP: {_det_server}:{_det_port} (TLS {'on' if _det_tls else 'off'})")
-            password = st.text_input("App password", value=cfg.get("password",""),
-                                      type="password", placeholder="16-character app password")
-            # Advanced — collapsed by default
-            with st.expander("Advanced server settings"):
-                c1, c2 = st.columns(2)
-                server  = c1.text_input("SMTP server", value=server_val, placeholder="smtp.gmail.com")
-                port    = c2.number_input("Port", value=port_val, min_value=1, max_value=65535)
-                use_tls = st.checkbox("Use TLS encryption (recommended)", value=tls_val)
+            with st.form("smtp_form"):
+                username = st.text_input("Your email address", value=cfg.get("username",""),
+                                          placeholder="you@gmail.com")
+                _det_server, _det_port, _det_tls = _infer_smtp_from_email(username)
+                if not cfg.get("server") and _det_server:
+                    st.caption(f"Auto-detected SMTP: {_det_server}:{_det_port} (TLS {'on' if _det_tls else 'off'})")
+                password = st.text_input("App password", value=cfg.get("password",""),
+                                          type="password", placeholder="16-character app password")
+                # Advanced — collapsed by default
+                with st.expander("Advanced server settings"):
+                    c1, c2 = st.columns(2)
+                    server  = c1.text_input("SMTP server", value=server_val, placeholder="smtp.gmail.com")
+                    port    = c2.number_input("Port", value=port_val, min_value=1, max_value=65535)
+                    use_tls = st.checkbox("Use TLS encryption (recommended)", value=tls_val)
 
-            if st.form_submit_button("Save settings", type="primary", use_container_width=True):
-                _svr = (server or "").strip()
-                _prt = int(port)
-                _tls = bool(use_tls)
-                if not _svr and username:
-                    _auto_svr, _auto_prt, _auto_tls = _infer_smtp_from_email(username)
-                    if _auto_svr:
-                        _svr = _auto_svr
-                        _prt = _auto_prt
-                        _tls = _auto_tls
-                save_smtp_config(_svr, _prt, username, password, username, _tls)
-                save_email_delivery_config(mode="smtp", provider="resend", from_addr=username)
-                # Clear overrides now that they are saved
-                st.session_state.pop("smtp_server_override", None)
-                st.session_state.pop("smtp_port_override", None)
-                st.success("✓ Settings saved.")
-                st.rerun()
+                if st.form_submit_button("Save settings", type="primary", use_container_width=True):
+                    _svr = (server or "").strip()
+                    _prt = int(port)
+                    _tls = bool(use_tls)
+                    if not _svr and username:
+                        _auto_svr, _auto_prt, _auto_tls = _infer_smtp_from_email(username)
+                        if _auto_svr:
+                            _svr = _auto_svr
+                            _prt = _auto_prt
+                            _tls = _auto_tls
+                    save_smtp_config(_svr, _prt, username, password, username, _tls)
+                    save_email_delivery_config(mode="smtp", provider="resend", from_addr=username)
+                    # Clear overrides now that they are saved
+                    st.session_state.pop("smtp_server_override", None)
+                    st.session_state.pop("smtp_port_override", None)
+                    st.success("✓ Settings saved.")
+                    st.rerun()
 
-        if st.button("Send test email to myself", use_container_width=True):
-            cfg2 = get_smtp_config()
-            if not cfg2.get("username"):
-                st.warning("Save your email address first.")
-            else:
-                with st.spinner("Sending test email to yourself…"):
-                    ok, err = send_report_email(
-                        [cfg2["username"]],
-                        "Productivity Planner — Test Email",
-                        "<p>Your email configuration is working correctly! 🎉</p>",
-                    )
-                if ok:
-                    st.success(f"✓ Test email sent to {cfg2['username']}")
-                    st.caption("💡 If you don't see it in 1-2 minutes, check your spam folder.")
+            if st.button("Send test email to myself", use_container_width=True):
+                cfg2 = get_smtp_config()
+                if not cfg2.get("username"):
+                    st.warning("Save your email address first.")
                 else:
-                    st.error(f"❌ Send failed")
-                    # Parse error to provide actionable help
-                    err_lower = str(err).lower()
-                    if "authentication" in err_lower or "535" in err_lower:
-                        st.warning("**Incorrect email or app password.** Review SMTP credentials, or switch to **Resend API (recommended)** to avoid app-password setup.")
-                    elif "timeout" in err_lower or "connection" in err_lower or "refused" in err_lower:
-                        st.warning("**Connection failed.** Check that the server and port are correct. Try port 465 (SSL) in Advanced settings instead.")
-                    elif "certificate" in err_lower or "tls" in err_lower:
-                        st.warning("**Encryption error.** Try unchecking 'Use TLS encryption' in Advanced settings, or switch to port 465 (SSL).")
+                    with st.spinner("Sending test email to yourself…"):
+                        ok, err = send_report_email(
+                            [cfg2["username"]],
+                            "Productivity Planner — Test Email",
+                            "<p>Your email configuration is working correctly! 🎉</p>",
+                        )
+                    if ok:
+                        st.success(f"✓ Test email sent to {cfg2['username']}")
+                        st.caption("💡 If you don't see it in 1-2 minutes, check your spam folder.")
                     else:
-                        st.caption(f"Technical details: {err}")
+                        st.error(f"❌ Send failed")
+                        # Parse error to provide actionable help
+                        err_lower = str(err).lower()
+                        if "authentication" in err_lower or "535" in err_lower:
+                            st.warning("**Incorrect email or app password.** Review SMTP credentials, or switch to **Resend API (recommended)** to avoid app-password setup.")
+                        elif "timeout" in err_lower or "connection" in err_lower or "refused" in err_lower:
+                            st.warning("**Connection failed.** Check that the server and port are correct. Try port 465 (SSL) in Advanced settings instead.")
+                        elif "certificate" in err_lower or "tls" in err_lower:
+                            st.warning("**Encryption error.** Try unchecking 'Use TLS encryption' in Advanced settings, or switch to port 465 (SSL).")
+                        else:
+                            st.caption(f"Technical details: {err}")
 
     # ── Recipients ────────────────────────────────────────────────────────────
     with tab_recip:
