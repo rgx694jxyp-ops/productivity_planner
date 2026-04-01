@@ -66,6 +66,38 @@ Copy `.env.example` to `.env` and fill in your values. Use a library like `pytho
 streamlit run app.py
 ```
 
+## 8. Reliable Scheduled Emails (Cross-platform Worker)
+
+For guaranteed schedule delivery (even with no active browser/session), run the standalone worker.
+
+Worker script:
+```bash
+python3 scripts/email_scheduler_worker.py --once
+python3 scripts/email_scheduler_worker.py --interval 60
+```
+
+### macOS (launchd)
+```bash
+export SUPABASE_URL="https://your-project.supabase.co"
+export SUPABASE_KEY="your-anon-key-here"
+./scripts/install_scheduler_launchd.sh
+```
+
+### Linux (systemd)
+```bash
+export SUPABASE_URL="https://your-project.supabase.co"
+export SUPABASE_KEY="your-anon-key-here"
+sudo ./scripts/install_scheduler_systemd.sh
+```
+
+### Windows (Task Scheduler)
+Open PowerShell in the repo root and run:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_scheduler_windows.ps1 -SupabaseUrl "https://your-project.supabase.co" -SupabaseKey "your-anon-key-here"
+```
+
+Log files are written under `logs/`.
+
 Sign in with the email/password you created. On first login, the app automatically:
 - Creates a tenant (organization) for you
 - Sets you as admin
