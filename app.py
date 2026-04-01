@@ -4924,13 +4924,33 @@ You **cannot** use your regular login password for Gmail, Outlook, or Yahoo — 
 App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
             """)
 
-        # Use override if provider button was just pressed
-        server_val = st.session_state.get("smtp_server_override", cfg.get("server",""))
-        port_val   = st.session_state.get("smtp_port_override",   int(cfg.get("port",587)))
+        def _infer_smtp_from_email(addr: str) -> tuple[str, int, bool]:
+            """Best-effort SMTP defaults by common email domains."""
+            dom = (addr or "").split("@")[-1].lower().strip() if "@" in (addr or "") else ""
+            if dom in {"gmail.com", "googlemail.com"}:
+                return "smtp.gmail.com", 587, True
+            if dom in {"outlook.com", "hotmail.com", "live.com", "msn.com", "office365.com"}:
+                return "smtp.office365.com", 587, True
+            if dom.startswith("yahoo.") or dom == "yahoo.com":
+                return "smtp.mail.yahoo.com", 587, True
+            if dom in {"icloud.com", "me.com", "mac.com"}:
+                return "smtp.mail.me.com", 587, True
+            return "", 587, True
+
+        _saved_user = cfg.get("username", "")
+        _infer_server, _infer_port, _infer_tls = _infer_smtp_from_email(_saved_user)
+
+        # Use override if provider button was just pressed; else use saved config; else infer.
+        server_val = st.session_state.get("smtp_server_override", cfg.get("server", "") or _infer_server)
+        port_val   = st.session_state.get("smtp_port_override", int(cfg.get("port", _infer_port)))
+        tls_val    = bool(cfg.get("use_tls", _infer_tls))
 
         with st.form("smtp_form"):
             username = st.text_input("Your email address", value=cfg.get("username",""),
                                       placeholder="you@gmail.com")
+            _det_server, _det_port, _det_tls = _infer_smtp_from_email(username)
+            if not cfg.get("server") and _det_server:
+                st.caption(f"Auto-detected SMTP: {_det_server}:{_det_port} (TLS {'on' if _det_tls else 'off'})")
             password = st.text_input("App password", value=cfg.get("password",""),
                                       type="password", placeholder="16-character app password")
             # Advanced — collapsed by default
@@ -4938,10 +4958,19 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                 c1, c2 = st.columns(2)
                 server  = c1.text_input("SMTP server", value=server_val, placeholder="smtp.gmail.com")
                 port    = c2.number_input("Port", value=port_val, min_value=1, max_value=65535)
-                use_tls = st.checkbox("Use TLS encryption (recommended)", value=bool(cfg.get("use_tls",True)))
+                use_tls = st.checkbox("Use TLS encryption (recommended)", value=tls_val)
 
             if st.form_submit_button("Save settings", type="primary", use_container_width=True):
-                save_smtp_config(server, port, username, password, username, use_tls)
+                _svr = (server or "").strip()
+                _prt = int(port)
+                _tls = bool(use_tls)
+                if not _svr and username:
+                    _auto_svr, _auto_prt, _auto_tls = _infer_smtp_from_email(username)
+                    if _auto_svr:
+                        _svr = _auto_svr
+                        _prt = _auto_prt
+                        _tls = _auto_tls
+                save_smtp_config(_svr, _prt, username, password, username, _tls)
                 # Clear overrides now that they are saved
                 st.session_state.pop("smtp_server_override", None)
                 st.session_state.pop("smtp_port_override", None)
