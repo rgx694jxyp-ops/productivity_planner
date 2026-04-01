@@ -4814,7 +4814,7 @@ def page_email():
     try:
         from email_engine import (save_smtp_config, get_smtp_config, add_recipient,
                                    remove_recipient, get_recipients, add_schedule,
-                                   remove_schedule, get_schedules, send_report_email,
+                                   remove_schedule, get_schedules, get_schedules_due_now, send_report_email,
                                    build_dept_email_body, DAY_NAMES,
                                    import_recipients_from_csv)
     except ImportError:
@@ -5553,6 +5553,8 @@ def page_settings():
         st.session_state.chart_months = st.slider("History window used across charts (months)", 0, 60, st.session_state.chart_months)
         st.caption("This limits how many months of historical data are included in dashboard/productivity trend charts.")
         st.session_state.smart_merge  = True   # always on
+        from settings import Settings as _AppSettings
+        _tzs = _AppSettings()
 
         st.divider()
         st.subheader(" Labor Cost Settings")
