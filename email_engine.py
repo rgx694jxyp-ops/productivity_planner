@@ -279,8 +279,10 @@ def get_schedules(tenant_id: str = "") -> list[dict]:
 def get_schedules_due_now(now: datetime | None = None, timezone: str = "",
                           tenant_id: str = "") -> list[dict]:
     """
-    Return schedules that should fire at the current day+time (within 5 min window).
+    Return schedules that should fire now.
     If timezone is given (e.g. "America/Chicago"), times are compared in that zone.
+    A schedule is due if its day matches, the current local time is at or after the
+    configured send time, and it has not already been sent today.
     """
     if now is None:
         if timezone:
@@ -305,20 +307,20 @@ def get_schedules_due_now(now: datetime | None = None, timezone: str = "",
             continue
 
         sched_time = schedule.get("send_time", "08:00")
-        # Allow a 5-minute window so a background check running at :00 catches :00–:05
-        if sched_time <= time_str <= _add_minutes(sched_time, 5):
-            # Skip if already sent within this window (last_sent within 5 min)
-            last_sent = schedule.get("last_sent", "")
-            if last_sent:
-                try:
-                    last_dt = datetime.strptime(last_sent, "%Y-%m-%d %H:%M")
-                    # Compare against the same timezone-aware now used above
-                    _now_naive = now.replace(tzinfo=None) if now.tzinfo else now
-                    if (_now_naive - last_dt).total_seconds() < 300:
-                        continue
-                except Exception:
-                    pass
-            due.append(schedule)
+        if time_str < sched_time:
+            continue
+
+        last_sent = schedule.get("last_sent", "")
+        if last_sent:
+            try:
+                last_dt = datetime.strptime(last_sent, "%Y-%m-%d %H:%M")
+                _now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+                if last_dt.date() == _now_naive.date() and last_dt.strftime("%H:%M") >= sched_time:
+                    continue
+            except Exception:
+                pass
+
+        due.append(schedule)
 
     return due
 

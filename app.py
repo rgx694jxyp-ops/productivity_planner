@@ -277,12 +277,101 @@ def _email_log(msg: str):
         pass
 
 
+def _email_timezone_options() -> list[str]:
+    return [
+        "America/New_York", "America/Chicago", "America/Denver", "America/Phoenix",
+        "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu",
+        "America/Toronto", "America/Vancouver", "America/Winnipeg", "America/Halifax",
+        "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
+        "Europe/Rome", "Europe/Amsterdam", "Europe/Zurich", "Europe/Stockholm",
+        "Europe/Warsaw", "Europe/Istanbul",
+        "Asia/Dubai", "Asia/Kolkata", "Asia/Bangkok", "Asia/Singapore",
+        "Asia/Shanghai", "Asia/Tokyo", "Asia/Seoul",
+        "Australia/Sydney", "Australia/Melbourne", "Pacific/Auckland",
+        "UTC",
+    ]
+
+
+def _run_scheduled_reports_for_tenant(tenant_id: str = "", force_now: bool = False,
+                                      schedule_names: list[str] | None = None) -> list[dict]:
+    """Send scheduled reports for one tenant and return per-schedule results."""
+    from email_engine import (
+        get_schedules_due_now, get_schedules, send_report_email,
+        mark_schedule_sent, load_email_config,
+    )
+    from settings import Settings
+    from goals import load_goals
+    from database import get_subscription, get_client as _sched_client
+
+    tid = tenant_id or st.session_state.get("tenant_id", "")
+    if not tid:
+        return []
+
+    schedule_filter = set(schedule_names or [])
+    tz = Settings(tenant_id=tid).get("timezone", "")
+    schedules = get_schedules(tid)
+    due = [s for s in schedules if s.get("active")] if force_now else get_schedules_due_now(timezone=tz, tenant_id=tid)
+    if schedule_filter:
+        due = [s for s in due if s.get("name", "") in schedule_filter]
+    if not due:
+        return []
+
+    tenant_cfg = load_email_config(tenant_id=tid)
+    global_recips = [
+        r.get("email", "").strip()
+        for r in (tenant_cfg.get("recipients") or [])
+        if r.get("email")
+    ]
+    try:
+        sb = _sched_client()
+        emp_resp = sb.table("employees").select("department").eq("tenant_id", tid).execute()
+        depts = sorted({(row.get("department") or "").strip() for row in (emp_resp.data or []) if row.get("department")})
+    except Exception:
+        depts = []
+    targets = (load_goals(tenant_id=tid) or {}).get("dept_targets", {})
+    plan_name = ((get_subscription(tid) or {}).get("plan") or "starter").lower()
+
+    results = []
+    for sched in due:
+        send_to = sched.get("recipients", []) or global_recips
+        if not send_to:
+            results.append({"name": sched.get("name", ""), "ok": False, "error": "No recipients configured", "recipients": []})
+            continue
+
+        period = sched.get("report_period", "Prior day")
+        if period == "Custom":
+            try:
+                d_start = date.fromisoformat(sched.get("date_start", date.today().isoformat()))
+                d_end = date.fromisoformat(sched.get("date_end", d_start.isoformat()))
+            except Exception:
+                d_start, d_end = _resolve_period_dates("Prior day")
+        else:
+            d_start, d_end = _resolve_period_dates(period)
+
+        xl_data, default_subject, body = _build_period_report(
+            d_start, d_end, "All departments", depts, [], targets,
+            tenant_id=tid, plan_name=plan_name,
+        )
+        subject = (sched.get("subject_tpl") or "").strip() or default_subject
+        ok, err = send_report_email(send_to, subject, body, xl_data, tenant_id=tid)
+        if ok:
+            mark_schedule_sent(sched.get("name", ""), timezone=tz, tenant_id=tid)
+            _email_log(f"[{tid[:8]}] SENT '{sched.get('name')}' to {send_to} (tz={tz or 'not set'})")
+        else:
+            _email_log(f"[{tid[:8]}] FAILED '{sched.get('name')}': {err}")
+        results.append({
+            "name": sched.get("name", ""),
+            "ok": ok,
+            "error": err,
+            "recipients": send_to,
+        })
+    return results
+
+
 def _bg_send_scheduled_emails():
     """Called by the background thread every 60 s to fire due email schedules.
     Iterates over ALL tenants with email configs — no st.session_state needed."""
     try:
-        from email_engine import get_schedules_due_now, send_report_email, mark_schedule_sent, load_email_config
-        from settings    import Settings
         from database    import SUPABASE_URL as _BG_URL, SUPABASE_KEY as _BG_KEY
         from supabase    import create_client as _bg_create
 
@@ -297,9 +386,6 @@ def _bg_send_scheduled_emails():
             _email_log(f"Could not fetch tenant email configs: {_e}")
             return
 
-        from datetime import date as _date, timedelta as _td
-        from collections import defaultdict as _dc
-
         for tc in tenant_configs:
             tid = tc.get("tenant_id", "")
             scheds = tc.get("schedules") or []
@@ -307,130 +393,9 @@ def _bg_send_scheduled_emails():
                 continue
 
             try:
-                s  = Settings(tenant_id=tid)
-                tz = s.get("timezone", "")
-                due = get_schedules_due_now(timezone=tz, tenant_id=tid)
-                if not due:
-                    if scheds:
-                        _email_log(f"[{tid[:8]}] Has {len(scheds)} schedule(s) but none are due now (tz={tz or 'not set'})")
-                    continue
-
-                _email_log(f"[{tid[:8]}] Found {len(due)} schedule(s) due (tz={tz})")
-
-                # Employee lookup for this tenant
-                try:
-                    er = sb.table("employees").select("emp_id, name, department").eq("tenant_id", tid).execute()
-                    emps_lookup = {e["emp_id"]: e for e in (er.data or [])}
-                except Exception:
-                    emps_lookup = {}
-
-                _tenant_cfg = load_email_config(tenant_id=tid)
-                _tenant_recips = [
-                    r.get("email", "").strip() for r in (_tenant_cfg.get("recipients") or [])
-                    if r.get("email")
-                ]
-
-                for sched in due:
-                    try:
-                        period  = sched.get("report_period", "Prior day")
-                        send_to = sched.get("recipients", []) or _tenant_recips
-                        if not send_to:
-                            _email_log(f"[{tid[:8]}] SKIP '{sched.get('name')}' — no recipients configured")
-                            continue
-
-                        today = _date.today()
-                        if period == "Custom":
-                            try:
-                                d_start = _date.fromisoformat(sched.get("date_start", ""))
-                                d_end   = _date.fromisoformat(sched.get("date_end", d_start.isoformat()))
-                            except (ValueError, TypeError):
-                                d_start = d_end = today - _td(days=1)
-                        elif period == "Prior day":
-                            d_start = d_end = today - _td(days=1)
-                        elif period == "Current week":
-                            d_start = today - _td(days=today.weekday())
-                            d_end   = today
-                        elif period == "Prior week":
-                            d_end   = today - _td(days=today.weekday() + 1)
-                            d_start = d_end - _td(days=6)
-                        elif period == "Prior month":
-                            first_of_this = today.replace(day=1)
-                            d_end   = first_of_this - _td(days=1)
-                            d_start = d_end.replace(day=1)
-                        else:
-                            d_start = d_end = today - _td(days=1)
-
-                        # Fetch UPH history filtered by THIS tenant and date range
-                        _r = sb.table("uph_history").select(
-                            "emp_id, units, hours_worked, uph, work_date, department"
-                        ).eq("tenant_id", tid).gte(
-                            "work_date", d_start.isoformat()
-                        ).lte("work_date", d_end.isoformat()).execute()
-                        subs = _r.data or []
-
-                        if not subs:
-                            body = (f"<h2>Performance Report — {d_start} – {d_end}</h2>"
-                                    f"<p>No work data found for this period.</p>")
-                            send_report_email(send_to, f"Performance Report — {d_start}", body,
-                                              tenant_id=tid)
-                            mark_schedule_sent(sched["name"], timezone=tz, tenant_id=tid)
-                            continue
-
-                        emp_agg = _dc(lambda: {"units": 0.0, "hours": 0.0})
-                        for sub in subs:
-                            eid = sub.get("emp_id", "")
-                            emp_agg[eid]["units"] += float(sub.get("units") or 0)
-                            emp_agg[eid]["hours"] += float(sub.get("hours_worked") or 0)
-
-                        rows_html = ""
-                        for eid, agg in sorted(emp_agg.items(),
-                                               key=lambda x: x[1]["units"] / max(x[1]["hours"], 0.01),
-                                               reverse=True):
-                            uph  = round(agg["units"] / agg["hours"], 2) if agg["hours"] > 0 else 0
-                            name = emps_lookup.get(eid, {}).get("name", eid)
-                            dept = emps_lookup.get(eid, {}).get("department", "")
-                            rows_html += (
-                                f"<tr><td style='padding:5px 10px;'>{name}</td>"
-                                f"<td style='padding:5px 10px;'>{dept}</td>"
-                                f"<td style='padding:5px 10px;text-align:right;'>{agg['units']:,.0f}</td>"
-                                f"<td style='padding:5px 10px;text-align:right;font-weight:bold;'>{uph:.2f}</td></tr>"
-                            )
-                        label = d_start.isoformat() if d_start == d_end else f"{d_start} – {d_end}"
-                        body  = (
-                            f"<html><body style='font-family:Arial,sans-serif;color:#333;max-width:700px;'>"
-                            f"<div style='background:#0F2D52;padding:20px;border-radius:6px 6px 0 0;'>"
-                            f"<h2 style='color:#fff;margin:0;'>📊 Performance Report</h2>"
-                            f"<p style='color:#BDD7EE;margin:4px 0 0;font-size:13px;'>{label}</p></div>"
-                            f"<table style='width:100%;border-collapse:collapse;font-size:13px;margin-top:0;'>"
-                            f"<tr style='background:#f0f4f8;'>"
-                            f"<th style='padding:8px 10px;text-align:left;'>Employee</th>"
-                            f"<th style='padding:8px 10px;text-align:left;'>Dept</th>"
-                            f"<th style='padding:8px 10px;text-align:right;'>Units</th>"
-                            f"<th style='padding:8px 10px;text-align:right;'>UPH</th></tr>"
-                            f"{rows_html}"
-                            f"</table></body></html>"
-                        )
-                        ok, err = send_report_email(send_to, f"Performance Report — {label}", body,
-                                                    tenant_id=tid)
-                        if ok:
-                            mark_schedule_sent(sched["name"], timezone=tz, tenant_id=tid)
-                            _email_log(f"[{tid[:8]}] SENT '{sched.get('name')}' to {send_to}")
-                        else:
-                            _email_log(f"[{tid[:8]}] FAILED '{sched.get('name')}': {err}")
-                            try:
-                                from database import log_error
-                                log_error("email", f"Scheduled send failed: {sched.get('name')}: {err}",
-                                          severity="error", tenant_id=tid)
-                            except Exception:
-                                pass
-                    except Exception as _se:
-                        _email_log(f"[{tid[:8]}] ERROR in '{sched.get('name','?')}': {_se}")
-                        try:
-                            from database import log_error
-                            log_error("email", f"Schedule error: {sched.get('name','?')}: {_se}",
-                                      detail=str(_se), severity="error", tenant_id=tid)
-                        except Exception:
-                            pass
+                results = _run_scheduled_reports_for_tenant(tenant_id=tid, force_now=False)
+                if not results and scheds:
+                    _email_log(f"[{tid[:8]}] Has {len(scheds)} schedule(s) but none are due now")
             except Exception as _te2:
                 _email_log(f"[{tid[:8]}] Tenant error: {_te2}")
                 try:
@@ -1808,37 +1773,36 @@ def _import_step2():
                 horizontal=True,
             )
 
-            with st.form(f"mapping_form_{idx}"):
-                ca, cb = st.columns(2)
+            ca, cb = st.columns(2)
 
-                def _sel(label, field, req, col, extra=""):
-                    cur = m.get(field) or _auto_detect(headers).get(field, "")
-                    idx2 = options.index(cur) if cur in options else 0
-                    dot  = "🔴" if req else "⚪"
-                    v    = col.selectbox(f"{dot} {label}", options, index=idx2,
-                                         key=f"fm_{idx}_{field}_{extra}")
-                    return "" if v.startswith("—") else v
+            def _sel(label, field, req, col, extra=""):
+                cur = m.get(field) or auto.get(field, "")
+                idx2 = options.index(cur) if cur in options else 0
+                dot  = "🔴" if req else "⚪"
+                v    = col.selectbox(f"{dot} {label}", options, index=idx2,
+                                     key=f"fm_{idx}_{field}_{extra}")
+                return "" if v.startswith("—") else v
 
-                with ca:
-                    d_date = _sel("Date (optional — use work date picker if absent)",
-                                  "Date",         False, ca)
-                    d_eid  = _sel("Employee ID",  "EmployeeID",   True,  ca)
-                    d_name = _sel("Employee Name","EmployeeName", True,  ca)
-                    d_dept = _sel("Department",   "Department",   False, ca)
+            with ca:
+                d_date = _sel("Date (optional — use work date picker if absent)",
+                              "Date",         False, ca)
+                d_eid  = _sel("Employee ID",  "EmployeeID",   True,  ca)
+                d_name = _sel("Employee Name","EmployeeName", True,  ca)
+                d_dept = _sel("Department",   "Department",   False, ca)
 
-                with cb:
-                    d_shift = _sel("Shift",                    "Shift",       False, cb)
+            with cb:
+                d_shift = _sel("Shift",                    "Shift",       False, cb)
 
-                    if "Already" in uph_src:
-                        st.caption("Using your existing UPH column.")
-                        d_uph   = _sel("UPH column",   "UPH",         True,  cb, "u")
-                        d_units = ""
-                        d_hrs   = ""
-                    else:
-                        st.caption("UPH will be calculated from Units ÷ Hours Worked.")
-                        d_uph   = ""
-                        d_units = _sel("Units",        "Units",       True,  cb, "un")
-                        d_hrs   = _sel("Hours Worked", "HoursWorked", True,  cb, "h")
+                if "Already" in uph_src:
+                    st.caption("Using your existing UPH column.")
+                    d_uph   = _sel("UPH column",   "UPH",         True,  cb, "u")
+                    d_units = ""
+                    d_hrs   = ""
+                else:
+                    st.caption("UPH will be calculated from Units ÷ Hours Worked.")
+                    d_uph   = ""
+                    d_units = _sel("Units",        "Units",       True,  cb, "un")
+                    d_hrs   = _sel("Hours Worked", "HoursWorked", True,  cb, "h")
 
                 # Validation — Date is optional (falls back to work date picker)
                 missing = [
@@ -1889,11 +1853,12 @@ def _import_step2():
                 if can_confirm and not _auto_confirmed:
                     st.info("✓ All fields mapped — ready to confirm.")
 
-                confirmed = st.form_submit_button(
+                confirmed = st.button(
                     f"Confirm mapping for {s['filename']}",
                     type="primary",
                     use_container_width=True,
                     disabled=_auto_confirmed,
+                    key=f"confirm_mapping_{idx}",
                 )
 
                 if confirmed:
@@ -4460,7 +4425,8 @@ def _resolve_period_dates(period: str):
 
 
 def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
-                          gs: list, targets: dict):
+                          gs: list, targets: dict, tenant_id: str = "",
+                          plan_name: str = "starter"):
     """
     Build Excel report bytes, subject, and HTML body for a date range.
     d_start / d_end are date objects. Returns (xl_bytes, subj, body).
@@ -4476,15 +4442,22 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
 
     try:
         _sb = _get_db_client()
-        from database import _tq as _tq3
-        _r  = _tq3(_sb.table("uph_history").select(
+        _uph_q = _sb.table("uph_history").select(
             "emp_id, units, hours_worked, uph, work_date, department"
-        ).gte("work_date", from_iso).lte("work_date", to_iso)).execute()
-        subs = _r.data or []
+        ).gte("work_date", from_iso).lte("work_date", to_iso)
+        _emp_q = _sb.table("employees").select("emp_id, name, department")
+        if tenant_id:
+            _uph_q = _uph_q.eq("tenant_id", tenant_id)
+            _emp_q = _emp_q.eq("tenant_id", tenant_id)
+        else:
+            from database import _tq as _tq3
+            _uph_q = _tq3(_uph_q)
+            _emp_q = _tq3(_emp_q)
+        subs = (_uph_q.execute().data or [])
+        emps_lookup = {e["emp_id"]: e for e in (_emp_q.execute().data or [])}
     except Exception:
         subs = []
-
-    emps_lookup = {e["emp_id"]: e for e in (_cached_employees() or [])}
+        emps_lookup = {e["emp_id"]: e for e in (_cached_employees() or [])}
     if dept_choice != "All departments":
         subs = [s for s in subs
                 if (s.get("department","") == dept_choice or
@@ -4505,12 +4478,58 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
         emp_agg[eid]["hours"] += float(s.get("hours_worked") or 0)
         emp_agg[eid]["dept"]   = emps_lookup.get(eid,{}).get("department","")
 
+    try:
+        _sb = _get_db_client()
+        from datetime import timedelta
+        _recent = (d_end - timedelta(days=30)).isoformat()
+        _hist_q = _sb.table("uph_history").select("emp_id, uph, work_date").gte("work_date", _recent)
+        if tenant_id:
+            _hist_q = _hist_q.eq("tenant_id", tenant_id)
+        else:
+            from database import _tq as _tq_hist
+            _hist_q = _tq_hist(_hist_q)
+        _email_hist = _hist_q.execute().data or []
+    except Exception:
+        _email_hist = []
+
+    gs_by_emp = {str(r.get("EmployeeID", "")): r for r in (gs or []) if r.get("EmployeeID")}
+
+    def _trend_snapshot(emp_id: str) -> tuple[str, float]:
+        if emp_id in gs_by_emp:
+            _row = gs_by_emp[emp_id]
+            return _row.get("trend", "insufficient_data"), float(_row.get("change_pct", 0) or 0)
+        emp_hist = []
+        for row in _email_hist:
+            if row.get("emp_id") == emp_id:
+                try:
+                    emp_hist.append((row.get("work_date", ""), float(row.get("uph") or 0)))
+                except Exception:
+                    pass
+        if len(emp_hist) < 4:
+            return "insufficient_data", 0.0
+        emp_hist.sort(key=lambda item: item[0])
+        recent = [v for _, v in emp_hist[-3:]]
+        previous = [v for _, v in emp_hist[-6:-3]]
+        if not previous:
+            return "insufficient_data", 0.0
+        prev_avg = sum(previous) / len(previous)
+        recent_avg = sum(recent) / len(recent)
+        if prev_avg <= 0:
+            return "insufficient_data", 0.0
+        pct = round(((recent_avg - prev_avg) / prev_avg) * 100, 1)
+        if pct >= 5:
+            return "up", pct
+        if pct <= -5:
+            return "down", pct
+        return "flat", pct
+
     scope_gs = []
     for eid, agg in emp_agg.items():
         emp_info = emps_lookup.get(eid, {})
         dept     = agg["dept"]
         uph      = round(agg["units"] / agg["hours"], 2) if agg["hours"] > 0 else 0
         tgt      = float(targets.get(dept, 0) or 0)
+        trend, change_pct = _trend_snapshot(eid)
         scope_gs.append({
             "Employee Name": emp_info.get("name", eid),
             "EmployeeID":    eid,
@@ -4521,6 +4540,8 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
             "Target UPH":    tgt if tgt else "—",
             "goal_status":   ("on_goal" if tgt and uph >= tgt
                               else "below_goal" if tgt else "no_goal"),
+            "trend":         trend,
+            "change_pct":    change_pct,
             "flagged":       False,
         })
     scope_gs.sort(key=lambda r: float(r.get("Average UPH", 0) or 0), reverse=True)
@@ -4567,18 +4588,6 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
             return "🟡 Medium"
         else:
             return "🟢 Low"
-
-    # Get recent history for risk calculation in email
-    _email_hist = []
-    try:
-        _sb = _get_db_client()
-        from database import _tq as _tq_hist
-        from datetime import timedelta
-        _recent = (d_end - timedelta(days=30)).isoformat()
-        _r = _tq_hist(_sb.table("uph_history").select("emp_id, uph, work_date").gte("work_date", _recent)).execute()
-        _email_hist = _r.data or []
-    except:
-        pass
 
     # Top 3 performers
     _top3 = scope_gs[:3]
@@ -4662,17 +4671,85 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
     # Average UPH across all employees
     _avg_all = round(sum(r["Average UPH"] for r in scope_gs) / len(scope_gs), 1) if scope_gs else 0
 
+    _dept_health_rows = []
+    for _dept in sorted({r.get("Department", "") for r in scope_gs if r.get("Department")}):
+        _dept_rows = [r for r in scope_gs if r.get("Department") == _dept]
+        _dept_on = sum(1 for r in _dept_rows if r.get("goal_status") == "on_goal")
+        _dept_total = len(_dept_rows)
+        _dept_pct = round((_dept_on / _dept_total) * 100) if _dept_total else 0
+        _dept_health_rows.append(
+            f"<tr><td style='padding:8px;border:1px solid #ddd;'><strong>{_dept}</strong></td>"
+            f"<td style='padding:8px;border:1px solid #ddd;text-align:center;'>{_dept_on}/{_dept_total}</td>"
+            f"<td style='padding:8px;border:1px solid #ddd;text-align:center;'>{_dept_pct}%</td></tr>"
+        )
+    _dept_health_html = ""
+    if _dept_health_rows:
+        _dept_health_html = (
+            "<h3>📊 Department Health</h3>"
+            "<table style='width:100%; border-collapse: collapse;'>"
+            "<tr style='background: #f5f5f5;'><th style='padding: 8px; text-align: left; border: 1px solid #ddd;'>Department</th>"
+            "<th style='text-align: center; border: 1px solid #ddd;'>On Goal</th>"
+            "<th style='text-align: center; border: 1px solid #ddd;'>Health</th></tr>"
+            + "".join(_dept_health_rows)
+            + "</table>"
+        )
+
+    _top_risks_html = ""
+    if plan_name in ("pro", "business"):
+        _risk_rows = []
+        for _row in [r for r in scope_gs if r.get("goal_status") == "below_goal"][:5]:
+            _risk_rows.append(
+                f"<tr><td style='padding:8px;border:1px solid #ddd;'><strong>{_row['Employee Name']}</strong></td>"
+                f"<td style='padding:8px;border:1px solid #ddd;'>{_row['Department']}</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;text-align:right;'>{_row['Average UPH']}</td>"
+                f"<td style='padding:8px;border:1px solid #ddd;text-align:center;'>{_email_risk_level(_row, _email_hist)}</td></tr>"
+            )
+        if _risk_rows:
+            _top_risks_html = (
+                "<h3>🔴 Top Risks — Action Required Today</h3>"
+                "<table style='width:100%; border-collapse: collapse;'>"
+                "<tr style='background: #f5f5f5;'><th style='padding: 8px; text-align: left; border: 1px solid #ddd;'>Employee</th>"
+                "<th style='padding: 8px; text-align: left; border: 1px solid #ddd;'>Dept</th>"
+                "<th style='padding: 8px; text-align: right; border: 1px solid #ddd;'>UPH</th>"
+                "<th style='padding: 8px; text-align: center; border: 1px solid #ddd;'>Risk</th></tr>"
+                + "".join(_risk_rows)
+                + "</table>"
+            )
+
+    _cost_html = ""
+    if plan_name in ("pro", "business"):
+        try:
+            from settings import Settings as _ImpactS
+            _impact_settings = _ImpactS(tenant_id=tenant_id) if tenant_id else _ImpactS()
+            _avg_wage = float(_impact_settings.get("avg_hourly_wage", 18.0))
+        except Exception:
+            _avg_wage = 18.0
+        _cost_total = 0.0
+        for _row in scope_gs:
+            try:
+                _target = float(_row.get("Target UPH") or 0)
+                _avg = float(_row.get("Average UPH") or 0)
+                _hours = float(_row.get("Hours Worked") or 0)
+                if _target > 0 and 0 < _avg < _target:
+                    _cost_total += max(((_target - _avg) / _target) * _hours * _avg_wage, 0)
+            except Exception:
+                pass
+        _cost_html = f"<h3>💰 Cost Impact</h3><p>Estimated labor cost impact for below-goal performance in this period: <strong>${_cost_total:,.0f}</strong></p>"
+
     body  = (f"<h2>{dept_label} — {period_label}</h2>"
              f"<p><strong>{len(scope_gs)}</strong> employees · "
              f"Avg UPH: <strong>{_avg_all}</strong> · "
              f"<strong style='color:green'>{on_g} on goal</strong> · "
              f"<strong style='color:red'>{below} below goal</strong></p>"
              f"<hr/>"
+             f"{_dept_health_html}"
              f"{_top3_html}"
+             f"{_top_risks_html}"
              f"{_critical_html}"
              f"{_improved_html}"
              f"{_trending_down_html}"
              f"{_bottom_html}"
+             f"{_cost_html}"
              f"<hr/>"
              f"<p style='font-size: 0.9em; color: #666;'>See the attached Excel report for full details and department breakdown.</p>")
 
@@ -4743,71 +4820,9 @@ def page_email():
     except ImportError:
         st.error("Email module not found."); return
 
-    tab_tz, tab_smtp, tab_recip, tab_sched, tab_send = st.tabs([
-        "0️⃣ Timezone (Required)", "1️⃣ SMTP Setup", "2️⃣ Recipients", "3️⃣ Schedules", "📤 Send Now"
+    tab_smtp, tab_recip, tab_sched, tab_send = st.tabs([
+        "1️⃣ SMTP Setup", "2️⃣ Recipients", "3️⃣ Schedules", "📤 Send Now"
     ])
-
-    # ── TIMEZONE (REQUIRED FIRST) ─────────────────────────────────────────────
-    with tab_tz:
-        st.subheader("🕐 Set Your Timezone")
-        st.caption("This is CRITICAL for scheduled emails to work correctly. Your timezones determines when emails are sent.")
-
-        from settings import Settings as _TzS
-        _tzs    = _TzS()
-        _cur_tz = _tzs.get("timezone", "")
-        _tz_options = [
-            # ── United States ──
-            "America/New_York",
-            "America/Chicago",
-            "America/Denver",
-            "America/Phoenix",
-            "America/Los_Angeles",
-            "America/Anchorage",
-            "Pacific/Honolulu",
-            # ── Canada ──
-            "America/Toronto",
-            "America/Vancouver",
-            "America/Winnipeg",
-            "America/Halifax",
-            # ── Europe ──
-            "Europe/London",
-            "Europe/Paris",
-            "Europe/Berlin",
-            "Europe/Madrid",
-            "Europe/Rome",
-            "Europe/Amsterdam",
-            "Europe/Zurich",
-            "Europe/Stockholm",
-            "Europe/Warsaw",
-            "Europe/Istanbul",
-            # ── Asia / Pacific ──
-            "Asia/Dubai",
-            "Asia/Kolkata",
-            "Asia/Bangkok",
-            "Asia/Singapore",
-            "Asia/Shanghai",
-            "Asia/Tokyo",
-            "Asia/Seoul",
-            "Australia/Sydney",
-            "Australia/Melbourne",
-            "Pacific/Auckland",
-            # ── UTC ──
-            "UTC",
-        ]
-        _tz_display = ["(Server local time — no timezone set)"] + _tz_options
-        _cur_idx    = (_tz_options.index(_cur_tz) + 1) if _cur_tz in _tz_options else 0
-        _sel_tz     = st.selectbox(
-            "Select your timezone", _tz_display, index=_cur_idx, key="email_timezone",
-        )
-        if st.button("Save timezone", key="save_email_tz", type="primary", use_container_width=True):
-            _save_val = "" if _sel_tz.startswith("(") else _sel_tz
-            _tzs.set("timezone", _save_val)
-            st.success(f"✓ Timezone set to '{_save_val or 'server local time'}'.")
-
-        if _cur_tz:
-            st.info(f"✓ Current timezone: **{_cur_tz}**")
-        else:
-            st.warning("⚠️ No timezone set yet. Scheduled emails may not fire at the right time.")
 
     # ── SMTP ─────────────────────────────────────────────────────────────────
     with tab_smtp:
@@ -5015,11 +5030,67 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
         if not _plan_gate("pro", "Automated Schedules"):
             return
         st.subheader("Automated send schedules")
-        # Show current timezone setting
         from settings import Settings as _SchedTzS
-        _sched_tz = _SchedTzS().get("timezone", "")
-        _tz_display = _sched_tz if _sched_tz else "(Server local time)"
-        st.caption(f"📍 Timezone: {_tz_display}")
+        _sched_settings = _SchedTzS()
+        _sched_tz = _sched_settings.get("timezone", "")
+        _tz_options = _email_timezone_options()
+        _tz_display = ["(Select a timezone)"] + _tz_options
+        _tz_idx = (_tz_options.index(_sched_tz) + 1) if _sched_tz in _tz_options else 0
+
+        st.markdown("##### Timezone")
+        _tz_col1, _tz_col2 = st.columns([3, 1])
+        _sched_tz_choice = _tz_col1.selectbox(
+            "Timezone used for schedules",
+            _tz_display,
+            index=_tz_idx,
+            key="sched_timezone_select",
+        )
+        if _tz_col2.button("Save timezone", key="save_sched_tz", type="primary", use_container_width=True):
+            _new_tz = "" if _sched_tz_choice.startswith("(") else _sched_tz_choice
+            _sched_settings.set("timezone", _new_tz)
+            st.success(f"✓ Timezone set to '{_new_tz or 'server local time'}'.")
+            st.rerun()
+        if _sched_tz:
+            st.caption(f"📍 Current timezone: {_sched_tz}")
+        else:
+            st.warning("Select and save a timezone before relying on automated schedules.")
+
+        _dbg_now = datetime.now()
+        if _sched_tz:
+            try:
+                from zoneinfo import ZoneInfo
+                _dbg_now = datetime.now(ZoneInfo(_sched_tz))
+            except Exception:
+                pass
+        _dbg_day = _dbg_now.strftime("%A")
+        _dbg_time = _dbg_now.strftime("%H:%M")
+        st.info(f"Scheduler local time: {_dbg_now.strftime('%Y-%m-%d %H:%M:%S %Z')} ({_dbg_day})")
+
+        _debug_cols = st.columns(2)
+        if _debug_cols[0].button("Run due schedules now", key="run_due_sched_now", use_container_width=True):
+            _results = _run_scheduled_reports_for_tenant(force_now=False)
+            if _results:
+                _ok_count = sum(1 for r in _results if r.get("ok"))
+                st.success(f"Ran {_ok_count}/{len(_results)} due schedule(s).")
+                for _res in _results:
+                    if _res.get("ok"):
+                        st.write(f"✓ {_res.get('name')} → {', '.join(_res.get('recipients', []))}")
+                    else:
+                        st.write(f"✕ {_res.get('name')} → {_res.get('error')}")
+            else:
+                st.info("No schedules are due right now.")
+        if _debug_cols[1].button("Send all active schedules now", key="force_all_sched_now", use_container_width=True):
+            _results = _run_scheduled_reports_for_tenant(force_now=True)
+            if _results:
+                _ok_count = sum(1 for r in _results if r.get("ok"))
+                st.success(f"Sent {_ok_count}/{len(_results)} active schedule(s).")
+                for _res in _results:
+                    if _res.get("ok"):
+                        st.write(f"✓ {_res.get('name')} → {', '.join(_res.get('recipients', []))}")
+                    else:
+                        st.write(f"✕ {_res.get('name')} → {_res.get('error')}")
+            else:
+                st.info("No active schedules found to send.")
 
         _all_recips = get_recipients()
         _recip_labels = [f"{r['name']} <{r['email']}>" for r in _all_recips]
@@ -5059,28 +5130,14 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                         st.toast("✓ Recipients updated", icon="✅")
                         st.rerun()
                     if sc2.button("▶ Test now", key=f"sched_test_{s['name']}", use_container_width=True):
-                        _test_to = assigned or [r["email"] for r in _all_recips]
-                        if not _test_to:
-                            st.warning("No recipients to send to.")
+                        with st.spinner("Building and sending test report…"):
+                            _results = _run_scheduled_reports_for_tenant(force_now=True, schedule_names=[s["name"]])
+                        if _results and _results[0].get("ok"):
+                            st.success(f"Test sent to {', '.join(_results[0].get('recipients', []))}")
+                        elif _results:
+                            st.error(f"Send failed: {_results[0].get('error')}")
                         else:
-                            _gs  = st.session_state.get("goal_status", [])
-                            _tgts = _cached_targets()
-                            _depts = sorted({r.get("Department","") for r in _gs if r.get("Department")})
-                            _per  = s.get("report_period", "Prior day")
-                            if _per == "Custom":
-                                _ds = date.fromisoformat(s.get("date_start", date.today().isoformat()))
-                                _de = date.fromisoformat(s.get("date_end", _ds.isoformat()))
-                            else:
-                                _ds, _de = _resolve_period_dates(_per)
-                            with st.spinner("Building and sending test report…"):
-                                _xl, _subj, _body = _build_period_report(_ds, _de, "All departments", _depts, _gs, _tgts)
-                                _ok, _err = send_report_email(_test_to, f"[TEST] {_subj}", _body, _xl)
-                            if _ok:
-                                st.success(f"Test sent to {', '.join(_test_to)}")
-                                from email_engine import mark_schedule_sent as _mss2
-                                _mss2(s["name"])
-                            else:
-                                st.error(f"Send failed: {_err}")
+                            st.warning("No recipients to send to.")
                     if sc3.button("🗑 Remove", key=f"sched_rm_{s['name']}", type="secondary", use_container_width=True):
                         remove_schedule(s["name"])
                         st.rerun()
@@ -5126,9 +5183,11 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                                       value=datetime.strptime("08:00","%H:%M").time())
             subj = st.text_input("Email subject (optional)",
                                  placeholder="Weekly Performance Report")
-            if st.form_submit_button("Create schedule", type="primary"):
+            if st.form_submit_button("Create schedule", type="primary", disabled=not bool(_sched_tz)):
                 if not sname.strip():
                     st.warning("Give the schedule a name.")
+                elif not _sched_tz:
+                    st.warning("Select and save a timezone first.")
                 elif not sel_days:
                     st.warning("Select at least one day.")
                 elif speriod == "Custom" and _sch_end < _sch_start:
@@ -5142,52 +5201,23 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                                  sel_emails, _ds_str, _de_str)
                     _success_then_rerun(f"✓ Schedule '{sname}' created.")
 
-        # ── Debug: Check Due Schedules ──────────────────────────────────────
-        st.divider()
-        with st.expander("🐛 Debug: Check what's due right now"):
-            from datetime import datetime as _debug_dt
-            from settings import Settings as _DebugTzS
-            _dbg_tz = _DebugTzS().get("timezone", "")
-            if _dbg_tz:
-                try:
-                    from zoneinfo import ZoneInfo
-                    _dbg_now = _debug_dt.now(ZoneInfo(_dbg_tz))
-                except Exception:
-                    _dbg_now = _debug_dt.now()
+        st.markdown("##### Schedule timing check")
+        _dbg_due = get_schedules_due_now(timezone=_sched_tz)
+        if _dbg_due:
+            st.success(f"{len(_dbg_due)} schedule(s) are due right now.")
+            for _dbg_s in _dbg_due:
+                st.write(f"✓ {_dbg_s.get('name')} at {_dbg_s.get('send_time')} on {_dbg_s.get('days')}")
+        else:
+            _all_scheds = get_schedules()
+            if _all_scheds:
+                for _dbg_s in _all_scheds:
+                    _dbg_st = _dbg_s.get('send_time', '?')
+                    _dbg_da = _dbg_s.get('days', [])
+                    _dbg_match_day = _dbg_day in _dbg_da or 'Daily' in _dbg_da
+                    _dbg_status = 'Due now' if (_dbg_match_day and _dbg_time >= _dbg_st) else (f'Wait until {_dbg_st}' if _dbg_match_day else 'Wrong day')
+                    st.write(f"• {_dbg_s.get('name')} → {_dbg_status}")
             else:
-                _dbg_now = _debug_dt.now()
-            _dbg_day = _dbg_now.strftime("%A")
-            _dbg_time = _dbg_now.strftime("%H:%M")
-            
-            def _add_window_dbg(h_m: str, mins: int) -> str:
-                try:
-                    h, m = map(int, h_m.split(":"))
-                    total = h * 60 + m + mins
-                    return f"{total // 60:02d}:{total % 60:02d}"
-                except:
-                    return h_m
-            
-            st.caption(f"Current time in your zone: **{_dbg_now.strftime('%Y-%m-%d %H:%M:%S %Z')}** ({_dbg_day})")
-            st.caption(f"Timezone setting in Email page: **{_dbg_tz or 'Not set'}**")
-            
-            _dbg_due = get_schedules_due_now(timezone=_dbg_tz)
-            if _dbg_due:
-                st.success(f"✓ **{len(_dbg_due)} schedule(s) are due RIGHT NOW:**")
-                for _dbg_s in _dbg_due:
-                    st.write(f"- **{_dbg_s.get('name')}** send time: {_dbg_s.get('send_time')} on {_dbg_s.get('days')}")
-            else:
-                st.info(f"❌ No schedules due right now. Configured schedules:")
-                _all_scheds = get_schedules()
-                if _all_scheds:
-                    for _dbg_s in _all_scheds:
-                        _dbg_st = _dbg_s.get('send_time', '?')
-                        _dbg_da = _dbg_s.get('days', [])
-                        _dbg_match_day = _dbg_day in _dbg_da or 'Daily' in _dbg_da
-                        _dbg_match_time = _dbg_st <= _dbg_time <= _add_window_dbg(_dbg_st, 5) if _dbg_st else False
-                        _dbg_status = ('✓ Matches time' if _dbg_match_time else f'⏳ Wait until {_dbg_st}') if _dbg_match_day else '❌ Wrong day'
-                        st.write(f"- **{_dbg_s.get('name')}** {_dbg_st} on {_dbg_da} → {_dbg_status}")
-                else:
-                    st.info("No schedules configured yet. Create one in the 'Schedules' section above.")
+                st.info("No schedules configured yet. Create one above.")
 
         # ── Scheduler log viewer ─────────────────────────────────────────────
         st.divider()
@@ -5286,7 +5316,11 @@ def page_settings():
     with tab_sub:
         st.subheader("Your Subscription")
         try:
-            from database import get_subscription, get_employee_count, get_employee_limit, create_billing_portal_url
+            from database import (
+                get_subscription, get_employee_count, get_employee_limit,
+                create_billing_portal_url, get_live_stripe_subscription_status,
+                refund_latest_subscription_payment,
+            )
             _tid_local = st.session_state.get("tenant_id", "")
             sub = get_subscription(_tid_local)
             if sub:
@@ -5354,6 +5388,51 @@ def page_settings():
                                    _portal_url, use_container_width=True, type="primary")
                 else:
                     st.info("Billing portal not available. Contact support.")
+
+                with st.expander("Live Stripe verification", expanded=True):
+                    _live = get_live_stripe_subscription_status(_tid_local)
+                    if not _live:
+                        st.info("No live Stripe subscription found yet.")
+                    elif _live.get("error"):
+                        st.error(_live.get("error"))
+                    else:
+                        _stripe_period = ""
+                        try:
+                            if _live.get("current_period_end"):
+                                _stripe_period = datetime.fromtimestamp(int(_live.get("current_period_end"))).strftime("%b %d, %Y")
+                        except Exception:
+                            _stripe_period = ""
+                        st.write(f"Effective access now: {_live.get('db_plan', _plan_raw).capitalize()} ({_live.get('db_status', _status)})")
+                        st.write(f"Stripe live plan: {_live.get('current_plan', '').capitalize()} | Stripe status: {_live.get('status', '')}")
+                        if _stripe_period:
+                            st.write(f"Current billing period ends: {_stripe_period}")
+                        if _live.get("has_pending_update") and _live.get("pending_plan"):
+                            st.success(
+                                f"Pending change detected: the app should keep {_live.get('db_plan', _plan_raw).capitalize()} access until {_stripe_period or 'period end'}, then switch to {_live.get('pending_plan', '').capitalize()}."
+                            )
+                        else:
+                            st.info("No pending Stripe plan change detected right now.")
+                        if st.button("Refresh live Stripe status", key="refresh_live_stripe", use_container_width=True):
+                            st.rerun()
+
+                with st.expander("Refund most recent subscription payment"):
+                    st.caption("Issues a full refund for the latest successful subscription charge in Stripe.")
+                    _refund_ok = st.checkbox(
+                        "I understand this refunds the latest subscription payment.",
+                        key="refund_confirm_latest",
+                    )
+                    if st.button(
+                        "Issue refund",
+                        key="issue_latest_refund",
+                        type="secondary",
+                        use_container_width=True,
+                        disabled=not _refund_ok,
+                    ):
+                        _ok, _msg = refund_latest_subscription_payment(_tid_local)
+                        if _ok:
+                            st.success(f"Refund issued successfully ({_msg}).")
+                        else:
+                            st.error(_msg)
 
                 # ── Plan comparison ───────────────────────────────────
                 st.markdown("---")
@@ -6240,7 +6319,9 @@ def _verify_checkout_and_activate():
 def _subscription_page():
     """Subscription gate page — shown when no active subscription is found."""
     from database import (create_stripe_checkout_url, get_subscription,
-                          get_employee_count, create_billing_portal_url)
+                          get_employee_count, create_billing_portal_url,
+                          get_live_stripe_subscription_status,
+                          refund_latest_subscription_payment)
 
     # ── Shared plan data (mirrors Settings tab) ───────────────────────────
     _PORD  = ["starter", "pro", "business"]
@@ -6559,30 +6640,7 @@ def main():
     if _now - st.session_state.get("_last_email_check", 0) > 60:
         st.session_state["_last_email_check"] = _now
         try:
-            from email_engine import get_schedules_due_now, send_report_email, get_recipients
-            from settings    import Settings as _S
-            _tz  = _S().get("timezone", "")
-            _due = get_schedules_due_now(timezone=_tz)
-            if _due:
-                _gs      = st.session_state.get("goal_status", [])
-                _targets = _cached_targets()
-                _depts   = sorted({r.get("Department","") for r in _gs if r.get("Department")})
-                _global_recips = [r.get("email", "") for r in (get_recipients() or []) if r.get("email")]
-                for _sched in _due:
-                    _send_to = _sched.get("recipients", []) or _global_recips
-                    if not _send_to:
-                        continue
-                    _per = _sched.get("report_period", "Prior day")
-                    if _per == "Custom":
-                        _ds = date.fromisoformat(_sched.get("date_start", date.today().isoformat()))
-                        _de = date.fromisoformat(_sched.get("date_end", _ds.isoformat()))
-                    else:
-                        _ds, _de = _resolve_period_dates(_per)
-                    _xl, _subj, _body = _build_period_report(
-                        _ds, _de, "All departments", _depts, _gs, _targets)
-                    send_report_email(_send_to, _subj, _body, _xl)
-                    from email_engine import mark_schedule_sent as _mss
-                    _mss(_sched.get("name", ""), timezone=_tz)
+            _run_scheduled_reports_for_tenant(force_now=False)
         except Exception as _eml_err:
             _email_log(f"Page-render email check error: {_eml_err}")
             _log_app_error("email", f"Schedule check error: {_eml_err}", detail=traceback.format_exc())

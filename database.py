@@ -1247,6 +1247,158 @@ def create_billing_portal_url(
     return None
 
 
+def _resolve_plan_from_price_id(price_id: str) -> str:
+    """Map a Stripe price id to the local plan key."""
+    if not price_id:
+        return "starter"
+    price_map = {
+        _get_config("STRIPE_PRICE_STARTER"): "starter",
+        _get_config("STRIPE_PRICE_PRO"): "pro",
+        _get_config("STRIPE_PRICE_BUSINESS"): "business",
+    }
+    return price_map.get(price_id, "starter")
+
+
+def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
+    """Fetch live Stripe subscription details, including pending plan changes."""
+    import requests
+
+    stripe_key = _get_config("STRIPE_SECRET_KEY")
+    if not stripe_key:
+        return None
+
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return None
+
+    sb = get_client()
+    try:
+        resp = (
+            sb.table("subscriptions")
+            .select("stripe_customer_id, stripe_subscription_id, plan, status, employee_limit, current_period_end")
+            .eq("tenant_id", tid)
+            .limit(1)
+            .execute()
+        )
+        row = (resp.data or [{}])[0]
+    except Exception:
+        return None
+
+    stripe_sub_id = row.get("stripe_subscription_id") or ""
+    stripe_cid = row.get("stripe_customer_id") or ""
+    if not stripe_sub_id:
+        return None
+
+    sub_resp = requests.get(
+        f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
+        auth=(stripe_key, ""),
+        params={
+            "expand[]": [
+                "items.data.price",
+                "pending_update.subscription_items",
+                "latest_invoice.payment_intent",
+                "latest_invoice.charge",
+            ]
+        },
+        timeout=10,
+    )
+    if sub_resp.status_code != 200:
+        return {
+            "error": f"Stripe lookup failed: {sub_resp.status_code} {sub_resp.text[:200]}",
+            "tenant_id": tid,
+        }
+
+    sub_obj = sub_resp.json()
+    current_item = ((sub_obj.get("items") or {}).get("data") or [{}])[0]
+    current_price = current_item.get("price") or {}
+    current_price_id = current_price.get("id") or ""
+    current_plan = (
+        (sub_obj.get("metadata") or {}).get("plan")
+        or (current_price.get("metadata") or {}).get("plan")
+        or _resolve_plan_from_price_id(current_price_id)
+    )
+    current_plan = (current_plan or "starter").lower()
+
+    pending_update = sub_obj.get("pending_update") or {}
+    pending_item = (pending_update.get("subscription_items") or [{}])[0]
+    pending_price = pending_item.get("price") or ""
+    if isinstance(pending_price, dict):
+        pending_price_id = pending_price.get("id") or ""
+    else:
+        pending_price_id = pending_price or ""
+    pending_plan = _resolve_plan_from_price_id(pending_price_id) if pending_price_id else ""
+
+    latest_invoice = sub_obj.get("latest_invoice") or {}
+    payment_intent = latest_invoice.get("payment_intent") or {}
+    charge = latest_invoice.get("charge") or {}
+    if isinstance(charge, str):
+        charge_id = charge
+    else:
+        charge_id = charge.get("id") or ""
+    latest_charge = payment_intent.get("latest_charge") or ""
+    if not charge_id:
+        if isinstance(latest_charge, dict):
+            charge_id = latest_charge.get("id") or ""
+        else:
+            charge_id = latest_charge or ""
+
+    return {
+        "tenant_id": tid,
+        "stripe_customer_id": stripe_cid,
+        "stripe_subscription_id": stripe_sub_id,
+        "status": sub_obj.get("status") or row.get("status") or "",
+        "current_plan": current_plan,
+        "current_price_id": current_price_id,
+        "current_period_end": sub_obj.get("current_period_end"),
+        "cancel_at_period_end": bool(sub_obj.get("cancel_at_period_end")),
+        "db_plan": row.get("plan") or "",
+        "db_status": row.get("status") or "",
+        "db_employee_limit": row.get("employee_limit"),
+        "db_current_period_end": row.get("current_period_end") or "",
+        "has_pending_update": bool(pending_update),
+        "pending_plan": pending_plan,
+        "pending_price_id": pending_price_id,
+        "latest_invoice_id": latest_invoice.get("id") or "",
+        "latest_invoice_status": latest_invoice.get("status") or "",
+        "latest_payment_intent_status": payment_intent.get("status") or "",
+        "latest_charge_id": charge_id,
+    }
+
+
+def refund_latest_subscription_payment(tenant_id: str = "", reason: str = "requested_by_customer") -> tuple[bool, str]:
+    """Issue a full refund for the latest paid subscription charge."""
+    import requests
+
+    stripe_key = _get_config("STRIPE_SECRET_KEY")
+    if not stripe_key:
+        return False, "STRIPE_SECRET_KEY not configured"
+
+    live = get_live_stripe_subscription_status(tenant_id)
+    if not live:
+        return False, "No live Stripe subscription found"
+    if live.get("error"):
+        return False, live["error"]
+
+    charge_id = live.get("latest_charge_id") or ""
+    if not charge_id:
+        return False, "No refundable charge found on the latest invoice"
+
+    refund_resp = requests.post(
+        "https://api.stripe.com/v1/refunds",
+        auth=(stripe_key, ""),
+        data={
+            "charge": charge_id,
+            "reason": reason,
+        },
+        timeout=10,
+    )
+    if refund_resp.status_code == 200:
+        refund_id = refund_resp.json().get("id") or ""
+        return True, refund_id or "Refund issued"
+
+    return False, f"Refund failed: {refund_resp.status_code} {refund_resp.text[:200]}"
+
+
 def export_all_tenant_data(tenant_id: str = "") -> dict:
     """Export all data belonging to a tenant as a dict of table_name -> rows."""
     tid = tenant_id or get_tenant_id()
