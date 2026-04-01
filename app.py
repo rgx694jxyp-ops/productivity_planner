@@ -4815,6 +4815,7 @@ def page_email():
         from email_engine import (save_smtp_config, get_smtp_config, add_recipient,
                                    remove_recipient, get_recipients, add_schedule,
                                    remove_schedule, get_schedules, get_schedules_due_now, send_report_email,
+                                   save_email_delivery_config, get_email_delivery_config,
                                    build_dept_email_body, DAY_NAMES,
                                    import_recipients_from_csv)
     except ImportError:
@@ -4826,10 +4827,68 @@ def page_email():
 
     # ── SMTP ─────────────────────────────────────────────────────────────────
     with tab_smtp:
-        st.subheader("Email server settings")
-        st.caption("Pick your email provider below and we'll fill in the server details automatically.")
+        st.subheader("Email delivery settings")
+        st.caption("Recommended: use Resend API (no Gmail app password needed). SMTP is still available as fallback.")
 
         cfg = get_smtp_config()
+        delivery_cfg = get_email_delivery_config()
+        mode_label = "Resend API (recommended)" if delivery_cfg.get("mode") == "resend" else "SMTP (traditional)"
+        mode = st.radio(
+            "Delivery method",
+            ["Resend API (recommended)", "SMTP (traditional)"],
+            index=0 if "Resend" in mode_label else 1,
+            horizontal=True,
+            key="email_delivery_mode",
+        )
+
+        if "Resend" in mode:
+            st.info("Easiest setup: create one API key in Resend, verify sender domain, paste key here.")
+            _from_default = delivery_cfg.get("from") or cfg.get("from") or cfg.get("username", "")
+            with st.form("resend_form"):
+                resend_from = st.text_input(
+                    "From email (must be verified in Resend)",
+                    value=_from_default,
+                    placeholder="reports@yourcompany.com",
+                )
+                resend_key = st.text_input(
+                    "Resend API key",
+                    type="password",
+                    placeholder="re_...",
+                )
+                if st.form_submit_button("Save Resend settings", type="primary", use_container_width=True):
+                    save_email_delivery_config(
+                        mode="resend",
+                        provider="resend",
+                        api_key=resend_key,
+                        from_addr=resend_from,
+                    )
+                    st.success("✓ Resend settings saved.")
+                    st.rerun()
+
+            if st.button("Send test email via Resend", key="resend_test", use_container_width=True):
+                _to = (cfg.get("username") or "").strip()
+                if not _to:
+                    _all_r = get_recipients() or []
+                    if _all_r:
+                        _to = (_all_r[0].get("email") or "").strip()
+                if not _to:
+                    st.warning("Set a sender email in SMTP or add a recipient first so we know where to send the test.")
+                else:
+                    with st.spinner("Sending test email…"):
+                        ok, err = send_report_email(
+                            [_to],
+                            "Productivity Planner — Resend Test",
+                            "<p>Your Resend configuration is working correctly.</p>",
+                        )
+                    if ok:
+                        st.success(f"✓ Test email sent to {_to}")
+                    else:
+                        st.error(f"Send failed: {err}")
+            st.divider()
+            st.markdown("##### Resend Quick Setup")
+            st.caption("1) Create a free Resend account. 2) Verify your sender domain. 3) Create API key. 4) Paste key above.")
+        else:
+            st.caption("Pick your email provider below and we'll fill in the server details automatically.")
 
         # Provider quick-select
         providers = {
@@ -4971,6 +5030,7 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                         _prt = _auto_prt
                         _tls = _auto_tls
                 save_smtp_config(_svr, _prt, username, password, username, _tls)
+                    save_email_delivery_config(mode="smtp", provider="resend", from_addr=username)
                 # Clear overrides now that they are saved
                 st.session_state.pop("smtp_server_override", None)
                 st.session_state.pop("smtp_port_override", None)
@@ -4996,7 +5056,7 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                     # Parse error to provide actionable help
                     err_lower = str(err).lower()
                     if "authentication" in err_lower or "535" in err_lower:
-                        st.warning("**Incorrect email or app password.** Review your SMTP settings and make sure you're using an app-specific password (not your email password).")
+                        st.warning("**Incorrect email or app password.** Review SMTP credentials, or switch to **Resend API (recommended)** to avoid app-password setup.")
                     elif "timeout" in err_lower or "connection" in err_lower or "refused" in err_lower:
                         st.warning("**Connection failed.** Check that the server and port are correct. Try port 465 (SSL) in Advanced settings instead.")
                     elif "certificate" in err_lower or "tls" in err_lower:

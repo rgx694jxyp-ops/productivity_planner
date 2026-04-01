@@ -15,6 +15,7 @@ import io
 import csv
 import base64
 import hashlib
+import urllib.request
 import html as _html_mod
 from datetime import datetime, time
 from email.mime.multipart  import MIMEMultipart
@@ -90,6 +91,9 @@ def load_email_config(tenant_id: str = "") -> dict:
         from database import load_email_config_db
         data = load_email_config_db(tenant_id)
         if data.get("smtp") or data.get("recipients") or data.get("schedules"):
+            data.setdefault("delivery", {
+                "mode": "smtp", "provider": "resend", "api_key": "", "from": ""
+            })
             data.setdefault("smtp", {})
             data.setdefault("recipients", [])
             data.setdefault("schedules", [])
@@ -103,6 +107,9 @@ def load_email_config(tenant_id: str = "") -> dict:
     try:
         with open(ecf, "r", encoding="utf-8") as f:
             data = json.load(f)
+        data.setdefault("delivery", {
+            "mode": "smtp", "provider": "resend", "api_key": "", "from": ""
+        })
         data.setdefault("smtp", {})
         data.setdefault("recipients", [])
         data.setdefault("schedules", [])
@@ -129,6 +136,12 @@ def save_email_config(data: dict, tenant_id: str = ""):
 
 def _empty_config() -> dict:
     return {
+        "delivery": {
+            "mode": "smtp",         # smtp | resend
+            "provider": "resend",
+            "api_key": "",
+            "from": "",
+        },
         "smtp": {
             "server":   "",
             "port":     587,
@@ -139,6 +152,29 @@ def _empty_config() -> dict:
         },
         "recipients": [],
         "schedules":  [],
+    }
+
+
+def save_email_delivery_config(mode: str, provider: str = "resend",
+                               api_key: str = "", from_addr: str = ""):
+    cfg = load_email_config()
+    cfg["delivery"] = {
+        "mode": (mode or "smtp").strip().lower(),
+        "provider": (provider or "resend").strip().lower(),
+        "api_key": _encrypt(api_key.strip()) if api_key else cfg.get("delivery", {}).get("api_key", ""),
+        "from": (from_addr or "").strip(),
+    }
+    save_email_config(cfg)
+
+
+def get_email_delivery_config(tenant_id: str = "") -> dict:
+    cfg = load_email_config(tenant_id)
+    d = cfg.get("delivery") or {}
+    return {
+        "mode": (d.get("mode") or "smtp").lower(),
+        "provider": (d.get("provider") or "resend").lower(),
+        "api_key": d.get("api_key", ""),
+        "from": d.get("from", ""),
     }
 
 
@@ -368,7 +404,29 @@ def send_report_email(
     Send an HTML email with an optional .xlsx attachment.
     Returns (success, error_message).
     """
-    smtp_cfg = get_smtp_config(tenant_id)
+    cfg = load_email_config(tenant_id)
+    delivery = cfg.get("delivery") or {}
+    mode = (delivery.get("mode") or "smtp").lower()
+
+    if mode == "resend":
+        api_key = _decrypt(delivery.get("api_key", ""))
+        from_addr = (delivery.get("from") or "").strip()
+        if not api_key:
+            return False, "Resend API key not configured. Go to Email Settings and save it."
+        if not from_addr:
+            return False, "Resend sender email not configured. Go to Email Settings and save it."
+        return _send_via_resend(
+            to_addresses=to_addresses,
+            subject=subject,
+            body_html=body_html,
+            attachment_bytes=attachment_bytes,
+            attachment_name=attachment_name,
+            api_key=api_key,
+            from_addr=from_addr,
+            tenant_id=tenant_id,
+        )
+
+    smtp_cfg = cfg.get("smtp") or {}
     server   = smtp_cfg.get("server", "")
     if not server:
         return False, "SMTP server not configured. Go to Email Settings to set it up."
@@ -414,6 +472,58 @@ def send_report_email(
             log_error("email", f"SMTP send failed to {', '.join(to_addresses)}: {e}",
                       detail=f"Server: {server}:{port}, TLS: {use_tls}",
                       severity="error", tenant_id=tenant_id)
+        except Exception:
+            pass
+        return False, str(e)
+
+
+def _send_via_resend(
+    to_addresses: list[str],
+    subject: str,
+    body_html: str,
+    attachment_bytes: bytes | None,
+    attachment_name: str,
+    api_key: str,
+    from_addr: str,
+    tenant_id: str = "",
+) -> tuple[bool, str]:
+    payload = {
+        "from": from_addr,
+        "to": to_addresses,
+        "subject": subject,
+        "html": body_html,
+    }
+    if attachment_bytes:
+        payload["attachments"] = [{
+            "filename": attachment_name,
+            "content": base64.b64encode(attachment_bytes).decode("ascii"),
+        }]
+
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if 200 <= resp.status < 300:
+                return True, ""
+            return False, f"Resend API returned status {resp.status}"
+    except Exception as e:
+        try:
+            from database import log_error
+            log_error(
+                "email",
+                f"Resend send failed to {', '.join(to_addresses)}: {e}",
+                detail="provider=resend",
+                severity="error",
+                tenant_id=tenant_id,
+            )
         except Exception:
             pass
         return False, str(e)
