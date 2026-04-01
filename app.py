@@ -1110,6 +1110,73 @@ def _calc_risk_level(emp, history):
 _calc_risk_level_shared = _calc_risk_level
 
 
+def _compute_priority_summary(gs: list[dict], history: list[dict]) -> dict:
+    """Return lightweight action-oriented summary counts for header strips."""
+    below = [r for r in gs if r.get("goal_status") == "below_goal"]
+    critical = 0
+    quick_wins = 0
+    for row in below:
+        risk_level, _, _ = _calc_risk_level(row, history)
+        trend = row.get("trend", "")
+        try:
+            avg_uph = float(row.get("Average UPH", 0) or 0)
+            target = float(row.get("Target UPH", 0) or 0)
+        except Exception:
+            avg_uph, target = 0.0, 0.0
+
+        # Critical: high risk + trending down.
+        if risk_level.startswith("🔴") and trend == "down":
+            critical += 1
+
+        # Quick win: under target but within 5% and trending up/flat.
+        if target > 0 and avg_uph >= (target * 0.95) and trend in ("up", "flat"):
+            quick_wins += 1
+
+    return {
+        "below": len(below),
+        "critical": critical,
+        "quick_wins": quick_wins,
+    }
+
+
+def _render_priority_strip(gs: list[dict], history: list[dict]):
+    """Top-of-page action strip that answers 'what should I do right now?'"""
+    p = _compute_priority_summary(gs, history)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("⚠️ Below Goal", p["below"])
+    c2.metric("🔥 Critical Risk", p["critical"])
+    c3.metric("📈 Quick Wins", p["quick_wins"])
+
+    a1, a2 = st.columns(2)
+    if a1.button("View Priority List", use_container_width=True, key="pri_strip_priority"):
+        st.session_state["goto_page"] = "productivity"
+        st.session_state["prod_view"] = "📋 Priority List"
+        st.rerun()
+    if a2.button("Start Coaching", use_container_width=True, key="pri_strip_coaching"):
+        st.session_state["goto_page"] = "employees"
+        st.session_state["emp_view"] = "Performance Journal"
+        st.rerun()
+
+
+def _render_confidence_ux(history: list[dict] | None = None):
+    """Show trust cues so users know freshness and basis of insights."""
+    last_ts = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
+    if last_ts:
+        age_min = max(0, int((time.time() - last_ts) // 60))
+        st.caption(f"Last updated: {age_min} min ago")
+    else:
+        st.caption("Last updated: this session")
+
+    if history:
+        dates = []
+        for row in history:
+            d = row.get("Date") or row.get("work_date") or row.get("Week") or ""
+            if d:
+                dates.append(str(d))
+        if dates:
+            st.caption(f"Based on data range: {min(dates)} to {max(dates)}")
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # PAGE: SUPERVISOR VIEW
 # Daily one-screen view: department health, top risks, trending alerts, actions
@@ -1138,6 +1205,10 @@ def page_supervisor():
     if not gs:
         st.info("No productivity data. Run Import Data to get started.")
         return
+
+    _render_priority_strip(gs, history)
+    _render_confidence_ux(history)
+    st.divider()
 
     # ────────────────────────────────────────────────────────────────────────────
     # SECTION 1: DEPARTMENT HEALTH SUMMARY
@@ -1453,6 +1524,10 @@ def page_dashboard():
         st.info("No productivity data. Run Import Data to get started.")
         return
 
+    _render_priority_strip(gs, history)
+    _render_confidence_ux(history)
+    st.divider()
+
     # Filter for below_goal employees
     below_goal = [r for r in gs if r.get("goal_status") == "below_goal"]
     
@@ -1568,8 +1643,28 @@ def page_dashboard():
             return "background-color: #e6ffe6; color: #008000"
         return ""
 
-    styled = df.style.applymap(_color_risk, subset=["Risk"])
+    compact = st.checkbox("Compact table (small screens)", value=False, key="dash_compact")
+    if compact:
+        df_compact = df[["Risk", "Name", "Current UPH", "Streak"]]
+        styled = df_compact.style.applymap(_color_risk, subset=["Risk"])
+    else:
+        styled = df.style.applymap(_color_risk, subset=["Risk"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    st.markdown("##### Quick actions")
+    for i, r in enumerate(filtered[:12]):
+        q1, q2, q3, q4, q5 = st.columns([3, 2, 2, 1, 1])
+        q1.write(r["name"])
+        q2.caption(r["department"] or "No dept")
+        q3.caption(f"{r['avg_uph']} / {r['target_uph']}")
+        if q4.button("Coach", key=f"dash_coach_{i}"):
+            st.session_state["goto_page"] = "employees"
+            st.session_state["emp_view"] = "Performance Journal"
+            st.rerun()
+        if q5.button("History", key=f"dash_hist_{i}"):
+            st.session_state["goto_page"] = "employees"
+            st.session_state["emp_view"] = "Employee History"
+            st.rerun()
 
     # Export button
     csv_buf = df.to_csv(index=False)
@@ -2461,25 +2556,21 @@ def page_employees():
     if not require_db(): return
 
     _plan = _get_current_plan()
-    EMP_OPTS = ["Employee History", "Performance Journal"]
-    if _plan in ("pro", "business", "admin"):
-        EMP_OPTS.append("🤖 Coaching Insights")
-    if "emp_view" not in st.session_state or st.session_state.emp_view not in EMP_OPTS:
-        st.session_state.emp_view = "Employee History"
-
-    chosen = st.session_state.emp_view
-    cols   = st.columns(len(EMP_OPTS))
-    for i, opt in enumerate(EMP_OPTS):
-        if cols[i].button(opt, key=f"ev_{opt}", use_container_width=True,
-                           type="primary" if chosen == opt else "secondary"):
-            st.session_state.emp_view = opt
-            st.rerun()
-
-    st.divider()
     try:
-        if   chosen == "Employee History": _emp_history()
-        elif chosen == "Performance Journal":   _emp_coaching()
-        elif chosen == "🤖 Coaching Insights":  _emp_ai_coaching()
+        if _plan in ("pro", "business", "admin"):
+            t1, t2, t3 = st.tabs(["Employee History", "Performance Journal", "Coaching Insights"])
+            with t1:
+                _emp_history()
+            with t2:
+                _emp_coaching()
+            with t3:
+                _emp_ai_coaching()
+        else:
+            t1, t2 = st.tabs(["Employee History", "Performance Journal"])
+            with t1:
+                _emp_history()
+            with t2:
+                _emp_coaching()
     except Exception as e:
         st.error(f"Error: {e}")
         _log_app_error("employees", f"Employee page error: {e}", detail=traceback.format_exc())
@@ -3178,7 +3269,7 @@ def page_productivity():
     except ImportError as e:
         st.error(f"Productivity module error: {e}"); return
 
-    # Nav buttons (no tabs — avoids running all content simultaneously)
+    # Secondary page navigation: horizontal tab-like selector.
     _plan_now = _get_current_plan()
     _all_opts = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "💰 Labor Cost", "📋 Priority List", "🧑‍🏫 Coaching"]
     if _plan_now in ("pro", "business", "admin"):
@@ -3187,19 +3278,19 @@ def page_productivity():
         # Starter tier: core weekly output + ranking-focused view.
         PROD_OPTS = ["📅 Weekly", "📋 Priority List"]
 
-    if "prod_view" not in st.session_state:
+    if "prod_view" not in st.session_state or st.session_state.prod_view not in PROD_OPTS:
         st.session_state.prod_view = PROD_OPTS[0]
 
-    if st.session_state.prod_view not in PROD_OPTS:
-        st.session_state.prod_view = PROD_OPTS[0]
+    chosen_prod = st.radio(
+        "Productivity views",
+        PROD_OPTS,
+        index=PROD_OPTS.index(st.session_state.prod_view),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="prod_view",
+    )
 
-    chosen_prod = st.session_state.prod_view
-    cols = st.columns(len(PROD_OPTS))
-    for i, opt in enumerate(PROD_OPTS):
-        if cols[i].button(opt, key=f"pv_{i}", use_container_width=True,
-                          type="primary" if chosen_prod == opt else "secondary"):
-            st.session_state.prod_view = opt
-            st.rerun()
+    _render_confidence_ux(st.session_state.get("history", []))
 
     st.divider()
 
@@ -3276,28 +3367,25 @@ def page_productivity():
             return
         st.subheader("Department UPH targets")
         st.caption("Set a UPH target for each department. Type a value and press Enter — it saves immediately and updates all charts.")
-        st.caption("Trend window and Top/Bottom % below only affect highlighting/ranking views (Goal Status, Priority, Coaching). They do not change raw UPH history.")
+        st.caption("Trend window and Top/Bottom % only affect ranking/highlighting views.")
 
-        # Trend window slider lives here
-        tw = st.slider("Trend window used for trend scoring (weeks)", 2, 12,
-                       st.session_state.get("trend_weeks", 4), key="prod_tw")
-        if tw != st.session_state.get("trend_weeks", 4):
-            st.session_state.trend_weeks = tw
-            _reapply_goals()
-            st.rerun()
+        with st.expander("Advanced scoring controls"):
+            tw = st.slider("Trend window used for trend scoring (weeks)", 2, 12,
+                           st.session_state.get("trend_weeks", 4), key="prod_tw")
+            if tw != st.session_state.get("trend_weeks", 4):
+                st.session_state.trend_weeks = tw
+                _reapply_goals()
+                st.rerun()
 
-        st.divider()
-
-        # Top / bottom highlight thresholds
-        hc1, hc2 = st.columns(2)
-        st.session_state.top_pct = hc1.slider(
-            "Top % bucket (green highlight)", 0, 50,
-            st.session_state.get("top_pct", 10), key="goals_top_pct"
-        )
-        st.session_state.bot_pct = hc2.slider(
-            "Bottom % bucket (red highlight)", 0, 50,
-            st.session_state.get("bot_pct", 10), key="goals_bot_pct"
-        )
+            hc1, hc2 = st.columns(2)
+            st.session_state.top_pct = hc1.slider(
+                "Top % bucket (green highlight)", 0, 50,
+                st.session_state.get("top_pct", 10), key="goals_top_pct"
+            )
+            st.session_state.bot_pct = hc2.slider(
+                "Bottom % bucket (red highlight)", 0, 50,
+                st.session_state.get("bot_pct", 10), key="goals_bot_pct"
+            )
 
         st.divider()
 
@@ -4050,8 +4138,28 @@ def page_productivity():
                 return "background-color: #e6ffe6; color: #008000"
             return ""
 
-        styled = df_prio.style.applymap(_color_risk, subset=["Risk"])
+        compact_prio = st.checkbox("Compact table (small screens)", value=False, key="prio_compact")
+        if compact_prio:
+            df_show = df_prio[["Risk", "Name", "Current", "Streak"]]
+        else:
+            df_show = df_prio
+
+        styled = df_show.style.applymap(_color_risk, subset=["Risk"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
+
+        st.markdown("##### Quick actions")
+        for i, r in enumerate(priority_list[:12]):
+            qa1, qa2, qa3, qa4 = st.columns([3, 2, 1, 1])
+            qa1.write(r["name"])
+            qa2.caption(r["department"] or "No dept")
+            if qa3.button("Coach", key=f"prio_coach_{i}"):
+                st.session_state["goto_page"] = "employees"
+                st.session_state["emp_view"] = "Performance Journal"
+                st.rerun()
+            if qa4.button("History", key=f"prio_hist_{i}"):
+                st.session_state["goto_page"] = "employees"
+                st.session_state["emp_view"] = "Employee History"
+                st.rerun()
 
         # Download
         csv_buf = df_prio.to_csv(index=False)
@@ -5206,10 +5314,12 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
 def page_settings():
     st.title("⚙️ Settings")
 
-    tab_app, tab_sub, tab_access, tab_errors = st.tabs(["App Settings", "💳 Subscription", "🔐 Access Control", "🔴 Error Log"])
+    tab_account, tab_team, tab_billing, tab_integrations, tab_advanced = st.tabs([
+        "Account", "Team", "Billing", "Integrations", "Advanced"
+    ])
 
     # ── Subscription tab ──────────────────────────────────────────────────
-    with tab_sub:
+    with tab_billing:
         st.subheader("Your Subscription")
         try:
             from database import (
@@ -5445,7 +5555,7 @@ def page_settings():
 
     st.caption("Productivity Planner · Powered by Supply Chain Automation Co")
 
-    with tab_app:
+    with tab_team:
         st.session_state.chart_months = st.slider("History window used across charts (months)", 0, 60, st.session_state.chart_months)
         st.caption("This limits how many months of historical data are included in dashboard/productivity trend charts.")
         st.session_state.smart_merge  = True   # always on
@@ -5519,7 +5629,7 @@ def page_settings():
                 st.session_state.confirm_cleanup = False
                 st.rerun()
 
-    with tab_access:
+    with tab_account:
         st.subheader("Account")
         _uname = st.session_state.get("user_name", "")
         _urole = st.session_state.get("user_role", "member")
@@ -5622,8 +5732,14 @@ def page_settings():
             _full_sign_out()
             st.rerun()
 
-    # ── Error Log tab ─────────────────────────────────────────────────────
-    with tab_errors:
+    with tab_integrations:
+        st.subheader("Integrations")
+        st.caption("Connected tools and external services.")
+        st.info("Email delivery is configured in the Email Setup page.")
+        st.caption("Stripe billing integration is managed in the Billing tab.")
+
+    # ── Advanced tab ─────────────────────────────────────────────────────
+    with tab_advanced:
         st.subheader("Error Log")
         st.caption("Recent errors and warnings logged by the application. Use this to diagnose issues.")
 
