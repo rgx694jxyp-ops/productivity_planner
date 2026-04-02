@@ -992,6 +992,46 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
     .dpd-mobile-bar { display: flex !important; }
     body { padding-bottom: 60px; }
   }
+
+  /* ════════════════════════════════════════════════════════════
+     PLAN VS MONITOR VISUAL IDENTITY
+  ════════════════════════════════════════════════════════════ */
+  
+  /* Monitor Mode: cooler, sharper, real-time feel */
+  .dpd-mode-monitor {
+    --accent: #4DA3FF;
+    --bg-light: #E8F0F9;
+    --text-primary: #0F2D52;
+  }
+  .dpd-mode-monitor .stApp {
+    background: #F7F9FC !important;
+  }
+  .dpd-mode-monitor [data-testid="stMetricValue"] {
+    color: #0F2D52 !important;
+  }
+  
+  /* Plan Mode: warmer, spacious, form-like feel */
+  .dpd-mode-plan {
+    --accent: #5B8FC7;
+    --bg-light: #F0F4FA;
+    --text-primary: #1A3A52;
+  }
+  .dpd-mode-plan .stApp {
+    background: #FAFBFD !important;
+  }
+  .dpd-mode-plan [data-testid="stMetricValue"] {
+    color: #1A3A52 !important;
+  }
+
+  /* Radio button styles for mode selection */
+  .dpd-mode-radio {
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .dpd-mode-radio span {
+    padding: 4px 12px;
+  }
+
 </style>
 """)
 
@@ -1469,25 +1509,36 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
 
 
 def _render_confidence_ux(history: list[dict] | None = None, active_filters: dict | None = None):
-    """Show data trust cues: freshness, date range, and active filter context."""
+    """
+    Show data trust cues that answer "Should I act on this?"
+    Includes freshness, date range, active filters, and decision-relevance.
+    """
     last_ts = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
     age_min = max(0, int((time.time() - last_ts) // 60)) if last_ts else None
 
+    # Decision-relevant confidence levels
     if age_min is not None and age_min <= 5:
-        conf_label = "Data confidence: High"
+        conf_label = "✓ Confidence: High — safe to act immediately"
         age_str = f"updated {age_min} min ago"
-    elif age_min is not None:
-        conf_label = "Data confidence: Good"
+        can_act = True
+    elif age_min is not None and age_min <= 60:
+        conf_label = "Confidence: Good — stable pattern expected"
         age_str = f"updated {age_min} min ago"
+        can_act = True
+    elif age_min is not None and age_min <= 240:
+        conf_label = "⚠ Confidence: Fair — validate before major decisions"
+        age_str = f"updated {age_min} min ago"
+        can_act = True
     else:
-        conf_label = "Data confidence: Medium"
+        conf_label = "Confidence: Limited — wait for fresh data"
         age_str = "refreshed this session"
+        can_act = False
 
     date_range_str = ""
     if history:
         dates = [str(row.get("Date") or row.get("work_date") or row.get("Week") or "") for row in history if row.get("Date") or row.get("work_date") or row.get("Week")]
         if dates:
-            date_range_str = f"· based on {min(dates)} → {max(dates)}"
+            date_range_str = f"based on {min(dates)} → {max(dates)}"
 
     filter_str = ""
     if active_filters:
@@ -1496,9 +1547,16 @@ def _render_confidence_ux(history: list[dict] | None = None, active_filters: dic
             if v and v != "All departments":
                 parts.append(f"{k}: {v}")
         if parts:
-            filter_str = f" · applies to {', '.join(parts)}"
+            filter_str = f"applies to {', '.join(parts)}"
 
-    st.caption(f"{conf_label} · {age_str} {date_range_str}{filter_str}")
+    # Build decision-aware caption
+    parts = [conf_label, age_str]
+    if date_range_str:
+        parts.append(date_range_str)
+    if filter_str:
+        parts.append(filter_str)
+    
+    st.caption(" · ".join(parts))
 
 
 def _render_session_progress(gs: list[dict]):
@@ -3784,6 +3842,9 @@ def page_productivity():
         horizontal=True,
         key="prod_mode",
     )
+    # Apply mode-specific visual styling
+    _apply_mode_styling(prod_mode)
+    
     PROD_OPTS = _monitor_opts if prod_mode == "Monitor" else _plan_opts
 
     if "prod_view" not in st.session_state or st.session_state.prod_view not in PROD_OPTS:
@@ -7123,6 +7184,23 @@ def _subscription_page():
 # ════════════════════════════════════════════════════════════════════════════════
 # SESSION LAYER & CONTEXT HELPERS
 # ════════════════════════════════════════════════════════════════════════════════
+
+def _apply_mode_styling(mode: str):
+    """Apply visual styling based on Monitor vs Plan mode."""
+    mode_class = "dpd-mode-monitor" if mode == "Monitor" else "dpd-mode-plan"
+    st.markdown(
+        f'<style>.stApp {{ --current-mode: "{mode_class}"; }}</style>',
+        unsafe_allow_html=True,
+    )
+    if mode == "Plan":
+        st.markdown(
+            '<style>'
+            '.stApp { background: #FAFBFD !important; }'
+            '[data-testid="stExpander"] { margin-bottom: 20px !important; }'
+            '</style>',
+            unsafe_allow_html=True,
+        )
+
 
 def _render_session_context_bar():
     """
