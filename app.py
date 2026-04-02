@@ -1551,6 +1551,10 @@ def page_supervisor():
         st.info("No productivity data. Run Import Data to get started.")
         return
 
+    # Session context and breadcrumbs
+    _render_breadcrumb("supervisor")
+    _render_session_context_bar()
+    
     _render_session_progress(gs)
     _render_primary_action_rail(gs, history, key_prefix="sup_primary")
     _render_priority_strip(gs, history)
@@ -1878,6 +1882,10 @@ def page_dashboard():
     if not gs:
         st.info("No productivity data. Run Import Data to get started.")
         return
+
+    # Session context and breadcrumbs
+    _render_breadcrumb("dashboard", "High Risk View")
+    _render_session_context_bar()
 
     _render_session_progress(gs)
     _render_priority_strip(gs, history)
@@ -3267,6 +3275,9 @@ def _emp_coaching():
             st.success("✓ No follow-ups needed — all employees are on track.")
 
     # ── Top bar: dept filter ──────────────────────────────────────────────────
+    _render_breadcrumb("employees", dept_sel if dept_sel != "All departments" else None)
+    _render_session_context_bar()
+    
     dept_sel = st.selectbox("Department", ["All departments"] + all_depts, key="cn_dept",
                              label_visibility="collapsed")
     filtered_emps = (emps if dept_sel == "All departments"
@@ -3386,28 +3397,17 @@ def _emp_coaching():
                     _raw_cached_all_coaching_notes.clear()
                     st.session_state.cn_note_val = ""
                     st.session_state.cn_by_val   = ""
-                    # Completion momentum — track session count + show next action
+                    # Increment session count
                     st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
+                    # Count remaining below-goal (excluding current employee)
                     _remaining_risk = [
                         r for r in st.session_state.get("goal_status", [])
                         if r.get("goal_status") == "below_goal"
                         and str(r.get("EmployeeID", r.get("Employee Name", ""))) != str(emp_id)
                     ]
                     _n_rem = len(_remaining_risk)
-                    st.success("✅ Coaching logged — trend will refresh after the next data update.")
-                    if _n_rem > 0:
-                        st.info(
-                            f"**{_n_rem} more employee{'s' if _n_rem != 1 else ''} still below goal.** "
-                            f"Keep the momentum going."
-                        )
-                        if st.button("Continue Coaching →", key="continue_coaching_momentum", type="primary"):
-                            # Navigate to next employee
-                            _next = _remaining_risk[0]
-                            _next_id = str(_next.get("EmployeeID", _next.get("Employee Name", "")))
-                            st.session_state["cn_selected_emp"] = _next_id
-                            st.rerun()
-                    else:
-                        st.success("🏆 All high-risk employees coached today — great work!")
+                    # Use enhanced feedback UI
+                    _enhance_coaching_feedback(emp_name, emp_id, _n_rem)
                     st.rerun()
                 else:
                     st.warning("Write something before saving the entry.")
@@ -3746,6 +3746,11 @@ def _build_archived_productivity():
 def page_productivity():
     st.title("📈 Productivity")
     st.caption("UPH rankings, department goals, trend charts, and performance tracking.")
+
+    # Context and breadcrumbs
+    _prod_view = st.session_state.get("prod_view", "")
+    _render_breadcrumb("productivity", _prod_view if _prod_view else None)
+    _render_session_context_bar()
 
     try:
         from goals          import (analyse_trends, build_goal_status, get_all_targets,
@@ -7114,6 +7119,134 @@ def _subscription_page():
         for k in list(st.session_state.keys()): del st.session_state[k]
         st.rerun()
 
+
+# ════════════════════════════════════════════════════════════════════════════════
+# SESSION LAYER & CONTEXT HELPERS
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _render_session_context_bar():
+    """
+    Render a persistent session context bar at the top of major pages.
+    Shows coaching progress, remaining work, and current focus area.
+    """
+    gs = st.session_state.get("goal_status", [])
+    if not gs:
+        return
+    
+    coached_today = int(st.session_state.get("_coached_today", 0))
+    below_total = len([r for r in gs if r.get("goal_status") == "below_goal"])
+    remaining = max(0, below_total - coached_today)
+    
+    # Get current focus area from active filters/context
+    focus_dept = st.session_state.get("dash_dept_filter", ["All departments"])
+    focus_dept = [d for d in focus_dept if d != "All departments"]
+    focus_label = focus_dept[0] if focus_dept else "Overall"
+    
+    if coached_today == 0 and remaining == 0:
+        return
+    
+    # Build context bar HTML
+    progress_text = f"✔ {coached_today} coached" if coached_today > 0 else "Starting session"
+    remaining_text = f"⚠ {remaining} remaining" if remaining > 0 else "✔ All complete"
+    focus_text = f"Focus: {focus_label}"
+    
+    st.markdown(
+        f'<div style="'
+        f'background: linear-gradient(90deg, #E8F0F9 0%, #F0F7FF 100%);'
+        f'border-left: 4px solid #4DA3FF;'
+        f'padding: 12px 16px;'
+        f'border-radius: 6px;'
+        f'margin-bottom: 14px;'
+        f'font-size: 13px;'
+        f'">'
+        f'<strong>Today\'s Session</strong>&nbsp;&nbsp;'
+        f'{progress_text} &nbsp;•&nbsp; '
+        f'{remaining_text} &nbsp;•&nbsp; '
+        f'{focus_text}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_breadcrumb(current_page: str, subcontext: str | None = None):
+    """
+    Render a lightweight breadcrumb showing current location and context.
+    Helps users remember where they are without feeling cluttered.
+    """
+    _page_labels = {
+        "supervisor": "👔 Supervisor",
+        "dashboard": "📊 Dashboard",
+        "employees": "👥 Employees",
+        "productivity": "📈 Productivity",
+        "import": "📁 Import",
+        "email": "📧 Email",
+        "settings": "⚙️ Settings",
+    }
+    
+    label = _page_labels.get(current_page, current_page)
+    
+    breadcrumb_html = f'<span style="font-size:12px; color:#5A7A9C;">{label}'
+    if subcontext:
+        breadcrumb_html += f' • <span style="color:#1A2D42; font-weight:500;">{subcontext}</span>'
+    breadcrumb_html += '</span>'
+    
+    st.markdown(breadcrumb_html, unsafe_allow_html=True)
+
+
+def _enhance_coaching_feedback(emp_name: str, emp_id: str, remaining_below_goal: int):
+    """
+    Enhanced feedback after coaching save.
+    Shows progress, validates it felt meaningful, and prompts continuation.
+    """
+    coached_today = int(st.session_state.get("_coached_today", 1))  # Just incremented
+    
+    # Success confirmation
+    st.success("✔ Coaching logged and saved")
+    
+    # Progress milestone
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Coached Today", coached_today)
+    with col2:
+        st.metric("Remaining", remaining_below_goal)
+    
+    # Momentum prompt
+    if remaining_below_goal > 0:
+        st.markdown(
+            f'<div style="'
+            f'background:#E3F2FD;'
+            f'border-radius:6px;'
+            f'padding:12px 14px;'
+            f'margin:8px 0;'
+            f'font-size:14px;'
+            f'border-left:4px solid #4DA3FF;'
+            f'">'
+            f'You\'re on a roll — <strong>{remaining_below_goal} more</strong> {"employee" if remaining_below_goal == 1 else "employees"} below goal.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        
+        if st.button("Continue Coaching →", key="continue_auto", type="primary", use_container_width=True):
+            st.rerun()
+    else:
+        st.markdown(
+            f'<div style="'
+            f'background:#E8F5E9;'
+            f'border-radius:6px;'
+            f'padding:12px 14px;'
+            f'margin:8px 0;'
+            f'font-size:14px;'
+            f'border-left:4px solid #6FE090;'
+            f'">'
+            f'🏆 <strong>All high-risk employees coached today!</strong> Great work.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT
+# ════════════════════════════════════════════════════════════════════════════════
 
 def main():
     # ── Auth gate ──────────────────────────────────────────────────────────
