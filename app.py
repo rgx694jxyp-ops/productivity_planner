@@ -1032,6 +1032,70 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
     padding: 4px 12px;
   }
 
+  /* ════════════════════════════════════════════════════════════
+     BULK ACTION ANCHORING & SELECTION STATE
+  ════════════════════════════════════════════════════════════ */
+  
+  /* Highlight selected rows in tables */
+  [data-testid="stDataFrame"] tbody tr[data-selected="true"] {
+    background-color: #E8F0F9 !important;
+    border-left: 4px solid #4DA3FF !important;
+  }
+  
+  /* Selection counter near table header */
+  .dpd-selection-count {
+    display: inline-block;
+    background: #E8F0F9;
+    color: #0F2D52;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 8px;
+    border-left: 3px solid #4DA3FF;
+  }
+  
+  /* Sticky bulk action bar with better anchoring */
+ .dpd-sticky-wrap {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 9998;
+    background: linear-gradient(135deg, #0F2D52 0%, #1A4A8A 100%);
+    border-top: 3px solid #4DA3FF;
+    padding: 14px 20px;
+    box-shadow: 0 -4px 16px rgba(15, 45, 82, 0.14);
+    animation: slideUp 0.3s ease-out;
+  }
+  
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  .dpd-sticky-wrap .stButton > button {
+    background-color: #4DA3FF !important;
+    color: #002244 !important;
+    font-weight: 600 !important;
+  }
+  
+  .dpd-sticky-label {
+    color: #FFFFFF !important;
+    font-weight: 700 !important;
+    font-size: 14px !important;
+  }
+  
+  .dpd-sticky-spacer {
+    height: 70px;
+  }
+
 </style>
 """)
 
@@ -7274,49 +7338,66 @@ def _render_breadcrumb(current_page: str, subcontext: str | None = None):
 def _enhance_coaching_feedback(emp_name: str, emp_id: str, remaining_below_goal: int):
     """
     Enhanced feedback after coaching save.
-    Shows progress, validates it felt meaningful, and prompts continuation.
+    Shows progress, validates it felt meaningful, and prompts continuation with momentum.
     """
     coached_today = int(st.session_state.get("_coached_today", 1))  # Just incremented
     
     # Success confirmation
     st.success("✔ Coaching logged and saved")
     
-    # Progress milestone
+    # Progress snapshot
     col1, col2 = st.columns(2)
     with col1:
         st.metric("Coached Today", coached_today)
     with col2:
         st.metric("Remaining", remaining_below_goal)
     
-    # Momentum prompt
+    # Momentum prompt with context-aware messaging
     if remaining_below_goal > 0:
+        # Build momentum-driving language
+        if coached_today == 1:
+            momentum_msg = f"You're off to a great start — <strong>{remaining_below_goal} more</strong> {"employee" if remaining_below_goal == 1 else "employees"} to help."
+        elif coached_today % 5 == 0:
+            momentum_msg = f"🔥 {coached_today} coached today! <strong>{remaining_below_goal}</strong> remaining."
+        else:
+            momentum_msg = f"You're on a roll — <strong>{remaining_below_goal}</strong> {"employee" if remaining_below_goal == 1 else "employees"} left."
+        
         st.markdown(
             f'<div style="'
-            f'background:#E3F2FD;'
-            f'border-radius:6px;'
-            f'padding:12px 14px;'
-            f'margin:8px 0;'
-            f'font-size:14px;'
-            f'border-left:4px solid #4DA3FF;'
+            f'background: linear-gradient(90deg, #E3F2FD 0%, #E8F0F9 100%);'
+            f'border-radius: 8px;'
+            f'padding: 14px 16px;'
+            f'margin: 12px 0;'
+            f'font-size: 14px;'
+            f'border-left: 4px solid #4DA3FF;'
+            f'border-top: 1px solid #B3D8FF;'
             f'">'
-            f'You\'re on a roll — <strong>{remaining_below_goal} more</strong> {"employee" if remaining_below_goal == 1 else "employees"} below goal.'
+            f'{momentum_msg}'
             f'</div>',
             unsafe_allow_html=True,
         )
         
-        if st.button("Continue Coaching →", key="continue_auto", type="primary", use_container_width=True):
+        # Momentum CTA with visual emphasis
+        col_continue, col_return = st.columns(2)
+        if col_continue.button("⬇️ Continue Coaching →", key="continue_auto", type="primary", use_container_width=True):
+            st.rerun()
+        if col_return.button("↩️ Back to Dashboard", key="back_to_dash", use_container_width=True):
+            st.session_state["goto_page"] = "dashboard"
             st.rerun()
     else:
+        # Completion celebration
         st.markdown(
             f'<div style="'
-            f'background:#E8F5E9;'
-            f'border-radius:6px;'
-            f'padding:12px 14px;'
-            f'margin:8px 0;'
-            f'font-size:14px;'
-            f'border-left:4px solid #6FE090;'
+            f'background: linear-gradient(90deg, #E8F5E9 0%, #F1F8E9 100%);'
+            f'border-radius: 8px;'
+            f'padding: 14px 16px;'
+            f'margin: 12px 0;'
+            f'font-size: 14px;'
+            f'border-left: 4px solid #6FE090;'
+            f'border-top: 1px solid #AED581;'
             f'">'
-            f'🏆 <strong>All high-risk employees coached today!</strong> Great work.'
+            f'🏆 <strong>All high-risk employees coached today!</strong> '
+            f'Your team is in great shape.'
             f'</div>',
             unsafe_allow_html=True,
         )
