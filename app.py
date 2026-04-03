@@ -3719,6 +3719,10 @@ def _emp_coaching():
     # ── Build employee list — all employees, annotate who has notes / is flagged
     emp_ids_with_notes = _cached_all_coaching_notes()
     all_depts = sorted({e.get("department","") for e in emps if e.get("department")})
+    dept_sel = st.session_state.get("cn_dept", "All departments")
+    if dept_sel not in ["All departments", *all_depts]:
+        dept_sel = "All departments"
+        st.session_state["cn_dept"] = dept_sel
 
     # ── Manager Action List ──────────────────────────────────────────────────
     # Auto-generates follow-up actions for trending-down or below-goal employees
@@ -6435,9 +6439,19 @@ def page_settings():
                 else:
                     st.info("Billing portal not available. Contact support.")
 
-                with st.expander("Live Stripe verification", expanded=True):
-                    _live = get_live_stripe_subscription_status(_tid_local)
-                    if not _live:
+                with st.expander("Live Stripe verification", expanded=False):
+                    _live_cache_key = f"_live_stripe_status_{_tid_local}"
+                    _load_live = st.button("Load live Stripe status", key="load_live_stripe", use_container_width=True)
+                    _refresh_live = st.button("Refresh live Stripe status", key="refresh_live_stripe", use_container_width=True)
+
+                    if _load_live or _refresh_live:
+                        with st.spinner("Checking Stripe…"):
+                            st.session_state[_live_cache_key] = get_live_stripe_subscription_status(_tid_local)
+
+                    _live = st.session_state.get(_live_cache_key)
+                    if _live is None:
+                        st.caption("Loads live data from Stripe on demand to keep Settings navigation fast.")
+                    elif not _live:
                         st.info("No live Stripe subscription found yet.")
                     elif _live.get("error"):
                         st.error(_live.get("error"))
@@ -6458,8 +6472,6 @@ def page_settings():
                             )
                         else:
                             st.info("No pending Stripe plan change detected right now.")
-                        if st.button("Refresh live Stripe status", key="refresh_live_stripe", use_container_width=True):
-                            st.rerun()
 
                 with st.expander("Refund most recent subscription payment"):
                     st.caption("Issues a full refund for the latest successful subscription charge in Stripe.")
