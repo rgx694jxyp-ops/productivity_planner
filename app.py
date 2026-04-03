@@ -4335,6 +4335,7 @@ def page_productivity():
 
         dept_list  = sorted(targets.keys())
         goal_changed = False
+        pending_goal_changes: list[tuple[str, float, float]] = []
 
         if not dept_list:
             st.info("No departments yet. Run Import Data first — departments are detected automatically from your CSV.")
@@ -4342,7 +4343,7 @@ def page_productivity():
             # Header row
             hc1, hc2, hc3 = st.columns([3, 2, 1])
             hc1.markdown("**Department**")
-            hc2.markdown("**UPH Target** *(press Enter to save)*")
+            hc2.markdown("**UPH Target**")
             hc3.markdown("")
             st.divider()
 
@@ -4366,7 +4367,7 @@ def page_productivity():
                               label_visibility="collapsed",
                               placeholder="e.g. 18")
 
-                # Parse and save on every render — if value changed, store it
+                # Parse draft value; defer DB writes until explicit save.
                 raw = st.session_state.get(txt_key, "")
                 try:
                     new_val = float(raw.strip()) if raw.strip() else 0.0
@@ -4374,10 +4375,7 @@ def page_productivity():
                     new_val = cur
 
                 if abs(new_val - cur) > 0.001:
-                    set_dept_target(dept, new_val)
-                    _audit("GOAL_TARGET", f"{dept} | {cur} → {new_val}")
-                    _raw_cached_targets.clear()
-                    goal_changed = True
+                    pending_goal_changes.append((dept, cur, new_val))
 
                 if c3.button("✕", key=f"rm_dept_{dept}", help="Remove department"):
                     goals_obj["dept_targets"].pop(dept, None)
@@ -4385,6 +4383,15 @@ def page_productivity():
                     _raw_cached_targets.clear()
                     st.session_state.pop(seed_key, None)
                     st.session_state.pop(txt_key,  None)
+                    goal_changed = True
+
+            if pending_goal_changes:
+                st.info(f"{len(pending_goal_changes)} unsaved goal change(s).")
+                if st.button("Save goal changes", key="save_dept_goal_changes", type="primary", use_container_width=True):
+                    for _dept, _cur, _new in pending_goal_changes:
+                        set_dept_target(_dept, _new)
+                        _audit("GOAL_TARGET", f"{_dept} | {_cur} → {_new}")
+                    _raw_cached_targets.clear()
                     goal_changed = True
 
         # Departments are added automatically from the pipeline — no manual add form
