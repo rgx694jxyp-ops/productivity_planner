@@ -214,6 +214,26 @@ def _full_sign_out():
             del st.session_state[k]
 
 
+def _render_sign_out_button(key_prefix: str, *, type: str = "secondary", use_container_width: bool = False) -> bool:
+    """Render a guarded two-step sign out action and return True when user confirms."""
+    confirm_key = f"{key_prefix}_confirm_signout"
+    if not st.session_state.get(confirm_key, False):
+        if st.button("Sign out", key=f"{key_prefix}_signout", type=type, use_container_width=use_container_width):
+            st.session_state[confirm_key] = True
+            st.rerun()
+        return False
+
+    st.warning("Confirm sign out?")
+    c1, c2 = st.columns(2)
+    if c1.button("Yes, sign out", key=f"{key_prefix}_signout_yes", type="primary", use_container_width=True):
+        st.session_state.pop(confirm_key, None)
+        return True
+    if c2.button("Cancel", key=f"{key_prefix}_signout_no", use_container_width=True):
+        st.session_state.pop(confirm_key, None)
+        st.rerun()
+    return False
+
+
 def _bust_cache():
     """Call after any write to force fresh data on next render."""
     _raw_cached_employees.clear()
@@ -1296,7 +1316,7 @@ def render_sidebar() -> str:
                 f'Signed in as<br><b style="color:#CBD8E8;">{_safe_name}</b></div>',
                 unsafe_allow_html=True,
             )
-        if st.button("Sign out", use_container_width=True, key="sb_signout"):
+        if _render_sign_out_button("sidebar", type="secondary", use_container_width=True):
             _full_sign_out()
             st.rerun()
 
@@ -6748,7 +6768,7 @@ def page_settings():
 
         # ── Sign out ─────────────────────────────────────────────────────
         st.divider()
-        if st.button("Sign out", type="secondary"):
+        if _render_sign_out_button("settings_account", type="secondary"):
             _full_sign_out()
             st.rerun()
 
@@ -7586,8 +7606,8 @@ def _subscription_page():
         else:
             st.info("Contact support to update your payment method.")
         st.markdown("---")
-        if st.button("Sign out"):
-            for k in list(st.session_state.keys()): del st.session_state[k]
+        if _render_sign_out_button("sub_past_due", type="secondary"):
+            _full_sign_out()
             st.rerun()
         st.stop()
 
@@ -7628,8 +7648,8 @@ def _subscription_page():
             st.session_state.pop("_checkout_plan", None)
             st.rerun()
         st.markdown("---")
-        if st.button("Sign out"):
-            for k in list(st.session_state.keys()): del st.session_state[k]
+        if _render_sign_out_button("sub_checkout", type="secondary"):
+            _full_sign_out()
             st.rerun()
         st.stop()
 
@@ -7699,8 +7719,8 @@ def _subscription_page():
         st.info("Payment system is being configured. Check back soon.")
 
     st.markdown("---")
-    if st.button("Sign out"):
-        for k in list(st.session_state.keys()): del st.session_state[k]
+    if _render_sign_out_button("sub_footer", type="secondary"):
+        _full_sign_out()
         st.rerun()
 
 
