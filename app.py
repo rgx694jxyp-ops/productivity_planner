@@ -148,7 +148,7 @@ from ui_improvements import (
 def _tid() -> str:
     return st.session_state.get("tenant_id", "")
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _raw_cached_employees(_tid_key: str = ""):
     if not DB_AVAILABLE: return []
     try:
@@ -163,19 +163,19 @@ def _raw_cached_targets(_tid_key: str = "") -> dict:
         return get_all_targets()
     except Exception: return {}
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def _raw_cached_active_flags(_tid_key: str = "") -> dict:
     try:
         from goals import get_active_flags
         return get_active_flags()
     except Exception: return {}
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _raw_cached_uph_history(_tid_key: str = ""):
     try: return get_all_uph_history(days=30)
     except Exception: return []
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def _raw_cached_all_coaching_notes(_tid_key: str = ""):
     try:
         from database import get_client as _get_sb, _tq
@@ -185,7 +185,7 @@ def _raw_cached_all_coaching_notes(_tid_key: str = ""):
     except Exception:
         return set()
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _raw_cached_coaching_notes_for(emp_id: str, _tid_key: str = "") -> list:
     try: return get_coaching_notes(emp_id)
     except Exception: return []
@@ -1268,7 +1268,7 @@ def _get_current_plan() -> str:
     # Refresh cached plan periodically so open tabs don't retain stale access.
     _cached_plan = st.session_state.get("_current_plan")
     _cached_ts = float(st.session_state.get("_current_plan_ts", 0) or 0)
-    if _cached_plan and (time.time() - _cached_ts) < 60:
+    if _cached_plan and (time.time() - _cached_ts) < 300:
         return _cached_plan
     try:
         from database import get_subscription
@@ -3982,11 +3982,15 @@ def _emp_coaching():
 
 
 
-def _build_archived_productivity():
+def _build_archived_productivity(force: bool = False):
     """
     Build productivity session state from DB. Queries aggregate data directly
     to avoid fetching thousands of raw rows.
+    Skips the rebuild if data was loaded recently (within 600 s) unless force=True.
     """
+    _last = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
+    if not force and st.session_state.get("_archived_loaded") and (time.time() - _last) < 600:
+        return True  # already fresh — skip the DB round-trip
     from collections import defaultdict
     from datetime import datetime as _dt
 
@@ -4354,7 +4358,7 @@ def page_productivity():
     # Always refresh from archived DB data on Productivity page so it includes
     # prior imports and newly imported rows in one combined view.
     _last_arch_refresh = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
-    _arch_refresh_due = (time.time() - _last_arch_refresh) > 120
+    _arch_refresh_due = (time.time() - _last_arch_refresh) > 600
     if _arch_refresh_due:
         _show_loading = not st.session_state.get("_archived_loaded")
         try:
