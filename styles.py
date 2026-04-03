@@ -120,6 +120,15 @@ def apply_global_styles():
   [data-testid="stDataFrame"] { border: 1px solid #E2EBF4 !important; border-radius: 8px !important; }
   .stProgress > div > div { background: #0F2D52 !important; border-radius: 4px; }
 
+  /* File uploader readability */
+  [data-testid="stFileUploaderDropzone"] {
+    background: #12365f !important;
+    border: 1px dashed #4DA3FF !important;
+  }
+  [data-testid="stFileUploaderDropzone"] * {
+    color: #ffffff !important;
+  }
+
   .dpd-rail {
     background: linear-gradient(135deg, #0F2D52 0%, #1A4A8A 100%);
     border-radius: 12px;

@@ -19,6 +19,7 @@ from app import (
     time,
     traceback,
 )
+from pages.common import _normalize_label_text
 from pages.employees import _build_archived_productivity
 
 def page_import():
