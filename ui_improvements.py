@@ -13,6 +13,14 @@ from datetime import datetime, date, timedelta
 import pandas as pd
 
 
+def _safe_float(value, default=0.0):
+    """Parse numeric-like values safely; return default for invalid inputs."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # ════════════════════════════════════════════════════════════════════════════════
 # 1. AUTO-DIAGNOSIS (After CSV Upload)
 # ════════════════════════════════════════════════════════════════════════════════
@@ -60,7 +68,7 @@ def diagnose_upload(pending_files: list[dict]) -> dict:
                 emps.add(emp)
             
             hours = row.get("HoursWorked") or row.get("Hours") or row.get("hours")
-            if hours and float(hours or 0) > 0:
+            if hours and _safe_float(hours, 0.0) > 0:
                 hours_count += 1
     
     # Build diagnosis
@@ -239,7 +247,7 @@ def find_coaching_impact(emp_id: str, coaching_notes: list[dict],
                       if str(h.get("emp_id")) == str(emp_id)
                       and before_date_start <= datetime.fromisoformat(h.get("work_date", "")).date() < coached_date]
         if before_rows:
-            before_uph = sum(float(h.get("uph", 0)) for h in before_rows) / len(before_rows)
+            before_uph = sum(_safe_float(h.get("uph", 0), 0.0) for h in before_rows) / len(before_rows)
         
         # Calculate avg UPH after (7 days post)
         after_date_end = coached_date + timedelta(days=7)
@@ -247,7 +255,7 @@ def find_coaching_impact(emp_id: str, coaching_notes: list[dict],
                      if str(h.get("emp_id")) == str(emp_id)
                      and coached_date < datetime.fromisoformat(h.get("work_date", "")).date() <= after_date_end]
         if after_rows:
-            after_uph = sum(float(h.get("uph", 0)) for h in after_rows) / len(after_rows)
+            after_uph = sum(_safe_float(h.get("uph", 0), 0.0) for h in after_rows) / len(after_rows)
     except:
         pass
     
