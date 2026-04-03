@@ -671,7 +671,7 @@ def get_uph_history(emp_id: str, days: int = 90) -> list[dict]:
     return r.data or []
 
 
-def get_all_uph_history(days: int = 0) -> list[dict]:
+def get_all_uph_history(days: int = 30) -> list[dict]:
     """All UPH history records. Paginates to get past Supabase 1000-row default cap."""
     from datetime import timedelta
     sb     = get_client()

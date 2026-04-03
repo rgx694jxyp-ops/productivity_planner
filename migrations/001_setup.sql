@@ -345,6 +345,10 @@ CREATE INDEX IF NOT EXISTS idx_coaching_notes_tenant    ON coaching_notes(tenant
 CREATE INDEX IF NOT EXISTS idx_shifts_tenant            ON shifts(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_uploaded_files_tenant    ON uploaded_files(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_client_trends_tenant     ON client_trends(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_uph_history_tenant_work_date ON uph_history(tenant_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_uph_history_tenant_emp_work_date ON uph_history(tenant_id, emp_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_employees_tenant_department ON employees(tenant_id, department);
+CREATE INDEX IF NOT EXISTS idx_coaching_notes_tenant_emp_created_at ON coaching_notes(tenant_id, emp_id, created_at);
 
 
 -- --------------------------------------------------------------------------

@@ -172,7 +172,7 @@ def _raw_cached_active_flags(_tid_key: str = "") -> dict:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _raw_cached_uph_history(_tid_key: str = ""):
-    try: return get_all_uph_history(days=0)
+    try: return get_all_uph_history(days=30)
     except Exception: return []
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -6254,6 +6254,7 @@ def page_settings():
                 get_subscription, get_employee_count, get_employee_limit,
                 create_billing_portal_url, get_live_stripe_subscription_status,
                 refund_latest_subscription_payment,
+                _get_config,
             )
             _tid_local = st.session_state.get("tenant_id", "")
             sub = get_subscription(_tid_local)
@@ -6302,9 +6303,9 @@ def page_settings():
 
                 # Plan-targeted deep links so Stripe opens the intended update flow.
                 _price_map = {
-                    "starter": st.secrets.get("STRIPE_PRICE_STARTER", ""),
-                    "pro": st.secrets.get("STRIPE_PRICE_PRO", ""),
-                    "business": st.secrets.get("STRIPE_PRICE_BUSINESS", ""),
+                    "starter": _get_config("STRIPE_PRICE_STARTER") or "",
+                    "pro": _get_config("STRIPE_PRICE_PRO") or "",
+                    "business": _get_config("STRIPE_PRICE_BUSINESS") or "",
                 }
                 _plan_portal_urls = {}
                 if _portal_url:
@@ -7451,7 +7452,8 @@ def _subscription_page():
     from database import (create_stripe_checkout_url, get_subscription,
                           get_employee_count, create_billing_portal_url,
                           get_live_stripe_subscription_status,
-                          refund_latest_subscription_payment)
+                          refund_latest_subscription_payment,
+                          _get_config)
 
     # ── Shared plan data (mirrors Settings tab) ───────────────────────────
     _PORD  = ["starter", "pro", "business"]
@@ -7496,6 +7498,19 @@ def _subscription_page():
         st.info("Checkout canceled — no charge was made. Choose a plan below.")
         st.query_params.clear()
 
+    if st.button("Refresh subscription status", key="refresh_subscription_status"):
+        with st.spinner("Checking latest billing status..."):
+            _synced = False
+            try:
+                _synced = _verify_checkout_and_activate()
+            except Exception:
+                _synced = False
+        if _synced:
+            st.success("Subscription status refreshed.")
+            st.session_state.pop("_sub_active", None)
+            st.rerun()
+        st.info("No subscription update found yet. Please wait a few seconds and try again.")
+
     # ── Check existing subscription ───────────────────────────────────────
     try:
         existing_sub = get_subscription()
@@ -7508,9 +7523,9 @@ def _subscription_page():
     try:
         _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
         _price_map = {
-            "starter": st.secrets.get("STRIPE_PRICE_STARTER", ""),
-            "pro": st.secrets.get("STRIPE_PRICE_PRO", ""),
-            "business": st.secrets.get("STRIPE_PRICE_BUSINESS", ""),
+            "starter": _get_config("STRIPE_PRICE_STARTER") or "",
+            "pro": _get_config("STRIPE_PRICE_PRO") or "",
+            "business": _get_config("STRIPE_PRICE_BUSINESS") or "",
         }
     except Exception:
         pass
@@ -7609,9 +7624,9 @@ def _subscription_page():
 
     # ── Get price IDs ─────────────────────────────────────────────────────
     try:
-        _price_starter  = st.secrets.get("STRIPE_PRICE_STARTER", "")
-        _price_pro      = st.secrets.get("STRIPE_PRICE_PRO", "")
-        _price_business = st.secrets.get("STRIPE_PRICE_BUSINESS", "")
+        _price_starter  = _get_config("STRIPE_PRICE_STARTER") or ""
+        _price_pro      = _get_config("STRIPE_PRICE_PRO") or ""
+        _price_business = _get_config("STRIPE_PRICE_BUSINESS") or ""
     except Exception:
         _price_starter = _price_pro = _price_business = ""
     _prices = {"starter": _price_starter, "pro": _price_pro, "business": _price_business}
@@ -8077,18 +8092,6 @@ def main():
                 pass
         st.rerun()
 
-    # ── Periodic Stripe sync (heals stale DB plan/status) ─────────────────
-    _now_sync = time.time()
-    _last_sub_sync = float(st.session_state.get("_last_sub_sync_ts", 0) or 0)
-    if _now_sync - _last_sub_sync > 300:
-        try:
-            _sync_ok = _verify_checkout_and_activate()
-            if _sync_ok:
-                _bust_cache()
-        except Exception:
-            pass
-        st.session_state["_last_sub_sync_ts"] = _now_sync
-
     # ── Subscription gate ─────────────────────────────────────────────────
     # Admin bypass: add ADMIN_EMAILS in secrets to skip subscription check
     _admin_emails = []
@@ -8106,18 +8109,8 @@ def main():
             if has_active_subscription():
                 st.session_state["_sub_active"] = True
             else:
-                # No local subscription — try syncing from Stripe in case
-                # payment was completed but webhook/verification missed it
-                _synced = False
-                try:
-                    _synced = _verify_checkout_and_activate()
-                except Exception:
-                    pass
-                if _synced and has_active_subscription():
-                    st.session_state["_sub_active"] = True
-                else:
-                    _subscription_page()
-                    st.stop()
+                _subscription_page()
+                st.stop()
         except Exception as _sub_err:
             # If subscription check fails (table missing, etc.), let user through
             st.session_state["_sub_active"] = True
