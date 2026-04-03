@@ -911,19 +911,20 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
   ════════════════════════════════════════════════════════════ */
   .dpd-rail {
     background: linear-gradient(135deg, #0F2D52 0%, #1A4A8A 100%);
-    border-radius: 10px;
-    padding: 20px 24px 18px;
-    margin-bottom: 20px;
-    box-shadow: 0 2px 12px rgba(15,45,82,0.18);
-    border-left: 4px solid #4DA3FF;
+    border-radius: 12px;
+    padding: 26px 30px 22px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 20px rgba(15,45,82,0.28), 0 0 0 2px rgba(77,163,255,0.25);
+    border-left: 6px solid #4DA3FF;
   }
   .dpd-rail-label {
-    font-size: 10px;
-    font-weight: 700;
+    font-size: 11px;
+    font-weight: 800;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.14em;
         color: #FFFFFF !important;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
+    opacity: 0.8;
   }
     .dpd-rail-label,
     .dpd-rail-label span,
@@ -933,15 +934,18 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
         color: #FFFFFF !important;
     }
   .dpd-rail-name {
-    font-size: 18px;
-    font-weight: 700;
+    font-size: 22px;
+    font-weight: 800;
     color: #FFFFFF;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
   }
   .dpd-rail-why {
-    font-size: 13px;
+    font-size: 14px;
     color: #A8C8F0;
-    margin-bottom: 14px;
+    margin-bottom: 18px;
+    line-height: 1.5;
   }
   .dpd-rail-ok {
     font-size: 15px;
@@ -954,10 +958,12 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
   .dpd-rail button[data-testid="stBaseButton-primary"] {
     background-color: #4DA3FF !important;
     color: #002244 !important;
-    font-size: 14px !important;
-    font-weight: 700 !important;
-    padding: 10px 0 !important;
+    font-size: 15px !important;
+    font-weight: 800 !important;
+    padding: 13px 0 !important;
     border: none !important;
+    border-radius: 8px !important;
+    letter-spacing: 0.02em;
   }
   .dpd-rail .stButton > button[kind="primary"]:hover,
   .dpd-rail button[data-testid="stBaseButton-primary"]:hover {
@@ -1258,10 +1264,23 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
+def _roll_coached_yesterday():
+    """Carry yesterday's coaching count into _coached_yesterday when the date changes.
+    Called once per session on startup so the 'Welcome back' message has real context."""
+    _last_date = st.session_state.get("_coached_date", "")
+    _today     = date.today().isoformat()
+    if _last_date and _last_date != _today:
+        # Date rolled over — preserve count for welcome message, reset today counter
+        st.session_state["_coached_yesterday"] = int(st.session_state.get("_coached_today", 0))
+        st.session_state["_coached_today"]     = 0
+        st.session_state.pop("_welcome_shown", None)  # re-show welcome on new day
+    st.session_state["_coached_date"] = _today
+
+
 def _init():
     defaults = {
         "uploaded_sessions":  [],   # list of {filename, rows, mapping, timestamp}
-        "submission_plan":    None, # pending plan awaiting confirmation
+        "submission_plan":    None, # pending plan awaiting continuation
         "split_overrides":    {},   # emp_id -> list of split assignments
         # Step navigation
         "import_step":        1,    # 1=upload 2=map(optional) 3=pipeline
@@ -1296,6 +1315,7 @@ def _init():
             st.session_state[k] = v
 
 _init()
+_roll_coached_yesterday()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -1866,6 +1886,34 @@ def page_supervisor():
     if not gs:
         st.info("No productivity data. Run Import Data to get started.")
         return
+
+    # ── Welcome back / daily continuity message (shown once per session) ─────────
+    if not st.session_state.get("_welcome_shown"):
+        st.session_state["_welcome_shown"] = True
+        _user   = st.session_state.get("user_name", "").split("@")[0].split(" ")[0]
+        _greet  = f"Welcome back{', ' + _user if _user else ''}"
+        _below  = len([r for r in gs if r.get("goal_status") == "below_goal"])
+        _risk_c = _get_all_risk_levels(gs, history)
+        _high   = sum(1 for v in _risk_c.values() if v[0].startswith("🔴"))
+        _coached_yesterday = int(st.session_state.get("_coached_yesterday", 0))
+        _lines  = []
+        if _coached_yesterday > 0:
+            _pl = "employee" if _coached_yesterday == 1 else "employees"
+            _lines.append(f"✔ You coached {_coached_yesterday} {_pl} last session")
+        if _below > 0:
+            _lines.append(f"⚠ {_below} employee{'s' if _below != 1 else ''} still below goal ({_high} high-risk)")
+            _lines.append("→ Recommended action below — start there")
+        else:
+            _lines.append("✔ All employees on target — great shape")
+        _body = "<br>".join(f"<span style='font-size:13px;color:#1B5E20;'>{l}</span>" for l in _lines)
+        st.markdown(
+            f'<div style="background:linear-gradient(135deg,#E8F5E9 0%,#E3F2FD 100%);'
+            f'border:1.5px solid #43A047;border-radius:10px;padding:16px 20px;margin-bottom:18px;">'
+            f'<div style="font-size:15px;font-weight:800;color:#1B5E20;margin-bottom:8px;">{_html_mod.escape(_greet)}</div>'
+            f'{_body}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     # Session context and breadcrumbs
     _render_breadcrumb("supervisor")
@@ -2484,135 +2532,64 @@ def page_dashboard():
             return "background-color: #e6ffe6; color: #008000"
         return ""
 
-    compact = st.checkbox("Compact table (small screens)", value=False, key="dash_compact")
-    card_view = st.checkbox("Card view (mobile-friendly)", value=False, key="dash_card_view")
-    if compact:
-        df_compact = df[["Risk", "Name", "Current UPH", "Streak"]]
-        styled = df_compact.style.map(_color_risk, subset=["Risk"])
-    else:
-        styled = df.style.map(_color_risk, subset=["Risk"])
-    st.markdown('<div class="dpd-table-view">', unsafe_allow_html=True)
-    st.dataframe(styled, use_container_width=True, hide_index=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="dpd-card-view">', unsafe_allow_html=True)
-    if card_view:
-        st.markdown("##### Expand rows")
-        for i, r in enumerate(filtered[:20]):
-            with st.expander(f"{r['name']} · {r['risk_level']} · {r['department'] or 'No dept'}", expanded=False):
-                st.caption(f"UPH: {r['avg_uph']} / {r['target_uph']} · Trend: {r['trend']} {r['change_pct']:+.0f}%")
-                ec1, ec2 = st.columns(2)
-                if ec1.button("Coach", key=f"dash_card_coach_{i}", use_container_width=True):
-                    st.session_state["goto_page"] = "employees"
-                    st.session_state["emp_view"] = "Performance Journal"
-                    st.rerun()
-                if ec2.button("History", key=f"dash_card_hist_{i}", use_container_width=True):
-                    st.session_state["goto_page"] = "employees"
-                    st.session_state["emp_view"] = "Employee History"
-                    st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Selection area with count indicator
-    st.divider()
-    st.markdown("**Bulk Actions**")
-    selected_names = st.multiselect(
-        "Select employees for bulk action",
-        [r["name"] for r in filtered],
-        key="dash_selected_names",
+    styled = df.style.map(_color_risk, subset=["Risk"])
+    # Row selection — drives the sticky action bar below
+    _sel_result = st.dataframe(
+        styled,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="multi-row",
+        key="dash_row_sel",
     )
-    
-    # Enhanced selection count indicator
-    if selected_names:
-        _n_sel = len(selected_names)
-        
-        # Get info about selected employees
-        selected_items = [r for r in filtered if r["name"] in selected_names]
-        selected_depts = set(r.get("department", "No dept") for r in selected_items)
-        high_risk_count = len([r for r in selected_items if r["risk_level"] == "🔴 High"])
-        
-        # Visual indicator badge
-        st.markdown(
-            f'<div style="'
-            f'background: linear-gradient(90deg, #FF6B35 0%, #FF8C42 100%);'
-            f'border-radius: 8px;'
-            f'padding: 12px 16px;'
-            f'margin: 8px 0;'
-            f'color: white;'
-            f'font-weight: 600;'
-            f'display: flex;'
-            f'align-items: center;'
-            f'gap: 8px;'
-            f'">'
-            f'<span style="font-size: 18px;">✓</span>'
-            f'<span>{_n_sel} selected employee{"s" if _n_sel > 1 else ""}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-        
-        # Selection summary
-        sel_cols = st.columns(3)
-        sel_cols[0].metric("Selected", _n_sel)
-        sel_cols[1].metric("Depts", len(selected_depts))
-        sel_cols[2].metric("🔴 High Risk", high_risk_count)
-    
-    if selected_names:
-        _n_sel = len(selected_names)
+    _sel_rows   = _sel_result.selection.rows if _sel_result and _sel_result.selection else []
+    _sel_items  = [filtered[i] for i in _sel_rows if i < len(filtered)]
+    _sel_names  = [r["name"] for r in _sel_items]
+
+    # Sticky bottom action bar — appears when rows are selected
+    if _sel_items:
+        _ns = len(_sel_items)
+        _nh = sum(1 for r in _sel_items if r["risk_level"].startswith("🔴"))
         st.markdown(
             f'<div class="dpd-sticky-wrap">'
-            f'<span class="dpd-sticky-label">⚡ {_n_sel} employee{"s" if _n_sel != 1 else ""} selected</span>'
+            f'<span class="dpd-sticky-label">⚡ {_ns} selected'
+            f'{" · " + str(_nh) + " high-risk" if _nh else ""}</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
-        sb1, sb2, sb3 = st.columns(3)
-        if sb1.button("Coach", key="dash_bulk_coach", use_container_width=True, type="primary"):
+        _sb1, _sb2, _sb3 = st.columns(3)
+        if _sb1.button("▶ Coach first selected", key="dash_sel_coach", type="primary", use_container_width=True):
             st.session_state["goto_page"] = "employees"
             st.session_state["emp_view"] = "Performance Journal"
+            st.session_state["cn_selected_emp"] = _sel_items[0]["emp_id"]
             st.rerun()
-        if sb2.button("Assign Task", key="dash_bulk_assign", use_container_width=True):
-            st.info("Task assignment workflow coming next. Coaching is available now.")
-        if sb3.button("Export", key="dash_bulk_export", use_container_width=True):
-            bulk_df = df[df["Name"].isin(selected_names)]
-            bulk_csv = bulk_df.to_csv(index=False)
-            st.download_button(
-                "Download selected CSV",
-                bulk_csv,
-                f"priority_selected_{date.today()}.csv",
-                "text/csv",
-                key="dash_export_selected",
-            )
+        if _sb2.button("📝 Add note to first", key="dash_sel_note", use_container_width=True):
+            st.session_state["goto_page"] = "employees"
+            st.session_state["emp_view"] = "Performance Journal"
+            st.session_state["cn_selected_emp"] = _sel_items[0]["emp_id"]
+            st.rerun()
+        # Export selected
+        _sel_df = df[df["Name"].isin(_sel_names)]
+        _sb3.download_button(
+            f"⬇️ Export {_ns}",
+            _sel_df.to_csv(index=False),
+            f"selected_{date.today()}.csv",
+            "text/csv",
+            key="dash_sel_export",
+            use_container_width=True,
+        )
         st.markdown('<div class="dpd-sticky-spacer"></div>', unsafe_allow_html=True)
-
-    st.markdown("##### Quick actions — Adaptive Layout")
-    
-    # Use adaptive rows for quick actions display
-    quick_action_items = filtered[:20]  # Up to 20 items
-    
-    def _coach_action(item):
-        st.session_state["goto_page"] = "employees"
-        st.session_state["emp_view"] = "Performance Journal"
-        st.rerun()
-    
-    def _history_action(item):
-        st.session_state["goto_page"] = "employees"
-        st.session_state["emp_view"] = "Employee History"
-        st.rerun()
-    
-    _render_adaptive_rows(
-        quick_action_items,
-        item_key="name",
-        show_fields=["department", "avg_uph", "risk_level"],
-        action_buttons={"Coach": _coach_action, "History": _history_action}
-    )
-
-    # Export button
-    csv_buf = df.to_csv(index=False)
-    st.download_button(
-        "⬇️ Download priority list",
-        csv_buf,
-        f"priority_list_{date.today()}.csv",
-        "text/csv",
-        key="dash_export"
-    )
+    else:
+        # Export full list when nothing selected
+        with st.expander("⬇️ Export / bulk actions", expanded=False):
+            st.download_button(
+                "Download full priority list",
+                df.to_csv(index=False),
+                f"priority_list_{date.today()}.csv",
+                "text/csv",
+                key="dash_export_all",
+                use_container_width=True,
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
