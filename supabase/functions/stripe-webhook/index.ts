@@ -12,7 +12,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const STRIPE_WEBHOOK_SECRET = Deno.env.get("STRIPE_WEBHOOK_SECRET")!;
 const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
+const SUPABASE_SERVICE_ROLE_KEY =
+  Deno.env.get("SERVICE_ROLE_KEY") ||
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 
 // Plan metadata mapping
 const PLAN_LIMITS: Record<string, number> = {
@@ -168,6 +170,7 @@ serve(async (req) => {
         break;
       }
 
+      case "customer.subscription.created":
       case "customer.subscription.updated": {
         const sub = event.data.object;
         const customerId = sub.customer;
