@@ -11,6 +11,7 @@ Adds support for:
 import streamlit as st
 from datetime import datetime, date, timedelta
 import pandas as pd
+import time
 
 
 def _safe_float(value, default=0.0):
@@ -650,3 +651,521 @@ def risk_to_human_language(risk_level: str, context: dict | None = None) -> str:
     elif "🟢" in str(risk_level) or "Low" in str(risk_level):
         return "Doing well ✓ — on track"
     return "Needs attention"
+
+
+def _compute_priority_summary(gs: list[dict], history: list[dict]) -> dict:
+    """Return lightweight action-oriented summary counts for header strips."""
+    from app import _get_all_risk_levels
+
+    below = [r for r in gs if r.get("goal_status") == "below_goal"]
+    risk_cache = _get_all_risk_levels(gs, history)
+    critical = 0
+    quick_wins = 0
+    for row in below:
+        emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
+        risk_level, _, _ = risk_cache.get(emp_id, ("🟢 Low", 0, {}))
+        trend = row.get("trend", "")
+        try:
+            avg_uph = float(row.get("Average UPH", 0) or 0)
+            target = float(row.get("Target UPH", 0) or 0)
+        except Exception:
+            avg_uph, target = 0.0, 0.0
+
+        if risk_level.startswith("🔴") and trend == "down":
+            critical += 1
+
+        if target > 0 and avg_uph >= (target * 0.95) and trend in ("up", "flat"):
+            quick_wins += 1
+
+    return {
+        "below": len(below),
+        "critical": critical,
+        "quick_wins": quick_wins,
+    }
+
+
+def _render_priority_strip(gs: list[dict], history: list[dict]):
+    """Top-of-page action strip that answers 'what should I do right now?'"""
+    p = _compute_priority_summary(gs, history)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("⚠️ Below Goal", p["below"])
+    c2.metric("🔥 Critical Risk", p["critical"])
+    c3.metric("📈 Quick Wins", p["quick_wins"])
+
+    a1, a2 = st.columns(2)
+    if a1.button("View Priority List", use_container_width=True, key="pri_strip_priority"):
+        st.session_state["goto_page"] = "productivity"
+        st.session_state["prod_view"] = "📋 Priority List"
+        st.rerun()
+    if a2.button("Start Coaching", use_container_width=True, key="pri_strip_coaching"):
+        st.session_state["goto_page"] = "employees"
+        st.session_state["emp_view"] = "Performance Journal"
+        st.rerun()
+
+
+def _get_primary_recommendation(gs: list[dict], history: list[dict]) -> dict | None:
+    """Pick one highest-impact coaching action with a rich 'why this person' justification."""
+    from app import _get_all_risk_levels
+
+    below = [r for r in gs if r.get("goal_status") == "below_goal"]
+    if not below:
+        return None
+
+    risk_cache = _get_all_risk_levels(gs, history)
+    candidates = []
+    for row in below:
+        emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
+        risk_level, risk_score, risk_details = risk_cache.get(emp_id, ("🟢 Low", 0, {}))
+        trend = row.get("trend", "")
+        name = row.get("Employee", row.get("Employee Name", "Unknown"))
+        name = str(name) if name is not None else "Unknown"
+        dept = str(row.get("Department", "") or "")
+
+        try:
+            change_pct = float(row.get("change_pct", 0) or 0)
+        except Exception:
+            change_pct = 0.0
+        try:
+            avg_uph = float(row.get("Average UPH", 0) or 0)
+            target = float(row.get("Target UPH", 0) or 0)
+        except Exception:
+            avg_uph, target = 0.0, 0.0
+
+        why_parts = []
+        if trend == "down":
+            streak = risk_details.get("under_goal_streak", 0)
+            if streak >= 2:
+                why_parts.append(f"↓ {streak}-day downward streak")
+            else:
+                why_parts.append(f"↓ trending down {change_pct:+.0f}%")
+        if target > 0 and avg_uph > 0:
+            gap = target - avg_uph
+            if gap > 0:
+                why_parts.append(f"{gap:.1f} UPH below target")
+        if risk_level.startswith("🔴"):
+            why_parts.append("high risk score")
+        if not why_parts:
+            why_parts.append("below goal")
+
+        candidates.append(
+            {
+                "name": name,
+                "emp_id": emp_id,
+                "department": dept,
+                "risk_level": risk_level,
+                "risk_score": float(risk_score),
+                "why": " · ".join(why_parts),
+                "avg_uph": avg_uph,
+                "target": target,
+            }
+        )
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x["risk_score"], reverse=True)
+    return candidates[0]
+
+
+def _render_adaptive_action_suggestion(gs: list[dict], history: list[dict], last_coached_emp_id: str | None = None):
+    """
+    Adaptive recommendation rail logic.
+    Evolves from "here's the next person" to context-aware suggestions based on:
+    - What just happened (coached, noted, set reminder)
+    - Department patterns (multiple failures in same dept?)
+    - Time of day (early session = coach more, late = document trends?)
+    - Session momentum (how many coached today?)
+    """
+    below = [r for r in gs if r.get("goal_status") == "below_goal"]
+    if not below:
+        return None
+
+    last_emp = None
+    if last_coached_emp_id:
+        last_emp = next((r for r in gs if str(r.get("EmployeeID", "")) == str(last_coached_emp_id)), None)
+
+    rec = _get_primary_recommendation(gs, history)
+    if not rec:
+        return None
+
+    rec_dept = rec.get("department", "")
+    dept_below = [r for r in below if r.get("Department") == rec_dept]
+    has_dept_pattern = len(dept_below) >= 2
+
+    same_dept_coaching = False
+    if last_emp:
+        last_dept = last_emp.get("Department", "")
+        same_dept_coaching = (last_dept == rec_dept) and last_emp != rec
+
+    coached_today = int(st.session_state.get("_coached_today", 0))
+    momentum_level = "building" if coached_today >= 2 else "starting" if coached_today == 1 else "fresh"
+
+    try:
+        if rec.get("risk_score", 0) >= 7:
+            rec_below_pct = "critical"
+        elif rec.get("risk_score", 0) >= 4:
+            rec_below_pct = "high"
+        else:
+            rec_below_pct = "moderate"
+    except Exception:
+        rec_below_pct = "moderate"
+
+    if has_dept_pattern and len(dept_below) > 2:
+        return {
+            "name": rec["name"],
+            "emp_id": rec["emp_id"],
+            "context": f"🚨 DEPT TREND: {len(dept_below)} employees below goal in {rec_dept}",
+            "action": "Coach → Document Pattern",
+            "emphasis": "This is a team-level issue, not just individual. After coaching, consider team-wide actions.",
+            "priority": "critical",
+        }
+
+    if same_dept_coaching:
+        return {
+            "name": rec["name"],
+            "emp_id": rec["emp_id"],
+            "context": f"↪️ MOMENTUM: Same dept as {last_emp.get('Employee Name', 'last employee')} · Related issues likely",
+            "action": "Continue Coaching",
+            "emphasis": f"You found patterns in {rec_dept}. Keep the momentum going.",
+            "priority": "high",
+        }
+
+    if coached_today >= 1 and momentum_level == "building":
+        return {
+            "name": rec["name"],
+            "emp_id": rec["emp_id"],
+            "context": f"✓ Momentum: {coached_today} coached · {len(below)} remaining",
+            "action": "Keep Coaching",
+            "emphasis": f"Great start! {rec_below_pct.upper()} risk · this won't take long.",
+            "priority": "high",
+        }
+
+    return {
+        "name": rec["name"],
+        "emp_id": rec["emp_id"],
+        "context": rec.get("why", "Highest risk today"),
+        "action": "Start/Continue Coaching",
+        "emphasis": f"{rec_below_pct.capitalize()} risk · {len(below)} employees below goal total.",
+        "priority": rec_below_pct,
+    }
+
+
+def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix: str):
+    """Dominant command-bar panel — visually anchors every key page with one clear action."""
+    rec = _get_primary_recommendation(gs, history)
+    remaining = [r for r in gs if r.get("goal_status") == "below_goal"]
+
+    if not rec:
+        st.markdown(
+            '<div class="dpd-rail">'
+            '<div class="dpd-rail-label">▶ Recommended Action</div>'
+            '<div class="dpd-rail-ok">✓ All employees on track — no action needed</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    last_coached_id = st.session_state.get("_last_coached_emp_id", None)
+    adaptive = _render_adaptive_action_suggestion(gs, history, last_coached_id)
+
+    import html as _h
+
+    _name_raw = adaptive["name"] if adaptive else rec.get("name", "")
+    _dept_raw = rec.get("department", "")
+    _context_raw = adaptive["context"] if adaptive and "context" in adaptive else rec.get("why", "")
+    _name = _h.escape(str(_name_raw) if _name_raw is not None else "")
+    _dept = _h.escape(str(_dept_raw) if _dept_raw is not None else "")
+    _context = _h.escape(str(_context_raw) if _context_raw is not None else "")
+    _dept_str = f" · {_dept}" if _dept else ""
+    _n_remaining = len(remaining)
+
+    rail_style = "color: #FFFFFF;"
+    if adaptive and adaptive.get("priority") == "critical":
+        rail_style = "background: linear-gradient(90deg, #8B0000 0%, #DC143C 100%); color: #FFFFFF;"
+    elif adaptive and adaptive.get("priority") == "high":
+        rail_style = "background: linear-gradient(90deg, #FF6347 0%, #FF7F50 100%); color: #FFFFFF;"
+
+    _remaining_note = (
+        f"<div class='dpd-rail-label' style='color:#FFFFFF !important;'>⬇ {_n_remaining - 1} more below goal</div>"
+        if _n_remaining > 1
+        else ""
+    )
+
+    st.markdown(
+        f'<div class="dpd-rail" style="{rail_style}">'
+        f'<div class="dpd-rail-label" style="color:#FFFFFF !important;">▶ Recommended Action</div>'
+        f'<div class="dpd-rail-name">{_name}{_dept_str}</div>'
+        f'<div class="dpd-rail-why">{_context}</div>'
+        f"{_remaining_note}"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if adaptive and "emphasis" in adaptive:
+        st.caption(f"💡 {adaptive['emphasis']}")
+
+    col1, col2 = st.columns(2)
+    action_label = adaptive.get("action", "Start Coaching") if adaptive else "Start Coaching"
+    if col1.button(f"▶ {action_label}", key=f"{key_prefix}_start_coach", type="primary", use_container_width=True):
+        st.session_state["goto_page"] = "employees"
+        st.session_state["emp_view"] = "Performance Journal"
+        st.session_state["cn_selected_emp"] = rec["emp_id"]
+        st.rerun()
+    if col2.button("View Context →", key=f"{key_prefix}_view_context", use_container_width=True):
+        st.session_state["goto_page"] = "dashboard"
+        st.rerun()
+    if _n_remaining > 1:
+        st.caption(f"{_n_remaining} employee(s) below goal · sorted by highest risk")
+
+
+def _render_confidence_ux(history: list[dict] | None = None, active_filters: dict | None = None):
+    """Show data trust cues that answer 'Should I act on this?'"""
+    last_ts = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
+    age_min = max(0, int((time.time() - last_ts) // 60)) if last_ts else None
+    date_range_str = ""
+    days_of_data = 0
+    if history:
+        dates = [
+            str(row.get("Date") or row.get("work_date") or row.get("Week") or "")
+            for row in history
+            if row.get("Date") or row.get("work_date") or row.get("Week")
+        ]
+        if dates:
+            date_range_str = f"based on {min(dates)} → {max(dates)}"
+            days_of_data = len(set(dates))
+
+    filter_str = ""
+    if active_filters:
+        parts = []
+        for k, v in active_filters.items():
+            if v and v != "All departments":
+                parts.append(f"{k}: {v}")
+        if parts:
+            filter_str = f"applies to {', '.join(parts)}"
+
+    conf_label = human_confidence_message(age_min, days_of_data, has_trend=days_of_data >= 3)
+
+    parts = [conf_label]
+    if date_range_str and days_of_data:
+        parts.append(f"Based on {days_of_data} day(s) of data")
+    if filter_str:
+        parts.append(filter_str)
+
+    st.caption(" · ".join(parts))
+
+
+def _render_session_progress(gs: list[dict]):
+    """Render a small session progress tracker for coaching momentum."""
+    if not gs:
+        return
+    coached_today = int(st.session_state.get("_coached_today", 0))
+    below_total = len([r for r in gs if r.get("goal_status") == "below_goal"])
+    remaining = max(0, below_total - coached_today)
+
+    if coached_today == 0 and below_total == 0:
+        return
+
+    done_part = f'<span class="dpd-progress-done">✔ {coached_today} coached</span>' if coached_today > 0 else ""
+    left_part = (
+        f'<span class="dpd-progress-left">⚠ {remaining} remaining</span>'
+        if remaining > 0
+        else '<span class="dpd-progress-done">✔ All coached today</span>'
+    )
+    sep = " &nbsp;|&nbsp; " if coached_today > 0 else ""
+
+    st.markdown(
+        f'<div class="dpd-progress-bar">Today:&nbsp;&nbsp;{done_part}{sep}{left_part}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _apply_mode_styling(mode: str):
+    """Apply visual styling based on Monitor vs Plan mode."""
+    mode_class = "dpd-mode-monitor" if mode == "Monitor" else "dpd-mode-plan"
+    st.markdown(
+        f'<style>.stApp {{ --current-mode: "{mode_class}"; }}</style>',
+        unsafe_allow_html=True,
+    )
+    if mode == "Plan":
+        st.markdown(
+            "<style>.stApp { background: #FAFBFD !important; }[data-testid=\"stExpander\"] { margin-bottom: 20px !important; }</style>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_soft_action_buttons(emp_id: str, emp_name: str, risk_level: str, context_tags: list[str] | None = None):
+    """Render soft action buttons for medium-risk employees."""
+    if not risk_level.startswith("🟡"):
+        return
+
+    st.markdown("**💡 Quick Actions — No coaching needed**")
+
+    col1, col2, col3 = st.columns(3)
+
+    if col1.button(
+        "⏰ Schedule Check-In",
+        key=f"soft_checkin_{emp_id}",
+        help="Brief conversation to prevent decline (not formal coaching)",
+        use_container_width=True,
+    ):
+        from database import add_coaching_note
+
+        add_coaching_note(
+            emp_id,
+            "[SCHEDULED] Brief check-in queued — quick conversation to identify trends before they worsen.",
+            "System",
+        )
+        st.success(f"✓ Check-in scheduled for {emp_name}")
+        st.rerun()
+
+    if col2.button(
+        "📝 Add Note",
+        key=f"soft_note_{emp_id}",
+        help="Log observation without full coaching",
+        use_container_width=True,
+    ):
+        st.session_state["soft_note_emp_id"] = emp_id
+        st.session_state["show_soft_note_input"] = True
+
+    if col3.button(
+        "▶ Full Coaching",
+        key=f"soft_escalate_{emp_id}",
+        help="Move to formal coaching session",
+        use_container_width=True,
+        type="secondary",
+    ):
+        st.session_state["goto_page"] = "employees"
+        st.session_state["emp_view"] = "Performance Journal"
+        st.session_state["cn_selected_emp"] = emp_id
+        st.rerun()
+
+    st.caption("📌 **Add context** if applicable:")
+    context_tags = context_tags or []
+
+    CONTEXT_OPTIONS = ["Equipment issues", "New employee", "Cross-training", "Shift change", "Short staffed"]
+
+    c1, c2, c3 = st.columns(3)
+    cols = [c1, c2, c3]
+
+    for i, ctx_opt in enumerate(CONTEXT_OPTIONS[:3]):
+        col_idx = i % 3
+        is_selected = ctx_opt in context_tags
+        if cols[col_idx].button(
+            f"{'✓' if is_selected else '○'} {ctx_opt}",
+            key=f"soft_ctx_{emp_id}_{ctx_opt}",
+            use_container_width=True,
+            type="secondary" if is_selected else "primary",
+        ):
+            if ctx_opt in context_tags:
+                context_tags.remove(ctx_opt)
+            else:
+                context_tags.append(ctx_opt)
+
+            try:
+                from goals import get_active_flags, save_goals
+
+                flags = get_active_flags()
+                if emp_id in flags:
+                    flags[emp_id]["context_tags"] = context_tags
+                    save_goals(flags)
+            except Exception:
+                pass
+            st.rerun()
+
+
+def _render_session_context_bar():
+    """Render a persistent session context bar at the top of major pages."""
+    gs = st.session_state.get("goal_status", [])
+    if not gs:
+        return
+
+    coached_today = int(st.session_state.get("_coached_today", 0))
+    below_total = len([r for r in gs if r.get("goal_status") == "below_goal"])
+    remaining = max(0, below_total - coached_today)
+
+    focus_dept = st.session_state.get("dash_dept_filter", ["All departments"])
+    focus_dept = [d for d in focus_dept if d != "All departments"]
+    focus_label = focus_dept[0] if focus_dept else "Overall"
+
+    if coached_today == 0 and remaining == 0:
+        return
+
+    progress_text = f"✔ {coached_today} coached" if coached_today > 0 else "Starting session"
+    remaining_text = f"⚠ {remaining} remaining" if remaining > 0 else "✔ All complete"
+    focus_text = f"Focus: {focus_label}"
+
+    st.markdown(
+        f'<div style="background: linear-gradient(90deg, #E8F0F9 0%, #F0F7FF 100%);border-left: 4px solid #4DA3FF;padding: 12px 16px;border-radius: 6px;margin-bottom: 14px;font-size: 13px;color: #000000;">'
+        f"<strong style=\"color:#000000;\">Today's Session</strong>&nbsp;&nbsp;"
+        f"{progress_text} &nbsp;•&nbsp; "
+        f"{remaining_text} &nbsp;•&nbsp; "
+        f"{focus_text}"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_breadcrumb(current_page: str, subcontext: str | None = None):
+    """Render a lightweight breadcrumb showing current location and context."""
+    _page_labels = {
+        "supervisor": "👔 Supervisor",
+        "dashboard": "📊 Dashboard",
+        "employees": "👥 Employees",
+        "productivity": "📈 Productivity",
+        "import": "📁 Import",
+        "email": "📧 Email",
+        "settings": "⚙️ Settings",
+    }
+
+    label = _page_labels.get(current_page, current_page)
+
+    breadcrumb_html = f'<span style="font-size:12px; color:#5A7A9C;">{label}'
+    if subcontext:
+        breadcrumb_html += f' • <span style="color:#1A2D42; font-weight:500;">{subcontext}</span>'
+    breadcrumb_html += "</span>"
+
+    st.markdown(breadcrumb_html, unsafe_allow_html=True)
+
+
+def _enhance_coaching_feedback(emp_name: str, emp_id: str, remaining_below_goal: int):
+    """Enhanced feedback after coaching save."""
+    coached_today = int(st.session_state.get("_coached_today", 1))
+
+    st.success("✔ Coaching logged and saved")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Coached Today", coached_today)
+    with col2:
+        st.metric("Remaining", remaining_below_goal)
+
+    if remaining_below_goal > 0:
+        if coached_today == 1:
+            momentum_msg = (
+                f"You're off to a great start — <strong>{remaining_below_goal} more</strong> "
+                f"{'employee' if remaining_below_goal == 1 else 'employees'} to help."
+            )
+        elif coached_today % 5 == 0:
+            momentum_msg = f"🔥 {coached_today} coached today! <strong>{remaining_below_goal}</strong> remaining."
+        else:
+            momentum_msg = (
+                f"You're on a roll — <strong>{remaining_below_goal}</strong> "
+                f"{'employee' if remaining_below_goal == 1 else 'employees'} left."
+            )
+
+        st.markdown(
+            f'<div style="background: linear-gradient(90deg, #E3F2FD 0%, #E8F0F9 100%);border-radius: 8px;padding: 14px 16px;margin: 12px 0;font-size: 14px;border-left: 4px solid #4DA3FF;border-top: 1px solid #B3D8FF;">{momentum_msg}</div>',
+            unsafe_allow_html=True,
+        )
+
+        col_continue, col_return = st.columns(2)
+        if col_continue.button("⬇️ Continue Coaching →", key="continue_auto", type="primary", use_container_width=True):
+            st.rerun()
+        if col_return.button("↩️ Back to Dashboard", key="back_to_dash", use_container_width=True):
+            st.session_state["goto_page"] = "dashboard"
+            st.rerun()
+    else:
+        st.markdown(
+            '<div style="background: linear-gradient(90deg, #E8F5E9 0%, #F1F8E9 100%);border-radius: 8px;padding: 14px 16px;margin: 12px 0;font-size: 14px;border-left: 4px solid #6FE090;border-top: 1px solid #AED581;">🏆 <strong>All high-risk employees coached today!</strong> Your team is in great shape.</div>',
+            unsafe_allow_html=True,
+        )
