@@ -206,6 +206,11 @@ def _cached_coaching_notes_for(emp_id: str): return _raw_cached_coaching_notes_f
 def _full_sign_out():
     """Wipe ALL session state so the next user starts completely fresh."""
     _bust_cache()
+    try:
+        st.query_params["logout"] = "1"
+    except Exception:
+        pass
+    _clear_auth_cookies()
     # Preserve only Streamlit internal keys (prefixed with _ from Streamlit itself)
     # Clear everything else — pipeline data, navigation, uploads, etc.
     keys_to_keep = set()  # nothing to keep
@@ -232,6 +237,81 @@ def _render_sign_out_button(key_prefix: str, *, type: str = "secondary", use_con
         st.session_state.pop(confirm_key, None)
         st.rerun()
     return False
+
+
+def _set_auth_cookies(access_token: str, refresh_token: str, max_age: int = 1209600):
+    """Persist auth tokens in browser cookies so session can be restored after reruns."""
+    from urllib.parse import quote as _quote
+
+    _at = _quote(access_token or "", safe="")
+    _rt = _quote(refresh_token or "", safe="")
+    st.components.v1.html(
+        "<script>"
+        f"document.cookie = 'dpd_at={_at}; path=/; max-age={int(max_age)}; SameSite=Lax';"
+        f"document.cookie = 'dpd_rt={_rt}; path=/; max-age={int(max_age)}; SameSite=Lax';"
+        "</script>",
+        height=0,
+    )
+
+
+def _clear_auth_cookies():
+    """Expire browser auth cookies."""
+    st.components.v1.html(
+        "<script>"
+        "document.cookie = 'dpd_at=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
+        "document.cookie = 'dpd_rt=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
+        "</script>",
+        height=0,
+    )
+
+
+def _restore_session_from_cookies() -> bool:
+    """Rebuild auth/session state from browser cookies when Streamlit session state is lost."""
+    if st.session_state.get("supabase_session"):
+        return True
+
+    try:
+        from urllib.parse import unquote as _unquote
+        _cookies = st.context.cookies
+        _at = _unquote(_cookies.get("dpd_at", "") or "")
+        _rt = _unquote(_cookies.get("dpd_rt", "") or "")
+        if not _at or not _rt:
+            return False
+
+        from database import get_supabase_credentials
+        from supabase import create_client as _sc
+
+        SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
+        _sb = _sc(SUPABASE_URL, SUPABASE_KEY)
+        _session_resp = _sb.auth.set_session(_at, _rt)
+        _user_resp = _sb.auth.get_user()
+        _user = getattr(_user_resp, "user", None)
+        if not _user:
+            return False
+
+        _new_at = getattr(getattr(_session_resp, "session", None), "access_token", None) or _at
+        _new_rt = getattr(getattr(_session_resp, "session", None), "refresh_token", None) or _rt
+        _expires_at = getattr(getattr(_session_resp, "session", None), "expires_at", None) or (time.time() + 3600)
+
+        _profile_resp = _sb.table("user_profiles").select("tenant_id, role, name").eq("id", _user.id).execute()
+        if not _profile_resp.data:
+            return False
+        _prof = _profile_resp.data[0]
+
+        st.session_state["supabase_session"] = {
+            "access_token": _new_at,
+            "refresh_token": _new_rt,
+        }
+        st.session_state["_sb_token_expires_at"] = _expires_at
+        st.session_state["tenant_id"] = _prof.get("tenant_id", "")
+        st.session_state["user_role"] = _prof.get("role", "member")
+        st.session_state["user_name"] = _prof.get("name") or getattr(_user, "email", "")
+        st.session_state["user_email"] = getattr(_user, "email", "") or st.session_state.get("user_email", "")
+        st.session_state["user_id"] = _user.id
+        _set_auth_cookies(_new_at, _new_rt)
+        return True
+    except Exception:
+        return False
 
 
 def _bust_cache():
@@ -7185,6 +7265,7 @@ def _login_page():
                 st.session_state["supabase_session"] = {
                     "access_token": _at, "refresh_token": _rt,
                 }
+                _set_auth_cookies(_at, _rt)
                 st.session_state["_sb_token_expires_at"] = (
                     resp.session.expires_at
                     if hasattr(resp.session, "expires_at") and resp.session.expires_at
@@ -7250,6 +7331,7 @@ def _login_page():
                 st.session_state["user_role"] = _prof.get("role", "member")
                 st.session_state["user_name"]  = _prof.get("name") or email.strip()
                 st.session_state["user_email"] = email.strip()
+                st.session_state["user_id"] = _uid
                 # Clear login attempt counter on success
                 st.session_state["_login_attempts"] = 0
                 st.session_state["_login_lockout_until"] = 0
@@ -8085,6 +8167,13 @@ def _enhance_coaching_feedback(emp_name: str, emp_id: str, remaining_below_goal:
 # ════════════════════════════════════════════════════════════════════════════════
 
 def main():
+    if st.query_params.get("logout") == "1":
+        _clear_auth_cookies()
+        try:
+            del st.query_params["logout"]
+        except Exception:
+            st.query_params.clear()
+
     # ── Capture invite code from URL before auth gate ─────────────────────
     _url_invite = st.query_params.get("invite", "")
     if _url_invite and not st.session_state.get("_pending_invite"):
@@ -8092,7 +8181,7 @@ def main():
         st.query_params.clear()
 
     # ── Auth gate ──────────────────────────────────────────────────────────
-    if "supabase_session" not in st.session_state:
+    if "supabase_session" not in st.session_state and not _restore_session_from_cookies():
         _login_page()
         st.stop()
 
