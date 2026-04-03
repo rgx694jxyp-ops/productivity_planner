@@ -129,6 +129,17 @@ from data_loader import (REQUIRED_FIELDS,
                          auto_detect as _dl_auto_detect,
                          parse_csv_bytes as _dl_parse_csv)
 
+from ui_improvements import (
+    diagnose_upload, show_diagnosis, show_manual_entry_form,
+    find_coaching_impact, show_coaching_impact,
+    is_simple_mode, toggle_simple_mode, simplified_supervisor_view,
+    human_confidence_message, translate_to_floor_language, risk_to_human_language,
+    show_start_shift_card, build_operation_status, show_operation_status_header,
+    detect_department_patterns, show_pattern_detection_panel,
+    summarize_coaching_activity, show_coaching_activity_summary,
+    show_resume_session_card, show_shift_complete_state
+)
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 # CACHE & SESSION SYSTEM
@@ -1251,6 +1262,10 @@ def render_sidebar() -> str:
             _bust_cache()
             st.rerun()
 
+        toggle_simple_mode()
+        if st.session_state.get("simple_mode"):
+            st.caption("Simple Mode keeps the app focused on who needs attention right now.")
+
         # ── Plan badge ──────────────────────────────────────────────────
         _plan_display = _plan.capitalize() if _plan != "admin" else "Admin"
         _plan_color = {"starter": "#888", "pro": "#1E90FF", "business": "#FFD700", "admin": "#FF6347"}.get(_plan, "#888")
@@ -1521,7 +1536,8 @@ def _get_primary_recommendation(gs: list[dict], history: list[dict]) -> dict | N
 
 
 def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix: str):
-    """Dominant command-bar panel — visually anchors every key page with one clear action."""
+    """Dominant command-bar panel — visually anchors every key page with one clear action.
+    Now enhanced with adaptive logic: responds to session momentum and patterns."""
     rec = _get_primary_recommendation(gs, history)
 
     # Count remaining below-goal staff for context
@@ -1537,30 +1553,49 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
         )
         return
 
-    # Escape for HTML safety
+    # Get last coached employee for adaptive logic
+    last_coached_id = st.session_state.get("_last_coached_emp_id", None)
+    
+    # Get adaptive suggestion (includes context-aware messaging)
+    adaptive = _render_adaptive_action_suggestion(gs, history, last_coached_id)
+    
+    # Build display
     import html as _h
-    _name = _h.escape(rec["name"])
+    _name = _h.escape(adaptive["name"] if adaptive else rec["name"])
     _dept = _h.escape(rec.get("department", ""))
-    _why  = _h.escape(rec["why"])
+    _context = _h.escape(adaptive["context"] if adaptive and "context" in adaptive else rec.get("why", ""))
     _dept_str = f" · {_dept}" if _dept else ""
     _n_remaining = len(remaining)
+    
+    # Color code the rail based on priority
+    rail_style = "color: #FFFFFF;"
+    if adaptive and adaptive.get("priority") == "critical":
+        rail_style = "background: linear-gradient(90deg, #8B0000 0%, #DC143C 100%); color: #FFFFFF;"
+    elif adaptive and adaptive.get("priority") == "high":
+        rail_style = "background: linear-gradient(90deg, #FF6347 0%, #FF7F50 100%); color: #FFFFFF;"
+    
     _remaining_note = (
         f"<div class='dpd-rail-label' style='color:#FFFFFF !important;'>⬇ {_n_remaining - 1} more below goal</div>"
         if _n_remaining > 1 else ""
     )
 
     st.markdown(
-        f'<div class="dpd-rail">'
+        f'<div class="dpd-rail" style="{rail_style}">'
         f'<div class="dpd-rail-label" style="color:#FFFFFF !important;">▶ Recommended Action</div>'
         f'<div class="dpd-rail-name">{_name}{_dept_str}</div>'
-        f'<div class="dpd-rail-why">{_why}</div>'
+        f'<div class="dpd-rail-why">{_context}</div>'
         f'{_remaining_note}'
         f'</div>',
         unsafe_allow_html=True,
     )
+    
+    # Show adaptive emphasis if available
+    if adaptive and "emphasis" in adaptive:
+        st.caption(f"💡 {adaptive['emphasis']}")
 
     col1, col2 = st.columns(2)
-    if col1.button("▶ Start Coaching", key=f"{key_prefix}_start_coach", type="primary", use_container_width=True):
+    action_label = adaptive.get("action", "Start Coaching") if adaptive else "Start Coaching"
+    if col1.button(f"▶ {action_label}", key=f"{key_prefix}_start_coach", type="primary", use_container_width=True):
         st.session_state["goto_page"] = "employees"
         st.session_state["emp_view"] = "Performance Journal"
         st.session_state["cn_selected_emp"] = rec["emp_id"]
@@ -1579,30 +1614,13 @@ def _render_confidence_ux(history: list[dict] | None = None, active_filters: dic
     """
     last_ts = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
     age_min = max(0, int((time.time() - last_ts) // 60)) if last_ts else None
-
-    # Decision-relevant confidence levels
-    if age_min is not None and age_min <= 5:
-        conf_label = "✓ Confidence: High — safe to act immediately"
-        age_str = f"updated {age_min} min ago"
-        can_act = True
-    elif age_min is not None and age_min <= 60:
-        conf_label = "Confidence: Good — stable pattern expected"
-        age_str = f"updated {age_min} min ago"
-        can_act = True
-    elif age_min is not None and age_min <= 240:
-        conf_label = "⚠ Confidence: Fair — validate before major decisions"
-        age_str = f"updated {age_min} min ago"
-        can_act = True
-    else:
-        conf_label = "Confidence: Limited — wait for fresh data"
-        age_str = "refreshed this session"
-        can_act = False
-
     date_range_str = ""
+    days_of_data = 0
     if history:
         dates = [str(row.get("Date") or row.get("work_date") or row.get("Week") or "") for row in history if row.get("Date") or row.get("work_date") or row.get("Week")]
         if dates:
             date_range_str = f"based on {min(dates)} → {max(dates)}"
+            days_of_data = len(set(dates))
 
     filter_str = ""
     if active_filters:
@@ -1613,10 +1631,11 @@ def _render_confidence_ux(history: list[dict] | None = None, active_filters: dic
         if parts:
             filter_str = f"applies to {', '.join(parts)}"
 
-    # Build decision-aware caption
-    parts = [conf_label, age_str]
-    if date_range_str:
-        parts.append(date_range_str)
+    conf_label = human_confidence_message(age_min, days_of_data, has_trend=days_of_data >= 3)
+
+    parts = [conf_label]
+    if date_range_str and days_of_data:
+        parts.append(f"Based on {days_of_data} day(s) of data")
     if filter_str:
         parts.append(filter_str)
     
@@ -1676,20 +1695,62 @@ def page_supervisor():
     # Session context and breadcrumbs
     _render_breadcrumb("supervisor")
     _render_session_context_bar()
+
+    _coachable_emp_ids = _cached_all_coaching_notes()
+    _notes_by_emp = {
+        emp_id: _cached_coaching_notes_for(emp_id)
+        for emp_id in _coachable_emp_ids
+    }
+    _op_status = build_operation_status(gs)
+    _patterns = detect_department_patterns(gs)
+    _coaching_activity = summarize_coaching_activity(_notes_by_emp, history)
+
+    risk_summary = []
+    for row in [r for r in gs if r.get("goal_status") == "below_goal"]:
+        _level, _score, _details = _calc_risk_level_shared(row, history)
+        risk_summary.append({"level": _level, "score": _score})
+    high_priority_remaining = sum(1 for item in risk_summary if str(item["level"]).startswith("🔴"))
+    medium_priority_remaining = sum(1 for item in risk_summary if str(item["level"]).startswith("🟡"))
+    coached_today = int(st.session_state.get("_coached_today", 0))
+
+    show_operation_status_header(_op_status)
     
     _render_session_progress(gs)
     _render_primary_action_rail(gs, history, key_prefix="sup_primary")
     _render_priority_strip(gs, history)
     _render_confidence_ux(history)
+
+    follow_up_due = 0
+    for e in (_cached_employees() or []):
+        try:
+            emp_notes = _cached_coaching_notes_for(e.get("emp_id", ""))
+            if emp_notes:
+                last_dt = str(emp_notes[0].get("created_at", ""))[:10]
+                if last_dt == date.today().isoformat():
+                    continue
+                follow_up_due += 1
+        except Exception:
+            pass
+
+    show_start_shift_card(gs, follow_up_due)
+    adaptive = _render_adaptive_action_suggestion(gs, history, st.session_state.get("_last_coached_emp_id"))
+    if adaptive and coached_today > 0 and adaptive.get("emp_id"):
+        show_resume_session_card(adaptive["name"], adaptive.get("context", "Next up"), adaptive["emp_id"])
+    show_shift_complete_state(high_priority_remaining, medium_priority_remaining, coached_today)
     st.divider()
 
+    # ── SIMPLE MODE: Stripped-down view for quick daily use ───────────────────
+    if is_simple_mode():
+        simplified_supervisor_view(gs)
+        show_coaching_activity_summary(_coaching_activity)
+        return
+    
     # ────────────────────────────────────────────────────────────────────────────
-    # SECTION 1: DEPARTMENT HEALTH SUMMARY
+    # SECTION 1: DEPARTMENT HEALTH SUMMARY (Exception-Only By Default)
     # ────────────────────────────────────────────────────────────────────────────
     
     st.subheader("📊 Team Health Snapshot")
     depts = sorted(set(r.get("Department", "") for r in gs if r.get("Department")))
-    dept_cols = st.columns(len(depts) if depts else 1)
     
     dept_summary = {}
     for dept in depts:
@@ -1708,21 +1769,48 @@ def page_supervisor():
     
     exception_depts = [d for d in depts if dept_summary[d]["below_goal"] > 0]
     shown_depts = exception_depts or depts
-    if exception_depts:
-        st.caption("Showing exception departments only (at least one below-goal employee).")
-    else:
-        st.caption("No exceptions detected. Showing all departments.")
-
-    dept_cols = st.columns(len(shown_depts) if shown_depts else 1)
-    for col, dept in zip(dept_cols, shown_depts):
-        s = dept_summary[dept]
-        col.metric(
-            f"**{dept}**",
-            f"{s['on_goal']}/{s['total']} on goal",
-            f"{s['health_pct']}%",
-            label_visibility="visible"
-        )
     
+    # Display exception departments prominently
+    if exception_depts:
+        st.caption(f"🔴 **{len(exception_depts)} exception department(s)** — at least one below-goal employee")
+        dept_cols = st.columns(len(exception_depts))
+        for col, dept in zip(dept_cols, exception_depts):
+            s = dept_summary[dept]
+            col.metric(
+                f"**{dept}**",
+                f"{s['on_goal']}/{s['total']} on goal",
+                f"{s['health_pct']}%",
+                label_visibility="visible"
+            )
+        
+        # Collapsible full team health for all-clear departments
+        with st.expander("View all departments (including on-target)"):
+            all_cols = st.columns(len(depts))
+            for col, dept in zip(all_cols, depts):
+                s = dept_summary[dept]
+                col.metric(
+                    f"**{dept}**",
+                    f"{s['on_goal']}/{s['total']} on goal",
+                    f"{s['health_pct']}%",
+                    label_visibility="visible"
+                )
+    else:
+        st.success("✅ All departments healthy — no exceptions")
+        st.caption("All employees are meeting or exceeding goals.")
+        dept_cols = st.columns(len(shown_depts) if shown_depts else 1)
+        for col, dept in zip(dept_cols, shown_depts):
+            s = dept_summary[dept]
+            col.metric(
+                f"**{dept}**",
+                f"{s['on_goal']}/{s['total']} on goal",
+                f"{s['health_pct']}%",
+                label_visibility="visible"
+            )
+    
+    st.divider()
+
+    show_pattern_detection_panel(_patterns)
+
     st.divider()
     
     # ────────────────────────────────────────────────────────────────────────────
@@ -1937,6 +2025,10 @@ def page_supervisor():
         st.success("✅ No significant labor cost impact detected.")
     
     st.divider()
+
+    show_coaching_activity_summary(_coaching_activity)
+
+    st.divider()
     
     # ────────────────────────────────────────────────────────────────────────────
     # SECTION 5: QUICK COACHING TIPS (Generic)
@@ -1983,10 +2075,71 @@ def page_supervisor():
 # Step 3: Run pipeline — employees registered, UPH calculated, data ready
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _render_adaptive_rows(items: list[dict], item_key: str = "name", 
+                          show_fields: list[str] | None = None, 
+                          action_buttons: dict | None = None):
+    """
+    Render items in an adaptive row layout that adjusts based on:
+    - Count of items (few = 2 cols, many = 3-5 cols)
+    - Available space (responsive)
+    - User preferences (card vs table already shown above)
+    
+    Args:
+        items: List of dicts to display
+        item_key: Which field to use as primary display (name, employee, etc)
+        show_fields: Which fields to show in each row (default: auto)
+        action_buttons: Dict of {button_label: callback_fn}
+    """
+    if not items:
+        st.info("No items to display")
+        return
+    
+    # Auto-determine optimal columns based on count
+    item_count = len(items)
+    if item_count <= 3:
+        cols_per_row = 2
+    elif item_count <= 8:
+        cols_per_row = 3
+    else:
+        cols_per_row = 4
+    
+    # Default fields if none specified
+    if show_fields is None:
+        if "avg_uph" in items[0]:
+            show_fields = ["name", "department", "avg_uph", "risk_level"]
+        elif "employee" in items[0]:
+            show_fields = ["employee", "department", "score"]
+        else:
+            show_fields = list(items[0].keys())[:3]
+    
+    # Render in rows
+    for row_idx in range(0, len(items), cols_per_row):
+        row_items = items[row_idx:row_idx + cols_per_row]
+        cols = st.columns(cols_per_row)
+        
+        for col_idx, item in enumerate(row_items):
+            with cols[col_idx]:
+                st.markdown(f"### {item.get(item_key, 'Unknown')}")
+                
+                # Show selected fields as compact info
+                for field in show_fields:
+                    if field in item and field != item_key:
+                        val = item[field]
+                        field_label = field.replace("_", " ").title()
+                        st.caption(f"{field_label}: {val}")
+                
+                # Action buttons
+                if action_buttons:
+                    btn_cols = st.columns(len(action_buttons))
+                    for btn_col, (btn_label, btn_handler) in zip(btn_cols, action_buttons.items()):
+                        if btn_col.button(btn_label, key=f"adaptive_{row_idx}_{col_idx}_{btn_label}"):
+                            btn_handler(item)
+
+
 def page_dashboard():
     """Dashboard: At-a-glance risk view of all employees."""
     st.title("📊 Dashboard")
-    st.caption("Risk-based priority view of all employees. Filter by risk level or department.")
+    st.caption("See who needs attention first. Filter by urgency or department.")
 
     if not require_db(): return
 
@@ -2112,10 +2265,10 @@ def page_dashboard():
     low_risk = len([r for r in filtered if r["risk_level"] == "🟢 Low"])
     
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Below Goal", len(filtered))
-    m2.metric("🔴 High Risk", high_risk)
-    m3.metric("🟡 Medium Risk", med_risk)
-    m4.metric("🟢 Low Risk", low_risk)
+    m1.metric("Need attention", len(filtered))
+    m2.metric("🔴 Coach now", high_risk)
+    m3.metric("🟡 Check in soon", med_risk)
+    m4.metric("🟢 Lower urgency", low_risk)
 
     st.divider()
 
@@ -2180,11 +2333,49 @@ def page_dashboard():
                     st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # Selection area with count indicator
+    st.divider()
+    st.markdown("**Bulk Actions**")
     selected_names = st.multiselect(
         "Select employees for bulk action",
         [r["name"] for r in filtered],
         key="dash_selected_names",
     )
+    
+    # Enhanced selection count indicator
+    if selected_names:
+        _n_sel = len(selected_names)
+        
+        # Get info about selected employees
+        selected_items = [r for r in filtered if r["name"] in selected_names]
+        selected_depts = set(r.get("department", "No dept") for r in selected_items)
+        high_risk_count = len([r for r in selected_items if r["risk_level"] == "🔴 High"])
+        
+        # Visual indicator badge
+        st.markdown(
+            f'<div style="'
+            f'background: linear-gradient(90deg, #FF6B35 0%, #FF8C42 100%);'
+            f'border-radius: 8px;'
+            f'padding: 12px 16px;'
+            f'margin: 8px 0;'
+            f'color: white;'
+            f'font-weight: 600;'
+            f'display: flex;'
+            f'align-items: center;'
+            f'gap: 8px;'
+            f'">'
+            f'<span style="font-size: 18px;">✓</span>'
+            f'<span>{_n_sel} selected employee{"s" if _n_sel > 1 else ""}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        
+        # Selection summary
+        sel_cols = st.columns(3)
+        sel_cols[0].metric("Selected", _n_sel)
+        sel_cols[1].metric("Depts", len(selected_depts))
+        sel_cols[2].metric("🔴 High Risk", high_risk_count)
+    
     if selected_names:
         _n_sel = len(selected_names)
         st.markdown(
@@ -2212,20 +2403,27 @@ def page_dashboard():
             )
         st.markdown('<div class="dpd-sticky-spacer"></div>', unsafe_allow_html=True)
 
-    st.markdown("##### Quick actions")
-    for i, r in enumerate(filtered[:12]):
-        q1, q2, q3, q4, q5 = st.columns([3, 2, 2, 1, 1])
-        q1.write(r["name"])
-        q2.caption(r["department"] or "No dept")
-        q3.caption(f"{r['avg_uph']} / {r['target_uph']}")
-        if q4.button("Coach", key=f"dash_coach_{i}"):
-            st.session_state["goto_page"] = "employees"
-            st.session_state["emp_view"] = "Performance Journal"
-            st.rerun()
-        if q5.button("History", key=f"dash_hist_{i}"):
-            st.session_state["goto_page"] = "employees"
-            st.session_state["emp_view"] = "Employee History"
-            st.rerun()
+    st.markdown("##### Quick actions — Adaptive Layout")
+    
+    # Use adaptive rows for quick actions display
+    quick_action_items = filtered[:20]  # Up to 20 items
+    
+    def _coach_action(item):
+        st.session_state["goto_page"] = "employees"
+        st.session_state["emp_view"] = "Performance Journal"
+        st.rerun()
+    
+    def _history_action(item):
+        st.session_state["goto_page"] = "employees"
+        st.session_state["emp_view"] = "Employee History"
+        st.rerun()
+    
+    _render_adaptive_rows(
+        quick_action_items,
+        item_key="name",
+        show_fields=["department", "avg_uph", "risk_level"],
+        action_buttons={"Coach": _coach_action, "History": _history_action}
+    )
 
     # Export button
     csv_buf = df.to_csv(index=False)
@@ -2292,19 +2490,53 @@ def page_import():
 
 
 def _import_step1():
-    """Step 1 — upload one or more CSV files."""
-    st.subheader("Upload your CSV file(s)")
-    st.caption("Upload one or more CSV files. Columns are auto-detected — you'll only see the mapping step if we can't find required fields.")
+    """Step 1 — upload files or enter lightweight production data manually."""
+    st.subheader("Bring in whatever you have")
+    st.caption("Upload a CSV or Excel export, or type a few rows in manually. We will help make it usable.")
+
+    mode = st.radio(
+        "Choose a starting point",
+        ["Upload file", "Manual entry"],
+        horizontal=True,
+        key="import_entry_mode",
+    )
+
+    if mode == "Manual entry":
+        manual_rows = show_manual_entry_form()
+        st.info("Manual entry works even if you only have today's numbers.")
+        if manual_rows:
+            st.session_state.uploaded_sessions = [{
+                "filename": "Manual Entry",
+                "rows": manual_rows,
+                "headers": ["Date", "EmployeeID", "EmployeeName", "Department", "Units", "HoursWorked"],
+                "row_count": len(manual_rows),
+                "mapping": {
+                    "Date": "Date",
+                    "EmployeeID": "EmployeeID",
+                    "EmployeeName": "EmployeeName",
+                    "Department": "Department",
+                    "Shift": "",
+                    "UPH": "",
+                    "Units": "Units",
+                    "HoursWorked": "HoursWorked",
+                },
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }]
+            st.session_state.submission_plan = None
+            st.session_state.split_overrides = {}
+            st.session_state.import_step = 3
+            st.rerun()
+        return
 
     files = st.file_uploader(
-        "Drag files here or click Browse",
-        type=["csv"],
+        "Drop your export here or click Browse",
+        type=["csv", "xlsx", "xls"],
         accept_multiple_files=True,
         key="import_uploader",
     )
 
     if not files:
-        st.info("Waiting for files…")
+        st.info("Upload anything you have. Even partial data is enough to start.")
         return
 
     _MAX_FILE_MB = 50
@@ -2325,7 +2557,18 @@ def _import_step1():
             _log_app_error("import", f"File read error ({f.name}): {_read_err}")
             continue
 
-        rows, headers = _parse_csv(raw_bytes)
+        if f.name.lower().endswith((".xlsx", ".xls")):
+            try:
+                _df = pd.read_excel(io.BytesIO(raw_bytes))
+                _df.columns = [str(c).strip() for c in _df.columns]
+                _df = _df.dropna(how="all")
+                rows = _df.fillna("").to_dict("records")
+                headers = list(_df.columns)
+            except Exception as _xlsx_err:
+                st.error(f"Could not read **{f.name}** as an Excel file: {_xlsx_err}")
+                continue
+        else:
+            rows, headers = _parse_csv(raw_bytes)
         if not headers:
             st.error(
                 f"**{f.name}** could not be parsed as a valid CSV header row. "
@@ -2348,6 +2591,13 @@ def _import_step1():
         st.success(f"✓ **{f.name}** — {len(rows):,} rows, {len(headers)} columns")
 
     if pending:
+        diagnosis = diagnose_upload(pending)
+        show_diagnosis(diagnosis)
+        if diagnosis.get("days_of_data", 0) <= 1:
+            st.info("Using today's performance only. No trend pattern yet, but we can still show who needs attention.")
+        elif diagnosis.get("days_of_data", 0) < 3:
+            st.info("Limited trend confidence. Recommendations will lean more on recent performance than longer patterns.")
+
         if st.button("Continue →", type="primary", use_container_width=True):
             sessions = [
                 {**p, "mapping": {}, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -2589,6 +2839,28 @@ def _import_step3():
     for s in sessions:
         m = s.get("mapping",{})
         st.caption(f"📄 **{s['filename']}** — {s['row_count']:,} rows · mapped to {sum(1 for v in m.values() if v)} fields")
+
+    _mapped_date_fields = [s.get("mapping", {}).get("Date", "") for s in sessions]
+    _has_date_col = any(_mapped_date_fields)
+    _estimated_days = 0
+    if _has_date_col:
+        _all_dates = set()
+        for s in sessions:
+            _date_key = s.get("mapping", {}).get("Date", "")
+            if not _date_key:
+                continue
+            for row in s.get("rows", []):
+                _raw = str(row.get(_date_key, "") or "").strip()
+                if _raw:
+                    _all_dates.add(_raw[:10])
+        _estimated_days = len(_all_dates)
+    else:
+        _estimated_days = 1
+
+    if _estimated_days <= 1:
+        st.info("Minimum viable data mode: we will use today's performance only and skip trend language until more days are loaded.")
+    elif _estimated_days < 3:
+        st.info("Limited trend confidence: enough to guide decisions, but long-run patterns will strengthen after a few more days.")
 
     st.divider()
 
@@ -3335,6 +3607,7 @@ def _emp_ai_coaching():
 def _emp_coaching():
     emps  = _cached_employees()
     flags = _cached_active_flags()
+    history_rows = st.session_state.get("history", [])
     if not emps:
         st.info("No employees yet. Go to **Import Data** to upload a CSV — employees are created automatically from your data.")
         return
@@ -3362,9 +3635,9 @@ def _emp_coaching():
 
         reasons = []
         if trend == "down":
-            reasons.append(f"Trending down ({change_pct:+.1f}%)")
+            reasons.append(f"Performance dropping ({change_pct:+.1f}%)")
         if goal_st == "below_goal":
-            reasons.append(f"Below goal (UPH {avg_uph:.1f} vs target {target})")
+            reasons.append(f"Below target (UPH {avg_uph:.1f} vs target {target})")
 
         if reasons:
             action_key = f"{eid}|{'|'.join(reasons)}"
@@ -3468,12 +3741,12 @@ def _emp_coaching():
                 _chg_str = f"+{_chg:.1f}%" if _chg > 0 else f"{_chg:.1f}%"
                 _uph = _emp_gs.get("Average UPH", 0)
                 _tgt = _emp_gs.get("Target UPH", "—")
-                _gs_color = {"on_goal": "green", "below_goal": "red"}.get(_emp_gs.get("goal_status",""), "gray")
                 st.markdown(
                     f"<span style='font-size:13px;'>"
                     f"Avg UPH: <strong>{_uph:.1f}</strong> · "
                     f"Target: <strong>{_tgt}</strong> · "
-                    f"Trend: {_trend_icon} {_chg_str}"
+                    f"Status: <strong>{translate_to_floor_language(_emp_gs.get('goal_status', ''))}</strong> · "
+                    f"Direction: {_trend_icon} {_chg_str}"
                     f"</span>",
                     unsafe_allow_html=True)
 
@@ -3482,13 +3755,18 @@ def _emp_coaching():
                 if _recent_notes:
                     _last_note = _recent_notes[0]
                     _last_date = str(_last_note.get("created_at", ""))[:10]
-                    st.caption(f"Last note: {_last_date}")
-                if _emp_gs.get("trend", "") == "down" and _emp_gs.get("goal_status", "") == "below_goal":
-                    st.warning("Trend is worsening while below goal. Suggested: reinforce pick-rate standard and remove blockers.")
-                elif _emp_gs.get("trend", "") == "down":
-                    st.info("Trend is slipping. Suggested: quick check-in and reset daily focus target.")
+                    st.caption(f"Last conversation: {_last_date}")
+                    _impact = find_coaching_impact(emp_id, _recent_notes, history_rows)
+                    if _impact:
+                        show_coaching_impact(emp_name, _impact)
                 else:
-                    st.info("Suggested: confirm current approach and set one measurable next-step target.")
+                    st.caption("No prior coaching note on file yet.")
+                if _emp_gs.get("trend", "") == "down" and _emp_gs.get("goal_status", "") == "below_goal":
+                    st.warning("Performance is dropping while already below target. Suggested: reset the standard and remove blockers now.")
+                elif _emp_gs.get("trend", "") == "down":
+                    st.info("Performance is slipping. Suggested: quick check-in and reset one daily focus target.")
+                else:
+                    st.info("Suggested: confirm what is working and set one measurable next-step target.")
 
             if is_flagged:
                 flag_info = flags.get(emp_id, {})
@@ -3519,8 +3797,9 @@ def _emp_coaching():
                     _raw_cached_all_coaching_notes.clear()
                     st.session_state.cn_note_val = ""
                     st.session_state.cn_by_val   = ""
-                    # Increment session count
+                    # Increment session count and track last coached employee
                     st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
+                    st.session_state["_last_coached_emp_id"] = emp_id  # Track for adaptive rail
                     # Count remaining below-goal (excluding current employee)
                     _remaining_risk = [
                         r for r in st.session_state.get("goal_status", [])
@@ -4004,8 +4283,10 @@ def page_productivity():
         if not _plan_gate("pro", "Department Goals"):
             return
         st.subheader("Department UPH targets")
-        st.caption("Set a UPH target for each department. Type a value and press Enter — it saves immediately and updates all charts.")
+        st.caption("Set a simple target for each department. Once targets are in place, the app can tell you who is on track and who needs help.")
         st.caption("Trend window and Top/Bottom % only affect ranking/highlighting views.")
+
+        st.info("Quick start: if you do not have formal standards yet, enter your best current expectation for each department and refine later.")
 
         with st.expander("Advanced scoring controls"):
             tw = st.slider("Trend window used for trend scoring (weeks)", 2, 12,
@@ -5073,6 +5354,11 @@ def page_productivity():
                 for action in actions:
                     st.markdown(f"→ {action}")
 
+                st.divider()
+                
+                # ── SOFT ACTIONS FOR MEDIUM-RISK EMPLOYEES ──
+                _render_soft_action_buttons(emp['emp_id'], emp['employee'], emp['risk_level'], emp['context_tags'])
+                
                 st.divider()
 
                 # Context tagging section
@@ -6198,6 +6484,83 @@ def page_settings():
     st.caption("Productivity Planner · Powered by Supply Chain Automation Co")
 
     with tab_team:
+        # ── Team Members & Invite ──────────────────────────────────────────────
+        st.subheader("👥 Team Members")
+        st.caption("Invite supervisors or managers to your workspace. Everyone on the same team shares the same data.")
+        try:
+            from database import (
+                get_invite_code, regenerate_invite_code as _regen_invite,
+                get_team_members, remove_team_member, set_member_role, get_my_role,
+            )
+            _tid_team = st.session_state.get("tenant_id", "")
+            _my_role = get_my_role(_tid_team)
+            _is_admin = (_my_role == "admin" or _get_current_plan() == "admin")
+
+            # ── Invite link ────────────────────────────────────────────────────
+            _inv_code = get_invite_code(_tid_team)
+            if _inv_code:
+                _app_origin = st.context.headers.get("Origin", "")
+                _inv_link = f"{_app_origin}/?invite={_inv_code}" if _app_origin else f"Invite code: {_inv_code}"
+                st.markdown("**Invite link — share this with anyone you want to add to your team:**")
+                st.code(_inv_link, language=None)
+                st.caption("Anyone who signs up with this link (or enters the code manually) joins your team automatically.")
+                if _is_admin:
+                    if st.button("🔄 Rotate invite code", key="rotate_invite", type="secondary"):
+                        _new_code = _regen_invite(_tid_team)
+                        if _new_code:
+                            st.success("✓ Invite code rotated — old links no longer work.")
+                            st.rerun()
+            else:
+                st.info("Invite code not available. Run migration 003_team_invites.sql in Supabase SQL Editor.")
+
+            st.divider()
+
+            # ── Member list ────────────────────────────────────────────────────
+            _members = get_team_members(_tid_team)
+            _current_uid = st.session_state.get("user_id", "")
+            if _members:
+                st.caption(f"**{len(_members)} member(s) on this team**")
+                for _m in _members:
+                    _m_id   = _m.get("id", "")
+                    _m_name = _m.get("name") or "Unnamed"
+                    _m_role = _m.get("role", "member")
+                    _m_since = str(_m.get("created_at", ""))[:10]
+                    _is_me = (_m_id == _current_uid)
+                    mc1, mc2, mc3, mc4 = st.columns([3, 1.5, 1.2, 1])
+                    mc1.markdown(f"**{_m_name}**{'&nbsp;&nbsp;*(you)*' if _is_me else ''}", unsafe_allow_html=True)
+                    mc2.caption(_m_role.capitalize())
+                    mc3.caption(f"Since {_m_since}")
+                    if _is_admin and not _is_me:
+                        with mc4:
+                            _remove_key = f"rm_member_{_m_id}"
+                            if st.button("Remove", key=_remove_key, type="secondary"):
+                                if remove_team_member(_m_id, _tid_team):
+                                    st.success(f"✓ {_m_name} removed from team.")
+                                    st.rerun()
+                    if _is_admin and not _is_me:
+                        _role_key = f"role_{_m_id}"
+                        _new_role = st.selectbox(
+                            f"Role for {_m_name}",
+                            ["member", "admin"],
+                            index=0 if _m_role == "member" else 1,
+                            key=_role_key,
+                            label_visibility="collapsed",
+                        )
+                        if _new_role != _m_role:
+                            if set_member_role(_m_id, _new_role, _tid_team):
+                                st.toast(f"✓ {_m_name} is now {_new_role}", icon="✅")
+                                st.rerun()
+            else:
+                st.info("No team members yet — share the invite link above.")
+
+        except Exception as _team_err:
+            st.info(f"Team management not available: {_team_err}")
+            st.caption("Make sure migrations/003_team_invites.sql has been run in Supabase.")
+
+        st.divider()
+
+        # ── Preserved: chart/labor/audit/cleanup settings ─────────────────────
+        st.subheader("⚙️ App Settings")
         st.caption("Configure team-level behavior, labor assumptions, and cleanup tools.")
         st.session_state.chart_months = st.slider("History window used across charts (months)", 0, 60, st.session_state.chart_months)
         st.caption("This limits how many months of historical data are included in dashboard/productivity trend charts.")
@@ -6296,8 +6659,9 @@ def page_settings():
                     st.warning("Passwords don't match.")
                 else:
                     try:
-                        from database import SUPABASE_URL, SUPABASE_KEY
+                        from database import get_supabase_credentials
                         from supabase import create_client as _sc
+                        SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
                         _sb = _sc(SUPABASE_URL, SUPABASE_KEY)
                         sess = st.session_state.get("supabase_session", {})
                         # Re-authenticate with current password to verify identity
@@ -6629,7 +6993,8 @@ def _login_page():
                     else:
                         try:
                             import requests as _req
-                            from database import SUPABASE_URL, SUPABASE_KEY
+                            from database import get_supabase_credentials
+                            SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
                             _upd_resp = _req.put(
                                 f"{SUPABASE_URL}/auth/v1/user",
                                 json={"password": new_pw},
@@ -6682,7 +7047,8 @@ def _login_page():
                         if _verify_token and _verify_type == "recovery":
                             try:
                                 import requests as _req
-                                from database import SUPABASE_URL, SUPABASE_KEY
+                                from database import get_supabase_credentials
+                                SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
                                 _vresp = _req.post(
                                     f"{SUPABASE_URL}/auth/v1/verify",
                                     json={"token_hash": _verify_token, "type": "recovery"},
@@ -6725,8 +7091,9 @@ def _login_page():
                 st.warning("Enter your email address.")
             else:
                 try:
-                    from database import SUPABASE_URL, SUPABASE_KEY
+                    from database import get_supabase_credentials
                     from supabase import create_client as _sc
+                    SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
                     _sb = _sc(SUPABASE_URL, SUPABASE_KEY)
                     # Pass redirect URL so Supabase sends user back here with PKCE code
                     _redirect = st.context.headers.get("Origin", "http://localhost:8501")
@@ -6765,8 +7132,9 @@ def _login_page():
             st.error("Enter your email and password.")
         else:
             try:
-                from database import SUPABASE_URL, SUPABASE_KEY
+                from database import get_supabase_credentials
                 from supabase import create_client as _sc
+                SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
                 _sb   = _sc(SUPABASE_URL, SUPABASE_KEY)
                 resp  = _sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
 
@@ -6800,32 +7168,52 @@ def _login_page():
                 if prof_resp.data:
                     _prof = prof_resp.data[0]
                 else:
-                    # First login — provision tenant + profile
-                    import uuid as _uuid
-                    _new_tid = str(_uuid.uuid4())
-                    _display = email.strip().split("@")[0]
-                    # Use RPC to bypass RLS — falls back to direct insert
-                    try:
-                        _rpc_result = _sb2.rpc("provision_tenant", {
-                            "p_user_id":     _uid,
-                            "p_tenant_name": _display,
-                            "p_user_name":   _display,
-                        }).execute()
-                        # RPC returns the generated tenant_id
-                        if _rpc_result.data:
-                            _new_tid = _rpc_result.data
-                    except Exception as _rpc_err:
-                        # RPC doesn't exist yet — try direct insert
-                        _log_app_error("provision_tenant", f"RPC failed for {_uid}: {_rpc_err}, trying direct insert")
-                        _sb2.table("tenants").insert({
-                            "id": _new_tid, "name": _display,
-                        }).execute()
-                        _sb2.table("user_profiles").insert({
-                            "id": _uid, "tenant_id": _new_tid,
-                            "role": "admin", "name": _display,
-                        }).execute()
-                    _prof = {"tenant_id": _new_tid, "role": "admin",
-                             "name": _display}
+                    # First login — check for pending invite code first
+                    _pending_invite = st.session_state.get("_pending_invite", "")
+                    if _pending_invite:
+                        # Join existing tenant via invite code
+                        try:
+                            from database import join_tenant_by_invite as _join_invite
+                            _display = email.strip().split("@")[0]
+                            _joined_tid = _join_invite(_uid, _pending_invite, _display)
+                            if _joined_tid:
+                                st.session_state.pop("_pending_invite", None)
+                                _prof = {"tenant_id": _joined_tid, "role": "member", "name": _display}
+                            else:
+                                st.error("That invite code is not valid. Contact your supervisor for a new link.")
+                                st.markdown("</div>", unsafe_allow_html=True)
+                                return
+                        except Exception as _inv_err:
+                            st.error(f"Could not join team: {_inv_err}")
+                            st.markdown("</div>", unsafe_allow_html=True)
+                            return
+                    else:
+                        # No invite — provision a new tenant for this user
+                        import uuid as _uuid
+                        _new_tid = str(_uuid.uuid4())
+                        _display = email.strip().split("@")[0]
+                        # Use RPC to bypass RLS — falls back to direct insert
+                        try:
+                            _rpc_result = _sb2.rpc("provision_tenant", {
+                                "p_user_id":     _uid,
+                                "p_tenant_name": _display,
+                                "p_user_name":   _display,
+                            }).execute()
+                            # RPC returns the generated tenant_id
+                            if _rpc_result.data:
+                                _new_tid = _rpc_result.data
+                        except Exception as _rpc_err:
+                            # RPC doesn't exist yet — try direct insert
+                            _log_app_error("provision_tenant", f"RPC failed for {_uid}: {_rpc_err}, trying direct insert")
+                            _sb2.table("tenants").insert({
+                                "id": _new_tid, "name": _display,
+                            }).execute()
+                            _sb2.table("user_profiles").insert({
+                                "id": _uid, "tenant_id": _new_tid,
+                                "role": "admin", "name": _display,
+                            }).execute()
+                        _prof = {"tenant_id": _new_tid, "role": "admin",
+                                 "name": _display}
                 st.session_state["tenant_id"] = _prof["tenant_id"]
                 st.session_state["user_role"] = _prof.get("role", "member")
                 st.session_state["user_name"]  = _prof.get("name") or email.strip()
@@ -6836,13 +7224,58 @@ def _login_page():
                 _bust_cache()
                 st.rerun()
             except Exception as _le:
-                _record_failed_login()
+                _msg = str(_le).strip()
+                _msg_l = _msg.lower()
+                if "email not confirmed" in _msg_l:
+                    st.warning("This user exists, but the email is not confirmed yet. In Supabase Auth, open the user and confirm them, or disable email confirmation while setting up.")
+                elif any(s in _msg_l for s in [
+                    "invalid login credentials",
+                    "invalid password",
+                    "email or password",
+                ]):
+                    _record_failed_login()
+                elif any(s in _msg_l for s in [
+                    "invalid api key",
+                    "invalid jwt",
+                    "failed to fetch",
+                    "name or service not known",
+                    "connection refused",
+                    "timed out",
+                ]):
+                    st.error("Supabase connection failed. Check SUPABASE_URL and SUPABASE_KEY in .streamlit/secrets.toml.")
+                elif "user not found" in _msg_l or "signup disabled" in _msg_l:
+                    st.error("This email does not exist in Supabase Auth yet. Create the user first in Supabase: Authentication -> Users -> Add user.")
+                else:
+                    st.error(f"Login failed: {_msg or 'Unknown Supabase auth error'}")
                 _log_app_error("login", f"Failed login for {email.strip()}: {_le}")
 
     # Forgot password link
     if st.button("Forgot password?", type="secondary", use_container_width=True, key="forgot_pw_btn"):
         st.session_state["_show_reset_pw"] = True
         st.rerun()
+
+    # ── Join existing team via invite code ──────────────────────────────────
+    _pending_inv = st.session_state.get("_pending_invite", "")
+    if _pending_inv:
+        st.info(f"You have a team invite: **{_pending_inv}** — sign in above to join the team.")
+        if st.button("✕ Cancel invite", key="cancel_invite", type="secondary", use_container_width=True):
+            st.session_state.pop("_pending_invite", None)
+            st.rerun()
+    else:
+        with st.expander("Have an invite code? Join an existing team"):
+            _inv_input = st.text_input(
+                "Enter invite code",
+                placeholder="e.g. a1b2c3d4",
+                key="manual_invite_input",
+                help="Your admin can find this in Settings → Team.",
+            )
+            if st.button("Use this invite code", key="use_invite_btn", use_container_width=True):
+                if _inv_input.strip():
+                    st.session_state["_pending_invite"] = _inv_input.strip().lower()
+                    st.info("Invite saved — now sign in above to join the team.")
+                    st.rerun()
+                else:
+                    st.warning("Enter an invite code first.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -7023,11 +7456,11 @@ def _subscription_page():
     # ── Shared plan data (mirrors Settings tab) ───────────────────────────
     _PORD  = ["starter", "pro", "business"]
     _PINFO = {
-        "starter":  {"label": "Starter",  "price": "$49/mo",  "emp": "Up to 25",  "clr": "#6b7280",
+        "starter":  {"label": "Starter",  "price": "$30/mo",  "emp": "Up to 25",  "clr": "#6b7280",
                      "desc": "For small teams getting started."},
-        "pro":      {"label": "Pro",       "price": "$149/mo", "emp": "Up to 100", "clr": "#2563eb",
+        "pro":      {"label": "Pro",       "price": "$59/mo", "emp": "Up to 100", "clr": "#2563eb",
                      "desc": "For growing operations that need deeper insights."},
-        "business": {"label": "Business",  "price": "$299/mo", "emp": "Unlimited", "clr": "#7c3aed",
+        "business": {"label": "Business",  "price": "$99/mo", "emp": "Unlimited", "clr": "#7c3aed",
                      "desc": "For large warehouses and multi-site operations."},
     }
     _FEATS = {
@@ -7266,6 +7699,203 @@ def _apply_mode_styling(mode: str):
         )
 
 
+def _render_soft_action_buttons(emp_id: str, emp_name: str, risk_level: str, context_tags: list[str] | None = None):
+    """
+    Render soft action buttons for medium-risk employees.
+    Non-invasive actions that supervisors can take without full coaching session.
+    Includes: Check-in reminder, quick context tagging, brief observation, and escalation.
+    """
+    if not risk_level.startswith("🟡"):
+        return  # Only show for medium risk
+    
+    st.markdown("**💡 Quick Actions — No coaching needed**")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    # Action 1: Schedule brief check-in (non-coaching conversation)
+    if col1.button(
+        "⏰ Schedule Check-In",
+        key=f"soft_checkin_{emp_id}",
+        help="Brief conversation to prevent decline (not formal coaching)",
+        use_container_width=True
+    ):
+        from database import add_coaching_note
+        add_coaching_note(
+            emp_id, 
+            f"[SCHEDULED] Brief check-in queued — quick conversation to identify trends before they worsen.", 
+            "System"
+        )
+        st.success(f"✓ Check-in scheduled for {emp_name}")
+        st.rerun()
+    
+    # Action 2: Quick observation note
+    if col2.button(
+        "📝 Add Note",
+        key=f"soft_note_{emp_id}",
+        help="Log observation without full coaching",
+        use_container_width=True
+    ):
+        st.session_state["soft_note_emp_id"] = emp_id
+        st.session_state["show_soft_note_input"] = True
+    
+    # Action 3: Escalate to full coaching
+    if col3.button(
+        "▶ Full Coaching",
+        key=f"soft_escalate_{emp_id}",
+        help="Move to formal coaching session",
+        use_container_width=True,
+        type="secondary"
+    ):
+        st.session_state["goto_page"] = "employees"
+        st.session_state["emp_view"] = "Performance Journal"
+        st.session_state["cn_selected_emp"] = emp_id
+        st.rerun()
+    
+    # Context selector (secondary row)
+    st.caption("📌 **Add context** if applicable:")
+    context_tags = context_tags or []
+    
+    CONTEXT_OPTIONS = [
+        "Equipment issues",
+        "New employee",
+        "Cross-training",
+        "Shift change",
+        "Short staffed",
+    ]
+    
+    c1, c2, c3 = st.columns(3)
+    cols = [c1, c2, c3]
+    
+    for i, ctx_opt in enumerate(CONTEXT_OPTIONS[:3]):  # Show first 3 in row 1
+        col_idx = i % 3
+        is_selected = ctx_opt in context_tags
+        if cols[col_idx].button(
+            f"{'✓' if is_selected else '○'} {ctx_opt}",
+            key=f"soft_ctx_{emp_id}_{ctx_opt}",
+            use_container_width=True,
+            type="secondary" if is_selected else "primary"
+        ):
+            # Toggle context tag
+            if ctx_opt in context_tags:
+                context_tags.remove(ctx_opt)
+            else:
+                context_tags.append(ctx_opt)
+            
+            try:
+                from goals import get_active_flags
+                flags = get_active_flags()
+                if emp_id in flags:
+                    flags[emp_id]["context_tags"] = context_tags
+                    from goals import save_goals
+                    save_goals(flags)
+            except Exception:
+                pass
+            st.rerun()
+
+
+def _render_adaptive_action_suggestion(gs: list[dict], history: list[dict], last_coached_emp_id: str | None = None):
+    """
+    Adaptive recommendation rail logic.
+    Evolves from "here's the next person" to context-aware suggestions based on:
+    - What just happened (coached, noted, set reminder)
+    - Department patterns (multiple failures in same dept?)
+    - Time of day (early session = coach more, late = document trends?)
+    - Session momentum (how many coached today?)
+    
+    Returns a dict with contextual next-action guidance.
+    """
+    below = [r for r in gs if r.get("goal_status") == "below_goal"]
+    if not below:
+        return None
+    
+    # Get last coached employee's info
+    last_emp = None
+    if last_coached_emp_id:
+        last_emp = next((r for r in gs if str(r.get("EmployeeID", "")) == str(last_coached_emp_id)), None)
+    
+    rec = _get_primary_recommendation(gs, history)
+    if not rec:
+        return None
+    
+    # ── PATTERN DETECTION ────────────────────────────────────────────────
+    
+    # Pattern 1: Multiple employees in same department are struggling
+    rec_dept = rec.get("department", "")
+    dept_below = [r for r in below if r.get("Department") == rec_dept]
+    has_dept_pattern = len(dept_below) >= 2
+    
+    # Pattern 2: Just coached someone - check for related issues
+    same_dept_coaching = False
+    if last_emp:
+        last_dept = last_emp.get("Department", "")
+        same_dept_coaching = (last_dept == rec_dept) and last_emp != rec
+    
+    # Pattern 3: Session momentum
+    coached_today = int(st.session_state.get("_coached_today", 0))
+    momentum_level = (
+        "building" if coached_today >= 2 else 
+        "starting" if coached_today == 1 else 
+        "fresh"
+    )
+    
+    # Pattern 4: Trend severity
+    rec_below_pct = -1
+    try:
+        if rec.get("risk_score", 0) >= 7:
+            rec_below_pct = "critical"
+        elif rec.get("risk_score", 0) >= 4:
+            rec_below_pct = "high"
+        else:
+            rec_below_pct = "moderate"
+    except Exception:
+        rec_below_pct = "moderate"
+    
+    # ── BUILD CONTEXT-AWARE SUGGESTION ───────────────────────────────────
+    
+    # If multiple in same dept, flag the pattern
+    if has_dept_pattern and len(dept_below) > 2:
+        return {
+            "name": rec["name"],
+            "emp_id": rec["emp_id"],
+            "context": f"🚨 DEPT TREND: {len(dept_below)} employees below goal in {rec_dept}",
+            "action": "Coach → Document Pattern",
+            "emphasis": "This is a team-level issue, not just individual. After coaching, consider team-wide actions.",
+            "priority": "critical",
+        }
+    
+    # If just coached someone in same dept, continue momentum
+    if same_dept_coaching:
+        return {
+            "name": rec["name"],
+            "emp_id": rec["emp_id"],
+            "context": f"↪️ MOMENTUM: Same dept as {last_emp.get('Employee Name', 'last employee')} · Related issues likely",
+            "action": "Continue Coaching",
+            "emphasis": f"You found patterns in {rec_dept}. Keep the momentum going.",
+            "priority": "high",
+        }
+    
+    # If momentum building, encourage continuation
+    if coached_today >= 1 and momentum_level == "building":
+        return {
+            "name": rec["name"],
+            "emp_id": rec["emp_id"],
+            "context": f"✓ Momentum: {coached_today} coached · {len(below)} remaining",
+            "action": "Keep Coaching",
+            "emphasis": f"Great start! {rec_below_pct.upper()} risk · this won't take long.",
+            "priority": "high",
+        }
+    
+    # Default: first person of the day or continuing
+    return {
+        "name": rec["name"],
+        "emp_id": rec["emp_id"],
+        "context": rec.get("why", "Highest risk today"),
+        "action": "Start/Continue Coaching",
+        "emphasis": f"{rec_below_pct.capitalize()} risk · {len(below)} employees below goal total.",
+        "priority": rec_below_pct,
+    }
+
+
 def _render_session_context_bar():
     """
     Render a persistent session context bar at the top of major pages.
@@ -7408,6 +8038,12 @@ def _enhance_coaching_feedback(emp_name: str, emp_id: str, remaining_below_goal:
 # ════════════════════════════════════════════════════════════════════════════════
 
 def main():
+    # ── Capture invite code from URL before auth gate ─────────────────────
+    _url_invite = st.query_params.get("invite", "")
+    if _url_invite and not st.session_state.get("_pending_invite"):
+        st.session_state["_pending_invite"] = _url_invite.strip().lower()
+        st.query_params.clear()
+
     # ── Auth gate ──────────────────────────────────────────────────────────
     if "supabase_session" not in st.session_state:
         _login_page()

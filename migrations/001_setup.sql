@@ -8,19 +8,8 @@
 -- ============================================================================
 
 -- --------------------------------------------------------------------------
--- 1. HELPER: get_my_tenant_id()
---    Returns the tenant_id for the currently authenticated Supabase user
---    by looking up auth.uid() in user_profiles.
--- --------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION get_my_tenant_id()
-RETURNS uuid AS $$
-  SELECT tenant_id FROM user_profiles WHERE id = auth.uid()
-$$ LANGUAGE sql STABLE SECURITY DEFINER;
-
-
--- --------------------------------------------------------------------------
--- 2. CORE TABLES: tenants & user_profiles
---    These must exist before anything else references them.
+-- 1. CORE TABLES: tenants & user_profiles
+--    These must exist before the helper function references them.
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tenants (
   id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -35,6 +24,17 @@ CREATE TABLE IF NOT EXISTS user_profiles (
   name       text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+
+-- --------------------------------------------------------------------------
+-- 2. HELPER: get_my_tenant_id()
+--    Defined AFTER user_profiles so the SQL-language function can resolve
+--    the table reference at creation time.
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION get_my_tenant_id()
+RETURNS uuid AS $$
+  SELECT tenant_id FROM user_profiles WHERE id = auth.uid()
+$$ LANGUAGE sql STABLE SECURITY DEFINER;
 
 
 -- --------------------------------------------------------------------------

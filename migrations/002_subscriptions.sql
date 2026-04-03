@@ -28,11 +28,12 @@ ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
 -- 3. RLS policies
 ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view own subscription" ON subscriptions;
 CREATE POLICY "Users can view own subscription"
     ON subscriptions FOR SELECT
     USING (user_id = auth.uid() OR tenant_id = (
         SELECT tenant_id FROM user_profiles
-        WHERE user_id = auth.uid()
+        WHERE id = auth.uid()
         LIMIT 1
     ));
 

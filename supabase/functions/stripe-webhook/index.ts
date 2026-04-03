@@ -12,7 +12,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const STRIPE_WEBHOOK_SECRET = Deno.env.get("STRIPE_WEBHOOK_SECRET")!;
 const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
 
 // Plan metadata mapping
 const PLAN_LIMITS: Record<string, number> = {
@@ -109,25 +109,26 @@ serve(async (req) => {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
-        const userId = session.client_reference_id;
+        const tenantId =
+          session.metadata?.tenant_id ||
+          session.subscription_details?.metadata?.tenant_id ||
+          session.client_reference_id;
+        const userId =
+          session.metadata?.user_id ||
+          session.subscription_details?.metadata?.user_id ||
+          session.client_reference_id ||
+          null;
         const customerId = session.customer;
         const subscriptionId = session.subscription;
 
-        if (!userId || !subscriptionId) break;
-
-        // Get tenant_id from user_profiles
-        const { data: userProfile } = await supabase
-          .from("user_profiles")
-          .select("tenant_id")
-          .eq("user_id", userId)
-          .single();
-
-        if (!userProfile) {
-          console.error(`No user profile found for user ${userId}`);
+        if (!tenantId || !subscriptionId) {
+          console.error("Missing tenant or subscription ID in checkout.session.completed", {
+            tenantId,
+            userId,
+            subscriptionId,
+          });
           break;
         }
-
-        const tenantId = userProfile.tenant_id;
 
         // Fetch full subscription from Stripe
         const sub = await getSubscriptionDetails(subscriptionId);
@@ -137,7 +138,6 @@ serve(async (req) => {
         // Upsert subscription
         await supabase.from("subscriptions").upsert(
           {
-            user_id: userId,
             tenant_id: tenantId,
             stripe_customer_id: customerId,
             stripe_subscription_id: subscriptionId,
@@ -150,6 +150,13 @@ serve(async (req) => {
           },
           { onConflict: "tenant_id" }
         );
+
+        if (userId) {
+          await supabase
+            .from("subscriptions")
+            .update({ user_id: userId, updated_at: new Date().toISOString() })
+            .eq("tenant_id", tenantId);
+        }
 
         // Also store customer ID on tenants table
         await supabase

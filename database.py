@@ -15,19 +15,32 @@ from datetime import date, datetime
 from typing import Optional
 
 
+def _normalize_config_value(value: str) -> str:
+    """Trim whitespace/quotes so copied secrets still work."""
+    out = str(value or "").strip()
+    if len(out) >= 2 and out[0] == out[-1] and out[0] in ('"', "'"):
+        out = out[1:-1].strip()
+    return out.rstrip("/") if out.startswith("http") else out
+
+
 def _get_config(key: str) -> str:
     """Read from env var, then Streamlit secrets. Raises if not found."""
-    val = os.environ.get(key, "")
+    val = _normalize_config_value(os.environ.get(key, ""))
     if val:
         return val
     try:
         import streamlit as st
-        val = st.secrets.get(key, "")
+        val = _normalize_config_value(st.secrets.get(key, ""))
         if val:
             return val
     except Exception:
         pass
     return ""
+
+
+def get_supabase_credentials() -> tuple[str, str]:
+    """Return the current Supabase URL/key from env or Streamlit secrets."""
+    return _get_config("SUPABASE_URL"), _get_config("SUPABASE_KEY")
 
 
 SUPABASE_URL = _get_config("SUPABASE_URL")
@@ -50,6 +63,7 @@ def get_client():
     """Return an authenticated Supabase client, cached per browser session.
     Automatically refreshes expired tokens (Supabase tokens expire after 1 hour)."""
     import time as _time
+    url, key = get_supabase_credentials()
 
     try:
         import streamlit as st
@@ -87,7 +101,7 @@ def get_client():
 
     try:
         from supabase import create_client
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        client = create_client(url, key)
         try:
             import streamlit as st
             session = st.session_state.get("supabase_session")
@@ -1068,6 +1082,7 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
                                 tenant_id: str = "") -> tuple:
     """Create a Stripe Checkout Session. Returns (url, error_msg)."""
     import requests
+    user_id = ""
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     if not stripe_key:
         return None, "STRIPE_SECRET_KEY not configured"
@@ -1075,6 +1090,12 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
     tid = tenant_id or get_tenant_id()
     if not tid:
         return None, "No tenant_id found"
+
+    try:
+        import streamlit as st
+        user_id = st.session_state.get("user_id", "") or ""
+    except Exception:
+        user_id = ""
 
     # Get or create Stripe customer
     sb = get_client()
@@ -1119,8 +1140,11 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
             "line_items[0][quantity]": 1,
             "success_url": success_url,
             "cancel_url": cancel_url,
-            "client_reference_id": tid,
+            "client_reference_id": user_id or tid,
+            "metadata[tenant_id]": tid,
+            "metadata[user_id]": user_id,
             "subscription_data[metadata][tenant_id]": tid,
+            "subscription_data[metadata][user_id]": user_id,
         },
         timeout=10,
     )
@@ -1497,3 +1521,106 @@ def clear_error_reports(tenant_id: str = ""):
         sb.table("error_reports").delete().eq("tenant_id", tid).execute()
     except Exception:
         pass
+
+
+# ── Team / Invite System ───────────────────────────────────────────────────────
+
+def get_invite_code(tenant_id: str = "") -> str:
+    """Return the invite code for this tenant. Creates one if missing."""
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return ""
+    try:
+        sb = get_client()
+        r = sb.table("tenants").select("invite_code").eq("id", tid).execute()
+        code = (r.data[0].get("invite_code") or "") if r.data else ""
+        if not code:
+            # Generate via RPC
+            r2 = sb.rpc("regenerate_invite_code", {"p_tenant_id": tid}).execute()
+            code = r2.data or ""
+        return code
+    except Exception:
+        return ""
+
+
+def regenerate_invite_code(tenant_id: str = "") -> str:
+    """Rotate the tenant's invite code and return the new one."""
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return ""
+    try:
+        sb = get_client()
+        r = sb.rpc("regenerate_invite_code", {"p_tenant_id": tid}).execute()
+        return r.data or ""
+    except Exception:
+        return ""
+
+
+def get_team_members(tenant_id: str = "") -> list[dict]:
+    """Return all user_profiles for this tenant."""
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return []
+    try:
+        sb = get_client()
+        r = sb.table("user_profiles").select("id, name, role, created_at").eq("tenant_id", tid).order("created_at").execute()
+        return r.data or []
+    except Exception:
+        return []
+
+
+def remove_team_member(user_id: str, tenant_id: str = "") -> bool:
+    """Remove a user from this tenant (deletes their user_profile row).
+    Returns True on success."""
+    tid = tenant_id or get_tenant_id()
+    if not tid or not user_id:
+        return False
+    try:
+        sb = get_client()
+        sb.table("user_profiles").delete().eq("id", user_id).eq("tenant_id", tid).execute()
+        return True
+    except Exception:
+        return False
+
+
+def join_tenant_by_invite(user_id: str, invite_code: str, user_name: str = "") -> str:
+    """Join an existing tenant via invite code. Returns tenant_id on success, '' on failure."""
+    if not user_id or not invite_code:
+        return ""
+    try:
+        sb = get_client()
+        r = sb.rpc("join_tenant_by_invite", {
+            "p_user_id":     user_id,
+            "p_invite_code": invite_code.strip().lower(),
+            "p_user_name":   user_name,
+        }).execute()
+        return str(r.data) if r.data else ""
+    except Exception:
+        return ""
+
+
+def set_member_role(user_id: str, role: str, tenant_id: str = "") -> bool:
+    """Change a team member's role ('admin' or 'member')."""
+    tid = tenant_id or get_tenant_id()
+    if not tid or not user_id or role not in ("admin", "member"):
+        return False
+    try:
+        sb = get_client()
+        sb.table("user_profiles").update({"role": role}).eq("id", user_id).eq("tenant_id", tid).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_my_role(tenant_id: str = "") -> str:
+    """Return 'admin', 'member', or '' for the current user in this tenant."""
+    tid = tenant_id or get_tenant_id()
+    uid = get_user_id()
+    if not tid or not uid:
+        return ""
+    try:
+        sb = get_client()
+        r = sb.table("user_profiles").select("role").eq("id", uid).eq("tenant_id", tid).execute()
+        return (r.data[0].get("role") or "member") if r.data else ""
+    except Exception:
+        return ""
