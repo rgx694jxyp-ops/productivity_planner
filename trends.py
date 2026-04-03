@@ -169,14 +169,36 @@ def calculate_employee_rolling_average(
     Calculates 7-day rolling average UPH for each employee.
     Returns rows sorted by Employee, then Date.
     """
-    date_col = mapping.get("Date", "Date")
-    emp_col = mapping.get("EmployeeName", "EmployeeName")
-    uph_col = mapping.get("UPH", "UPH")
+    date_col = mapping.get("Date") or "Date"
+    emp_col = mapping.get("EmployeeName") or "EmployeeName"
+    uph_col = mapping.get("UPH") or "UPH"
 
     if not history:
         return []
 
     df = pd.DataFrame(history)
+
+    def _pick_col(preferred: str, fallbacks: list[str]) -> str:
+        if preferred and preferred in df.columns:
+            return preferred
+        for c in fallbacks:
+            if c in df.columns:
+                return c
+        return ""
+
+    date_col = _pick_col(date_col, ["Date", "work_date", "date"])
+    emp_col = _pick_col(emp_col, ["EmployeeName", "Employee", "name", "emp_id"])
+    uph_col = _pick_col(uph_col, ["UPH", "uph"])
+
+    if not date_col or not emp_col or not uph_col:
+        error_log.log(
+            "EmployeeRollingAverage",
+            0,
+            "missing column",
+            "Missing Date/Employee/UPH columns for rolling average calculation.",
+            f"resolved: date={date_col}, emp={emp_col}, uph={uph_col}",
+        )
+        return []
 
     # Ensure date is datetime
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')

@@ -528,12 +528,36 @@ def store_uph_history(emp_id: str, work_date: str, uph: float,
                       units: float, hours_worked: float,
                       department: str = "", order_id: str = None):
     """Insert or update a single UPH history record (dedup on tenant+emp+date+dept)."""
+    if not emp_id:
+        return
     sb = get_client()
+
+    # uph_history.emp_id references employees.id (bigint), so resolve text employee codes
+    # (e.g. E001) to the numeric row id when needed.
+    try:
+        emp_fk = int(str(emp_id).strip())
+    except Exception:
+        emp_fk = None
+    if emp_fk is None:
+        try:
+            emp_row = get_employee(str(emp_id).strip())
+            if emp_row and emp_row.get("id") is not None:
+                emp_fk = int(emp_row.get("id"))
+        except Exception:
+            emp_fk = None
+    if emp_fk is None:
+        log_error(
+            "uph_history",
+            f"Skipping UPH row for unresolved employee id: {emp_id}",
+            severity="warning",
+        )
+        return
+
     uph = _finite_float(uph)
     units = _finite_float(units)
     hours_worked = _finite_float(hours_worked)
     sb.table("uph_history").upsert({
-        "emp_id":       emp_id,
+        "emp_id":       emp_fk,
         "work_date":    work_date,
         "uph":          uph,
         "units":        units,
@@ -549,6 +573,60 @@ def batch_store_uph_history(records: list[dict]):
     Insert UPH history records in bulk (500 per chunk).
     Silently skips if a chunk fails (e.g. duplicates already stored).
     """
+    if not records:
+        return
+
+    # uph_history.emp_id is a bigint FK to employees.id. Imports often carry external
+    # employee codes (e.g. E001), so translate them to numeric ids before upsert.
+    _resolver_available = True
+    try:
+        _emp_rows = get_employees() or []
+    except Exception:
+        _emp_rows = []
+        _resolver_available = False
+    _emp_code_to_id = {}
+    _emp_id_to_id = {}
+    for _e in _emp_rows:
+        _rid = _e.get("id")
+        _code = _e.get("emp_id")
+        if _rid is None:
+            continue
+        try:
+            _rid_int = int(_rid)
+        except Exception:
+            continue
+        _emp_id_to_id[str(_rid_int)] = _rid_int
+        if _code not in (None, ""):
+            _emp_code_to_id[str(_code).strip()] = _rid_int
+
+    _normalized_records = []
+    _skipped_unresolved = 0
+    for _r in records:
+        _raw_emp = _r.get("emp_id")
+        _emp_fk = None
+        if _raw_emp not in (None, ""):
+            _raw_str = str(_raw_emp).strip()
+            try:
+                _emp_fk = int(_raw_str)
+            except Exception:
+                _emp_fk = _emp_code_to_id.get(_raw_str) or _emp_id_to_id.get(_raw_str)
+        if _emp_fk is None:
+            if _resolver_available:
+                _skipped_unresolved += 1
+                continue
+            # Fallback for non-queryable/mocked environments: preserve original value.
+            _normalized_records.append(_r)
+            continue
+        _normalized_records.append({**_r, "emp_id": _emp_fk})
+
+    if _skipped_unresolved:
+        log_error(
+            "uph_history",
+            f"Skipped {_skipped_unresolved} UPH row(s) with unresolved employee IDs",
+            severity="warning",
+        )
+
+    records = _normalized_records
     if not records:
         return
 
