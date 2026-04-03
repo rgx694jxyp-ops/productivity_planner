@@ -1344,18 +1344,19 @@ def render_sidebar() -> str:
             elif "setting" in goto:
                 st.session_state["_current_page_key"] = "settings"
 
-        current_key = st.session_state.get("_current_page_key", nav_keys[0])
-        if current_key not in nav_keys:
-            current_key = nav_keys[0]
+        # One-click nav: let the radio own its state via key= instead of resetting
+        # with index= on every rerun (which causes the double-click bug).
+        # The goto_page resolver above pre-sets _current_page_key when needed.
+        if st.session_state.get("_current_page_key") not in nav_keys:
+            st.session_state["_current_page_key"] = nav_keys[0]
 
         page = st.radio(
             "Navigation",
             nav_keys,
-            index=nav_keys.index(current_key),
             format_func=lambda k: nav_labels.get(k, k.title()),
             label_visibility="collapsed",
+            key="_current_page_key",
         )
-        st.session_state["_current_page_key"] = page
 
         st.divider()
         if st.button("↺ Refresh data", use_container_width=True, key="sb_refresh"):
@@ -1533,13 +1534,32 @@ def _calc_risk_level(emp, history):
 _calc_risk_level_shared = _calc_risk_level
 
 
+def _get_all_risk_levels(gs: list, history: list) -> dict:
+    """Compute risk levels for all below-goal employees once per render cycle.
+    Cached in session state by (len(gs), len(history)) so the expensive O(N*M)
+    history scan only runs once, regardless of how many render functions need it."""
+    _ver = (len(gs), len(history))
+    if st.session_state.get("_risk_cache_ver") == _ver:
+        return st.session_state.get("_risk_cache", {})
+    cache = {}
+    for row in gs:
+        if row.get("goal_status") == "below_goal":
+            emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
+            cache[emp_id] = _calc_risk_level(row, history)
+    st.session_state["_risk_cache"] = cache
+    st.session_state["_risk_cache_ver"] = _ver
+    return cache
+
+
 def _compute_priority_summary(gs: list[dict], history: list[dict]) -> dict:
     """Return lightweight action-oriented summary counts for header strips."""
     below = [r for r in gs if r.get("goal_status") == "below_goal"]
+    risk_cache = _get_all_risk_levels(gs, history)
     critical = 0
     quick_wins = 0
     for row in below:
-        risk_level, _, _ = _calc_risk_level(row, history)
+        emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
+        risk_level, _, _ = risk_cache.get(emp_id, ("🟢 Low", 0, {}))
         trend = row.get("trend", "")
         try:
             avg_uph = float(row.get("Average UPH", 0) or 0)
@@ -1587,13 +1607,14 @@ def _get_primary_recommendation(gs: list[dict], history: list[dict]) -> dict | N
     if not below:
         return None
 
+    risk_cache = _get_all_risk_levels(gs, history)
     candidates = []
     for row in below:
-        risk_level, risk_score, risk_details = _calc_risk_level(row, history)
+        emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
+        risk_level, risk_score, risk_details = risk_cache.get(emp_id, ("🟢 Low", 0, {}))
         trend = row.get("trend", "")
         name = row.get("Employee", row.get("Employee Name", "Unknown"))
         name = str(name) if name is not None else "Unknown"
-        emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
         dept = str(row.get("Department", "") or "")
 
         try:
@@ -1814,9 +1835,11 @@ def page_supervisor():
     _patterns = detect_department_patterns(gs)
     _coaching_activity = summarize_coaching_activity(_notes_by_emp, history)
 
+    _risk_cache_all = _get_all_risk_levels(gs, history)
     risk_summary = []
     for row in [r for r in gs if r.get("goal_status") == "below_goal"]:
-        _level, _score, _details = _calc_risk_level_shared(row, history)
+        _eid = str(row.get("EmployeeID", row.get("Employee Name", "")))
+        _level, _score, _details = _risk_cache_all.get(_eid, ("🟢 Low", 0, {}))
         risk_summary.append({"level": _level, "score": _score})
     high_priority_remaining = sum(1 for item in risk_summary if str(item["level"]).startswith("🔴"))
     medium_priority_remaining = sum(1 for item in risk_summary if str(item["level"]).startswith("🟡"))
@@ -1935,9 +1958,10 @@ def page_supervisor():
         st.success("✅ All employees meeting goals!")
     else:
         risk_list = []
+        _risk_cache_all = _get_all_risk_levels(gs, history)
         for emp in below_goal:
             emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
-            risk_level, risk_score, risk_details = _calc_risk_level_shared(emp, history)
+            risk_level, risk_score, risk_details = _risk_cache_all.get(emp_id, ("🟢 Low", 0, {}))
             
             # Get flagged info for context tags
             flagged_info = {}
@@ -2300,10 +2324,11 @@ def page_dashboard():
         return
 
     # Score all below-goal employees using shared risk calculator
+    _risk_cache_all = _get_all_risk_levels(gs, history)
     risk_list = []
     for emp in below_goal:
         emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
-        risk_level, risk_score, risk_details = _calc_risk_level(emp, history)
+        risk_level, risk_score, risk_details = _risk_cache_all.get(emp_id, ("🟢 Low", 0, {}))
         risk_list.append({
             "name": emp.get("Employee", emp.get("Employee Name", "Unknown")),
             "department": emp.get("Department", ""),
