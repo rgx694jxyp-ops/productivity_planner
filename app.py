@@ -1487,8 +1487,9 @@ def _get_primary_recommendation(gs: list[dict], history: list[dict]) -> dict | N
         risk_level, risk_score, risk_details = _calc_risk_level(row, history)
         trend = row.get("trend", "")
         name = row.get("Employee", row.get("Employee Name", "Unknown"))
+        name = str(name) if name is not None else "Unknown"
         emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
-        dept = row.get("Department", "")
+        dept = str(row.get("Department", "") or "")
 
         try:
             change_pct = float(row.get("change_pct", 0) or 0)
@@ -1561,9 +1562,12 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
     
     # Build display
     import html as _h
-    _name = _h.escape(adaptive["name"] if adaptive else rec["name"])
-    _dept = _h.escape(rec.get("department", ""))
-    _context = _h.escape(adaptive["context"] if adaptive and "context" in adaptive else rec.get("why", ""))
+    _name_raw = adaptive["name"] if adaptive else rec.get("name", "")
+    _dept_raw = rec.get("department", "")
+    _context_raw = adaptive["context"] if adaptive and "context" in adaptive else rec.get("why", "")
+    _name = _h.escape(str(_name_raw) if _name_raw is not None else "")
+    _dept = _h.escape(str(_dept_raw) if _dept_raw is not None else "")
+    _context = _h.escape(str(_context_raw) if _context_raw is not None else "")
     _dept_str = f" · {_dept}" if _dept else ""
     _n_remaining = len(remaining)
     
