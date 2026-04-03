@@ -1207,6 +1207,51 @@ st.html("""<link rel="preconnect" href="https://fonts.googleapis.com">
     height: 70px;
   }
 
+  /* ════════════════════════════════════════════════════════════
+     MICRO-INTERACTIONS — button press + page load feel
+  ════════════════════════════════════════════════════════════ */
+  .stButton > button {
+    transition: transform 0.08s ease, box-shadow 0.12s ease !important;
+  }
+  .stButton > button:active {
+    transform: scale(0.96) !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.18) !important;
+  }
+  /* Subtle fade-in on every page navigation */
+  .main .block-container {
+    animation: dpd-fadein 0.18s ease-out;
+  }
+  @keyframes dpd-fadein {
+    from { opacity: 0.4; transform: translateY(5px); }
+    to   { opacity: 1;   transform: translateY(0); }
+  }
+
+  /* All-done / shift-complete coaching state */
+  .dpd-shift-done {
+    background: linear-gradient(135deg, #E8F5E9 0%, #F1F8E9 100%);
+    border: 2px solid #43A047;
+    border-radius: 12px;
+    padding: 22px 24px;
+    text-align: center;
+    margin: 12px 0;
+  }
+  .dpd-shift-done-icon  { font-size: 28px; line-height: 1.4; }
+  .dpd-shift-done-title { font-size: 18px; font-weight: 800; color: #1B5E20; margin: 6px 0 3px; }
+  .dpd-shift-done-sub   { font-size: 13px; color: #388E3C; }
+
+  /* Import result confidence screen */
+  .dpd-import-done {
+    background: linear-gradient(135deg, #E3F2FD 0%, #E8F5E9 100%);
+    border-radius: 12px;
+    padding: 26px 30px;
+    border: 2px solid #43A047;
+    margin: 20px 0;
+  }
+  .dpd-import-done-title { font-size: 18px; font-weight: 800; color: #1B5E20; margin-bottom: 14px; }
+  .dpd-import-row { font-size: 14px; margin: 7px 0; }
+  .dpd-import-ok   { color: #2E7D32; font-weight: 700; }
+  .dpd-import-warn { color: #E65100; font-weight: 700; }
+
 </style>
 """)
 
@@ -2953,6 +2998,43 @@ def _import_step2():
 
 def _import_step3():
     """Step 3 — run the pipeline. Registers employees, calculates UPH, stores history."""
+    # ── Post-import confidence summary (shown once after pipeline completes) ──
+    if st.session_state.get("_import_complete_summary"):
+        _sm = st.session_state["_import_complete_summary"]
+        _ic_emp   = _sm.get("emp_count", 0)
+        _ic_days  = _sm.get("days", 1)
+        _ic_below = _sm.get("below", 0)
+        _ic_risks = _sm.get("risks", 0)
+        _ic_rank  = _sm.get("ranked", 0)
+        _ic_below_line = (
+            f'<div class="dpd-import-row"><span class="dpd-import-warn">⚠</span>&nbsp;'
+            f'<strong>{_ic_below}</strong> employees below goal &nbsp;·&nbsp; {_ic_risks} high-priority risks</div>'
+            if _ic_below > 0 else
+            f'<div class="dpd-import-row"><span class="dpd-import-ok">✔</span>&nbsp;All employees on target</div>'
+        )
+        st.markdown(
+            f'<div class="dpd-import-done">'
+            f'<div class="dpd-import-done-title">✔ Import complete — you\'re ready</div>'
+            f'<div class="dpd-import-row"><span class="dpd-import-ok">✔</span>&nbsp;'
+            f'<strong>{_ic_emp}</strong> employees loaded &nbsp;·&nbsp; {_ic_rank} ranked</div>'
+            f'<div class="dpd-import-row"><span class="dpd-import-ok">✔</span>&nbsp;'
+            f'<strong>{_ic_days}</strong> {"day" if _ic_days == 1 else "days"} of data</div>'
+            f'{_ic_below_line}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        _ic_c1, _ic_c2 = st.columns(2)
+        if _ic_c1.button("→ Start your day", type="primary", use_container_width=True, key="ic_start_day"):
+            del st.session_state["_import_complete_summary"]
+            st.session_state["goto_page"] = "supervisor"
+            st.rerun()
+        if _ic_c2.button("↺ Import more data", use_container_width=True, key="ic_import_more"):
+            del st.session_state["_import_complete_summary"]
+            st.session_state.import_step = 1
+            st.session_state.uploaded_sessions = []
+            st.rerun()
+        return
+
     sessions = st.session_state.uploaded_sessions
     if not sessions:
         st.session_state.import_step = 1
@@ -3399,8 +3481,17 @@ def _import_step3():
             })
             bar.progress(100, text="Done!")
             _unique_emp_count = len({r["emp_id"] for r in alloc_rows})
-            st.toast(f"✓ {_ranked_count} employees ranked · {_unique_emp_count} employees processed", icon="✅")
-            st.session_state.goto_page = "productivity"
+            _gs_final   = st.session_state.get("goal_status", [])
+            _below_final = len([r for r in _gs_final if r.get("goal_status") == "below_goal"])
+            _risks_final = len([r for r in _gs_final
+                                 if r.get("goal_status") == "below_goal" and r.get("trend") == "down"])
+            st.session_state["_import_complete_summary"] = {
+                "emp_count": _unique_emp_count,
+                "ranked":    _ranked_count,
+                "below":     _below_final,
+                "risks":     _risks_final,
+                "days":      _estimated_days,
+            }
             st.rerun()
 
         except Exception as _pipe_err:
@@ -3865,6 +3956,57 @@ def _emp_coaching():
             emp_name = selected_emp["name"]
             emp_dept = selected_emp.get("department","")
 
+            # ── Post-save feedback (persists across rerun once via session_state) ──
+            _cn_fb = st.session_state.get("_cn_feedback")
+            if _cn_fb and _cn_fb.get("emp_id") == emp_id:
+                st.session_state.pop("_cn_feedback", None)  # show once then clear
+                _fb_coached   = _cn_fb["coached_today"]
+                _fb_remaining = _cn_fb["remaining"]
+                _fb_emp_safe  = str(_cn_fb["emp_name"])[:40]
+                if _fb_remaining == 0:
+                    st.markdown(
+                        '<div class="dpd-shift-done">'
+                        '<div class="dpd-shift-done-icon">🎉</div>'
+                        '<div class="dpd-shift-done-title">All caught up!</div>'
+                        '<div class="dpd-shift-done-sub">Every below-goal employee has been coached today.</div>'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("↩ Back to Supervisor", key="fb_done_sup", use_container_width=True):
+                        st.session_state["goto_page"] = "supervisor"
+                        st.rerun()
+                else:
+                    _pl = "employee" if _fb_remaining == 1 else "employees"
+                    # Find next highest-risk below-goal employee
+                    _nxt_gs = sorted(
+                        [r for r in st.session_state.get("goal_status", [])
+                         if r.get("goal_status") == "below_goal"
+                         and str(r.get("EmployeeID", r.get("Employee Name", ""))) != str(emp_id)],
+                        key=lambda x: float(x.get("risk_score", 0) or 0),
+                        reverse=True,
+                    )
+                    _nxt_id   = str(_nxt_gs[0].get("EmployeeID", _nxt_gs[0].get("Employee Name", ""))) if _nxt_gs else None
+                    _nxt_name = str(_nxt_gs[0].get("Employee", _nxt_gs[0].get("Employee Name", "next")))[:24] if _nxt_gs else "next"
+                    st.markdown(
+                        f'<div style="background:linear-gradient(90deg,#E8F5E9 0%,#E3F2FD 100%);'
+                        f'border-left:4px solid #43A047;border-radius:8px;padding:14px 16px;margin-bottom:10px;">'
+                        f'<span style="font-size:14px;font-weight:700;color:#1B5E20;">'
+                        f'✔ Coaching saved for {_html_mod.escape(_fb_emp_safe)}</span><br>'
+                        f'<span style="font-size:13px;color:#2E7D32;">'
+                        f'⚠ {_fb_remaining} {_pl} remaining &nbsp;·&nbsp; {_fb_coached} coached today</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                    _fb_c1, _fb_c2 = st.columns(2)
+                    if _nxt_id and _fb_c1.button(
+                        f"→ {_nxt_name}", key="fb_next_emp", type="primary", use_container_width=True
+                    ):
+                        st.session_state["cn_selected_emp"] = _nxt_id
+                        st.rerun()
+                    if _fb_c2.button("↩ Supervisor", key="fb_to_sup", use_container_width=True):
+                        st.session_state["goto_page"] = "supervisor"
+                        st.rerun()
+
             # ── Header ────────────────────────────────────────────────────────
             is_flagged = emp_id in flags
             hc1, hc2 = st.columns([4, 1])
@@ -3921,9 +4063,9 @@ def _emp_coaching():
             # ── Add entry ────────────────────────────────────────────────────
             if "cn_note_val" not in st.session_state: st.session_state.cn_note_val = ""
             if "cn_by_val"   not in st.session_state: st.session_state.cn_by_val   = ""
-            note_text  = st.text_area("Add a journal entry", height=90, key="cn_note",
+            note_text  = st.text_area("Add a journal entry", height=130, key="cn_note",
                                        value=st.session_state.cn_note_val,
-                                       placeholder="Performance observation, coaching session, follow-up…")
+                                       placeholder="What did you discuss? What's the plan? Any follow-up needed?")
             nc1, nc2 = st.columns([2, 3])
             created_by = nc2.text_input("Your name (optional)", key="cn_by",
                                          value=st.session_state.cn_by_val,
@@ -3945,63 +4087,74 @@ def _emp_coaching():
                         and str(r.get("EmployeeID", r.get("Employee Name", ""))) != str(emp_id)
                     ]
                     _n_rem = len(_remaining_risk)
-                    # Use enhanced feedback UI
-                    _enhance_coaching_feedback(emp_name, emp_id, _n_rem)
+                    # Store feedback in session_state — survives rerun and shows
+                    # on the very next render so the user sees real context.
+                    st.session_state["_cn_feedback"] = {
+                        "emp_name": emp_name,
+                        "emp_id": emp_id,
+                        "remaining": _n_rem,
+                        "coached_today": int(st.session_state.get("_coached_today", 0)),
+                    }
                     st.rerun()
                 else:
                     st.warning("Write something before saving the entry.")
 
-            # ── Past entries ─────────────────────────────────────────────────
+            # ── Past entries (collapsed to reduce visual noise, expand on demand) ─
             notes = _cached_coaching_notes_for(emp_id)
             st.divider()
-            if notes:
-                st.caption(f"{len(notes)} journal entry/entries on file")
-                for n in notes:
-                    with st.container():
-                        nc1, nc2 = st.columns([10, 1])
-                        _n_date = _html_mod.escape(str(n.get('created_at',''))[:10])
-                        _n_by = _html_mod.escape(n.get('created_by',''))
-                        _n_text = _html_mod.escape(n.get('note',''))
-                        nc1.markdown(
-                            f"<div style='background:#F7F9FC;border-left:3px solid #0F2D52;"
-                            f"border-radius:4px;padding:8px 12px;margin-bottom:4px;'>"
-                            f"<span style='color:#5A7A9C;font-size:11px;'>"
-                            f"{_n_date}"
-                            f"{'  ·  ' + _n_by if _n_by else ''}</span>"
-                            f"<br><span style='color:#1A2D42;font-size:13px;'>{_n_text}</span>"
-                            f"</div>",
-                            unsafe_allow_html=True)
-                        note_id = n.get("id")
-                        if note_id and nc2.button("🗑", key=f"del_{note_id}", help="Delete"):
-                            delete_coaching_note(str(note_id))
-                            _raw_cached_coaching_notes_for.clear()
-                            _raw_cached_all_coaching_notes.clear()
-                            st.rerun()
-
-                # Actions row
-                st.divider()
-                ac1, ac2 = st.columns(2)
-                if ac1.button("⬇️ Export journal", key="cn_export", use_container_width=True):
-                    buf = io.BytesIO()
-                    pd.DataFrame([{
-                        "Date": str(n.get("created_at",""))[:10],
-                        "Note": n.get("note",""),
-                        "By":   n.get("created_by",""),
-                    } for n in notes]).to_excel(buf, index=False, sheet_name="Journal")
-                    buf.seek(0)
-                    ac1.download_button(f"⬇️ Download", buf.read(),
-                                        f"{emp_id}_journal_{date.today()}.xlsx",
-                                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                        key="cn_dl", use_container_width=True)
-                if ac2.button("📦 Archive all entries", key="cn_archive",
-                               use_container_width=True, type="secondary"):
-                    archive_coaching_notes(emp_id)
-                    _raw_cached_coaching_notes_for.clear()
-                    _raw_cached_all_coaching_notes.clear()
-                    st.session_state.pop("cn_selected_emp", None)
-                    st.rerun()
+            _n_count = len(notes)
+            if _n_count == 1:
+                _notes_lbl = "📋 1 past entry — click to view"
+            elif _n_count > 1:
+                _notes_lbl = f"📋 {_n_count} past entries — click to view"
             else:
-                st.caption("No journal entries yet — add one above.")
+                _notes_lbl = "📋 No past entries yet"
+            with st.expander(_notes_lbl, expanded=(_n_count > 0 and _n_count <= 2)):
+                if notes:
+                    for n in notes:
+                        with st.container():
+                            nc1, nc2 = st.columns([10, 1])
+                            _n_date = _html_mod.escape(str(n.get('created_at',''))[:10])
+                            _n_by = _html_mod.escape(n.get('created_by',''))
+                            _n_text = _html_mod.escape(n.get('note',''))
+                            nc1.markdown(
+                                f"<div style='background:#F7F9FC;border-left:3px solid #0F2D52;"
+                                f"border-radius:4px;padding:8px 12px;margin-bottom:4px;'>"
+                                f"<span style='color:#5A7A9C;font-size:11px;'>"
+                                f"{_n_date}"
+                                f"{'  ·  ' + _n_by if _n_by else ''}</span>"
+                                f"<br><span style='color:#1A2D42;font-size:13px;'>{_n_text}</span>"
+                                f"</div>",
+                                unsafe_allow_html=True)
+                            note_id = n.get("id")
+                            if note_id and nc2.button("🗑", key=f"del_{note_id}", help="Delete"):
+                                delete_coaching_note(str(note_id))
+                                _raw_cached_coaching_notes_for.clear()
+                                _raw_cached_all_coaching_notes.clear()
+                                st.rerun()
+                    st.divider()
+                    ac1, ac2 = st.columns(2)
+                    if ac1.button("⬇️ Export journal", key="cn_export", use_container_width=True):
+                        buf = io.BytesIO()
+                        pd.DataFrame([{
+                            "Date": str(n.get("created_at",""))[:10],
+                            "Note": n.get("note",""),
+                            "By":   n.get("created_by",""),
+                        } for n in notes]).to_excel(buf, index=False, sheet_name="Journal")
+                        buf.seek(0)
+                        ac1.download_button("⬇️ Download", buf.read(),
+                                            f"{emp_id}_journal_{date.today()}.xlsx",
+                                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            key="cn_dl", use_container_width=True)
+                    if ac2.button("📦 Archive all entries", key="cn_archive",
+                                   use_container_width=True, type="secondary"):
+                        archive_coaching_notes(emp_id)
+                        _raw_cached_coaching_notes_for.clear()
+                        _raw_cached_all_coaching_notes.clear()
+                        st.session_state.pop("cn_selected_emp", None)
+                        st.rerun()
+                else:
+                    st.caption("No journal entries yet — add one above.")
 
 
 
