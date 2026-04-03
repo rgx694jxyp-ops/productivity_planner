@@ -1376,8 +1376,13 @@ def render_sidebar() -> str:
         )
         try:
             from database import get_employee_count, get_employee_limit
-            _emp_count = get_employee_count()
-            _emp_limit = get_employee_limit()
+            _ec_ts = float(st.session_state.get("_emp_count_ts", 0) or 0)
+            if (time.time() - _ec_ts) > 300 or "_emp_count_cache" not in st.session_state:
+                st.session_state["_emp_count_cache"] = get_employee_count()
+                st.session_state["_emp_limit_cache"] = get_employee_limit()
+                st.session_state["_emp_count_ts"] = time.time()
+            _emp_count = st.session_state["_emp_count_cache"]
+            _emp_limit = st.session_state["_emp_limit_cache"]
             _limit_str = "unlimited" if _emp_limit == -1 else str(_emp_limit)
             st.markdown(
                 f'<div style="font-size:10px;color:#7FA8CC;margin-bottom:8px;">'
@@ -8241,16 +8246,22 @@ def main():
         st.session_state["_sub_active"] = True
 
     if not st.session_state.get("_sub_active"):
-        try:
-            from database import has_active_subscription
-            if has_active_subscription():
-                st.session_state["_sub_active"] = True
-            else:
-                _subscription_page()
-                st.stop()
-        except Exception as _sub_err:
-            # If subscription check fails (table missing, etc.), let user through
+        # Cache result in session so it only hits the DB once per login, not every nav click
+        _sub_check_ts = float(st.session_state.get("_sub_check_ts", 0) or 0)
+        _sub_cached = st.session_state.get("_sub_check_result")
+        if _sub_cached is None or (time.time() - _sub_check_ts) > 300:
+            try:
+                from database import has_active_subscription
+                _sub_cached = has_active_subscription()
+            except Exception:
+                _sub_cached = True  # let through on error
+            st.session_state["_sub_check_result"] = _sub_cached
+            st.session_state["_sub_check_ts"] = time.time()
+        if _sub_cached:
             st.session_state["_sub_active"] = True
+        else:
+            _subscription_page()
+            st.stop()
 
     # Start background email thread only when scheduling is enabled.
     if EMAIL_SCHEDULER_ENABLED:
