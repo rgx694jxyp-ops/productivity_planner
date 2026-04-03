@@ -7285,7 +7285,7 @@ def _login_page():
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-_SESSION_TIMEOUT_SECONDS = 3600  # 1 hour idle timeout
+_SESSION_TIMEOUT_SECONDS = 28800  # 8 hour idle timeout
 
 
 def _check_session_timeout():
