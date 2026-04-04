@@ -23,7 +23,17 @@ from app import (
     time,
     traceback,
 )
-from pages.common import _normalize_label_text
+try:
+    from pages.common import _normalize_label_text
+except Exception:
+    def _normalize_label_text(value, max_len: int = 64) -> str:
+        s = str(value or "").replace("\x00", " ").strip()
+        s = " ".join(s.split())
+        s = s.replace("|", " ").replace("<", " ").replace(">", " ")
+        s = s.strip(" '\"")
+        if len(s) > max_len:
+            s = s[: max_len - 3].rstrip() + "..."
+        return s or "Unknown"
 from pages.employees import _build_archived_productivity
 
 def page_productivity():

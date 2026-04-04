@@ -80,6 +80,14 @@ def apply_global_styles():
     border: 1px solid #C5D4E8 !important;
   }
 
+  [data-testid="stSidebar"] .stButton > button,
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-secondary"] {
+    background-color: #E8EEF6 !important;
+    color: #0F2D52 !important;
+    border: 1px solid #AFC3DA !important;
+    font-weight: 600 !important;
+  }
+
   .stTabs [data-baseweb="tab-list"] { border-bottom: 2px solid #E2EBF4 !important; gap: 2px; }
   .stTabs [data-baseweb="tab"] {
     font-size: 12px !important; font-weight: 500 !important;
@@ -127,6 +135,12 @@ def apply_global_styles():
   }
   [data-testid="stFileUploaderDropzone"] * {
     color: #ffffff !important;
+  }
+  [data-testid="stFileUploaderDropzone"] button {
+    background: #4DA3FF !important;
+    color: #01223F !important;
+    border: none !important;
+    font-weight: 700 !important;
   }
 
   .dpd-rail {

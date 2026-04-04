@@ -21,7 +21,11 @@ from app import (
     traceback,
     translate_to_floor_language,
 )
-from pages.common import _build_coaching_recommendations
+try:
+    from pages.common import _build_coaching_recommendations
+except Exception:
+    def _build_coaching_recommendations():
+        return []
 
 
 def _normalize_label_text(value, max_len: int = 64) -> str:
