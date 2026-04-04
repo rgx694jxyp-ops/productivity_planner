@@ -83,9 +83,15 @@ def apply_global_styles():
   [data-testid="stSidebar"] .stButton > button,
   [data-testid="stSidebar"] button[data-testid="stBaseButton-secondary"] {
     background-color: #E8EEF6 !important;
-    color: #0F2D52 !important;
+    color: #000000 !important;
     border: 1px solid #AFC3DA !important;
     font-weight: 600 !important;
+  }
+  [data-testid="stSidebar"] .stButton > button p,
+  [data-testid="stSidebar"] .stButton > button span,
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-secondary"] p,
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-secondary"] span {
+    color: #000000 !important;
   }
 
   .stTabs [data-baseweb="tab-list"] { border-bottom: 2px solid #E2EBF4 !important; gap: 2px; }

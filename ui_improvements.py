@@ -52,6 +52,9 @@ def diagnose_upload(pending_files: list[dict]) -> dict:
         all_rows.extend(rows)
         
         for row in rows:
+            if not isinstance(row, dict):
+                warnings.append("Some uploaded rows could not be parsed cleanly and were skipped during diagnosis")
+                continue
             # Extract info
             if row.get("Date") or row.get("work_date") or row.get("date"):
                 try:

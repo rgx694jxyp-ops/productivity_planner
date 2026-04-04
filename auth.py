@@ -6,6 +6,7 @@ import streamlit as st
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 900
 SESSION_TIMEOUT_SECONDS = 28800
+MAX_SESSION_LIFETIME_SECONDS = 43200
 
 
 def render_sign_out_button(key_prefix: str, *, type: str = "secondary", use_container_width: bool = False) -> bool:
@@ -27,15 +28,17 @@ def render_sign_out_button(key_prefix: str, *, type: str = "secondary", use_cont
     return False
 
 
-def set_auth_cookies(access_token: str, refresh_token: str, max_age: int = 1209600):
+def set_auth_cookies(access_token: str, refresh_token: str, max_age: int = MAX_SESSION_LIFETIME_SECONDS):
     from urllib.parse import quote as _quote
 
     _at = _quote(access_token or "", safe="")
     _rt = _quote(refresh_token or "", safe="")
+    _ts = str(int(time.time()))
     st.components.v1.html(
         "<script>"
         f"document.cookie = 'dpd_at={_at}; path=/; max-age={int(max_age)}; SameSite=Lax';"
         f"document.cookie = 'dpd_rt={_rt}; path=/; max-age={int(max_age)}; SameSite=Lax';"
+        f"document.cookie = 'dpd_auth_ts={_ts}; path=/; max-age={int(max_age)}; SameSite=Lax';"
         "</script>",
         height=0,
     )
@@ -46,6 +49,7 @@ def clear_auth_cookies():
         "<script>"
         "document.cookie = 'dpd_at=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
         "document.cookie = 'dpd_rt=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
+        "document.cookie = 'dpd_auth_ts=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
         "</script>",
         height=0,
     )
@@ -61,7 +65,15 @@ def restore_session_from_cookies() -> bool:
         _cookies = st.context.cookies
         _at = _unquote(_cookies.get("dpd_at", "") or "")
         _rt = _unquote(_cookies.get("dpd_rt", "") or "")
+        _auth_ts_raw = _cookies.get("dpd_auth_ts", "") or ""
+        try:
+            _auth_ts = float(_auth_ts_raw)
+        except (TypeError, ValueError):
+            _auth_ts = 0.0
         if not _at or not _rt:
+            return False
+        if not _auth_ts or (time.time() - _auth_ts) > MAX_SESSION_LIFETIME_SECONDS:
+            clear_auth_cookies()
             return False
 
         from database import get_supabase_credentials
@@ -88,6 +100,8 @@ def restore_session_from_cookies() -> bool:
             "access_token": _new_at,
             "refresh_token": _new_rt,
         }
+        st.session_state["_session_started_at"] = _auth_ts
+        st.session_state["_last_activity"] = time.time()
         st.session_state["_sb_token_expires_at"] = _expires_at
         st.session_state["tenant_id"] = _prof.get("tenant_id", "")
         st.session_state["user_role"] = _prof.get("role", "member")
@@ -240,6 +254,8 @@ def login_page(bust_cache_cb, log_app_error_cb):
                 _at = resp.session.access_token
                 _rt = resp.session.refresh_token
                 st.session_state["supabase_session"] = {"access_token": _at, "refresh_token": _rt}
+                st.session_state["_session_started_at"] = time.time()
+                st.session_state["_last_activity"] = time.time()
                 set_auth_cookies(_at, _rt)
                 st.session_state["_sb_token_expires_at"] = (
                     resp.session.expires_at if hasattr(resp.session, "expires_at") and resp.session.expires_at else time.time() + 3600
@@ -300,8 +316,15 @@ def login_page(bust_cache_cb, log_app_error_cb):
 
 def check_session_timeout() -> bool:
     now = time.time()
+    session_started_at = float(st.session_state.get("_session_started_at", now) or now)
     last_activity = st.session_state.get("_last_activity", now)
+    if now - session_started_at > MAX_SESSION_LIFETIME_SECONDS:
+        clear_auth_cookies()
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        return True
     if now - last_activity > SESSION_TIMEOUT_SECONDS:
+        clear_auth_cookies()
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         return True

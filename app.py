@@ -1066,11 +1066,16 @@ def show_landing_page():
 
 def main():
     if st.query_params.get("logout") == "1":
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         _clear_auth_cookies()
-        try:
-            del st.query_params["logout"]
-        except Exception:
-            st.query_params.clear()
+        st.session_state["show_login"] = False
+        st.markdown("Signing you out…")
+        st.components.v1.html(
+            "<script>window.setTimeout(function(){ window.location.replace(window.location.origin + window.location.pathname); }, 150);</script>",
+            height=0,
+        )
+        st.stop()
 
     # ── Landing CTA query actions ─────────────────────────────────────────
     if st.query_params.get("start") == "1":
@@ -1143,9 +1148,8 @@ def main():
     _user_email = st.session_state.get("user_email", "").lower()
     if _user_email and _user_email in _admin_emails:
         st.session_state["_sub_active"] = True
-
-    if not st.session_state.get("_sub_active"):
-        # Cache result in session so it only hits the DB once per login, not every nav click
+    else:
+        # Revalidate periodically so long-lived sessions cannot keep stale access.
         _sub_check_ts = float(st.session_state.get("_sub_check_ts", 0) or 0)
         _sub_cached = st.session_state.get("_sub_check_result")
         if _sub_cached is None or (time.time() - _sub_check_ts) > 300:
@@ -1153,12 +1157,12 @@ def main():
                 from database import has_active_subscription
                 _sub_cached = has_active_subscription()
             except Exception:
-                _sub_cached = True  # let through on error
+                _sub_cached = True  # let through on transient check errors
             st.session_state["_sub_check_result"] = _sub_cached
             st.session_state["_sub_check_ts"] = time.time()
-        if _sub_cached:
-            st.session_state["_sub_active"] = True
-        else:
+
+        st.session_state["_sub_active"] = bool(_sub_cached)
+        if not _sub_cached:
             _subscription_page()
             st.stop()
 
