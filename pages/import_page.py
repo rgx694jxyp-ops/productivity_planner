@@ -278,10 +278,15 @@ def page_import():
     st.markdown(
         """
         <style>
-        div[data-testid="stExpander"] summary p {
+        /* Top-level expanders: black text when collapsed, white when expanded */
+        div[data-testid="stExpander"] details:not([open]) > summary p {
+            color: #000000 !important;
+        }
+        div[data-testid="stExpander"] details[open] > summary p {
             color: #ffffff !important;
         }
-        div[data-testid="stExpander"] div[data-testid="stExpander"] summary p {
+        /* Nested upload-entry expanders: always black */
+        div[data-testid="stExpander"] div[data-testid="stExpander"] details summary p {
             color: #000000 !important;
         }
         </style>
@@ -1030,39 +1035,42 @@ def _import_step3():
             })
             _dmin = _dates[0] if _dates else ""
             _dmax = _dates[-1] if _dates else ""
-            _existing_exact = set()
-            if _dmin and _dmax and _emp_ids:
+            # Use integer emp_ids only — strings silently fail against bigint column
+            _emp_ids_int = sorted({
+                int(_rid)
+                for _rid in _emp_ids
+                if str(_rid).lstrip("-").isdigit()
+            })
+            # 3-tuple duplicate check: (emp_code, work_date, department)
+            # Numeric value comparison fails when stored values differ by tiny
+            # floating point amounts after multiple upsert cycles.
+            _existing_3key = set()
+            if _dmin and _dmax and _emp_ids_int:
                 _sb = _db_get_client()
                 _res = _db_tq(
                     _sb.table("uph_history")
-                    .select("emp_id, work_date, uph, units, hours_worked, department")
+                    .select("emp_id, work_date, department")
                     .eq("tenant_id", _tenant_id)
                     .gte("work_date", _dmin)
                     .lte("work_date", _dmax)
-                    .in_("emp_id", _emp_ids)
+                    .in_("emp_id", _emp_ids_int)
                 ).execute()
                 for _er in (_res.data or []):
-                    _er_emp_raw = str(_er.get("emp_id", ""))
-                    _er_emp_code = _rowid_to_code.get(_er_emp_raw, _er_emp_raw)
-                    _existing_exact.add((
-                        _er_emp_code,
-                        str(_er.get("work_date", "")),
-                        str(_er.get("department", "") or ""),
-                        round(float(_er.get("uph") or 0), 4),
-                        round(float(_er.get("units") or 0), 4),
-                        round(float(_er.get("hours_worked") or 0), 4),
-                    ))
+                    _er_code = _rowid_to_code.get(str(_er.get("emp_id", "")), None)
+                    if _er_code:
+                        _existing_3key.add((
+                            _er_code,
+                            str(_er.get("work_date", "")),
+                            str(_er.get("department", "") or ""),
+                        ))
 
             for _r in _candidate_preview_rows:
-                _k = (
+                _k3 = (
                     _emp_code(_r.get("emp_id", "")),
                     str(_r.get("work_date", "")),
                     str(_r.get("department", "") or ""),
-                    round(float(_r.get("uph") or 0), 4),
-                    round(float(_r.get("units") or 0), 4),
-                    round(float(_r.get("hours_worked") or 0), 4),
                 )
-                if _k in _existing_exact:
+                if _k3 in _existing_3key:
                     _preview_dup_count += 1
 
             _preview_exact_duplicate_import = (
@@ -1466,67 +1474,52 @@ def _import_step3():
                     )
                     for _r in uph_batch
                 }
-                _existing_keys = set()
-                _existing_rows_by_key3 = {}
-                if _tenant_id and _date_min and _date_max and _emp_ids:
+                # Use integer emp_ids — strings silently fail against bigint column
+                _emp_ids_int = sorted({
+                    int(_rid)
+                    for _rid in _emp_ids
+                    if str(_rid).lstrip("-").isdigit()
+                })
+                # 3-tuple duplicate check: skip row if (emp_code, date, dept) already
+                # exists in DB regardless of stored values. Avoids false "new" rows
+                # caused by floating point drift after multiple upsert cycles.
+                _existing_3key = set()
+                if _tenant_id and _date_min and _date_max and _emp_ids_int:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
                     _res = _db_tq(
                         _sb.table("uph_history")
-                        .select("emp_id, work_date, uph, units, hours_worked, department")
+                        .select("emp_id, work_date, department")
                         .eq("tenant_id", _tenant_id)
                         .gte("work_date", _date_min)
                         .lte("work_date", _date_max)
-                        .in_("emp_id", _emp_ids)
+                        .in_("emp_id", _emp_ids_int)
                     ).execute()
                     for _er in (_res.data or []):
-                        _key3 = (
-                            str(_er.get("emp_id", "")),
-                            str(_er.get("work_date", "")),
-                            str(_er.get("department", "") or ""),
-                        )
-                        if _key3 in _candidate_touched and _key3 not in _existing_rows_by_key3:
-                            _existing_rows_by_key3[_key3] = {
-                                "emp_id": _er.get("emp_id"),
-                                "work_date": _er.get("work_date"),
-                                "uph": _er.get("uph"),
-                                "units": _er.get("units"),
-                                "hours_worked": _er.get("hours_worked"),
-                                "department": _er.get("department", ""),
-                            }
-                        _existing_keys.add((
-                            _rowid_to_code.get(str(_er.get("emp_id", "")), str(_er.get("emp_id", ""))),
-                            str(_er.get("work_date", "")),
-                            str(_er.get("department", "") or ""),
-                            round(float(_er.get("uph") or 0), 4),
-                            round(float(_er.get("units") or 0), 4),
-                            round(float(_er.get("hours_worked") or 0), 4),
-                        ))
+                        _er_code = _rowid_to_code.get(str(_er.get("emp_id", "")), None)
+                        if _er_code:
+                            _existing_3key.add((
+                                _er_code,
+                                str(_er.get("work_date", "")),
+                                str(_er.get("department", "") or ""),
+                            ))
 
                 _filtered_batch = []
-                _undo_prev_seen = set()
                 _inserted_key3 = set()
                 for _r in uph_batch:
                     _key_emp = str(_db_emp_key(_r.get("emp_id", "")))
                     _key_date = str(_r.get("work_date", ""))
                     _key_dept = str(_r.get("department", "") or "")
-                    _key = (
+                    _k3 = (
                         _cmp_emp_code(_r.get("emp_id", "")),
                         _key_date,
                         _key_dept,
-                        round(float(_r.get("uph") or 0), 4),
-                        round(float(_r.get("units") or 0), 4),
-                        round(float(_r.get("hours_worked") or 0), 4),
                     )
-                    if _key in _existing_keys:
+                    if _k3 in _existing_3key:
                         _dup_skipped += 1
                         continue
-                    _k3 = (_key_emp, _key_date, _key_dept)
-                    if _k3 in _existing_rows_by_key3 and _k3 not in _undo_prev_seen:
-                        _undo_previous_rows.append(_existing_rows_by_key3[_k3])
-                        _undo_prev_seen.add(_k3)
                     _filtered_batch.append(_r)
-                    _inserted_key3.add(_k3)
+                    _inserted_key3.add((_key_emp, _key_date, _key_dept))
                 uph_batch = _filtered_batch
                 _undo_touched_keys = [list(_k) for _k in sorted(_inserted_key3)]
                 _exact_duplicate_import = (_candidate_count > 0 and _dup_skipped == _candidate_count)
@@ -1552,11 +1545,10 @@ def _import_step3():
                     try:
                         from database import get_client as _db_get_client, _tq as _db_tq
                         _sb_pk = _db_get_client()
-                        # Only rows that were NOT overwrites need a PK for deletion
+                        # All touched keys are new inserts (skipped rows are never upserted)
                         _new_keys_set = {
                             (str(_k[0]), str(_k[1]), str(_k[2]))
                             for _k in _undo_touched_keys
-                            if tuple(_k) not in _existing_rows_by_key3
                         }
                         if _new_keys_set:
                             _pk_emp_ids = []
