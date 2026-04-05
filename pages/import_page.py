@@ -161,7 +161,7 @@ def _import_step1():
                 st.error(f"Could not read **{f.name}** as an Excel file: {_xlsx_err}")
                 continue
         else:
-            rows, headers = _parse_csv(raw_bytes)
+            headers, rows = _parse_csv(raw_bytes)
         if not headers:
             st.error(
                 f"**{f.name}** could not be parsed as a valid CSV header row. "
