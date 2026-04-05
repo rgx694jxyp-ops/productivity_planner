@@ -1258,6 +1258,12 @@ def main():
     if st.query_params.get("portal") == "return":
         st.query_params.clear()
         st.session_state.pop("_sub_active", None)
+        st.session_state.pop("_sub_check_result", None)
+        st.session_state.pop("_sub_check_ts", None)
+        st.session_state.pop("_banner_sub", None)
+        st.session_state.pop("_banner_sub_ts", None)
+        st.session_state.pop("_current_plan", None)
+        st.session_state.pop("_current_plan_ts", None)
         st.session_state.pop("_portal_synced_plan", None)
         _bust_cache()
         with st.spinner("Refreshing your subscription…"):
