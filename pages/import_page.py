@@ -176,6 +176,27 @@ def _deactivate_upload(upload_id, payload: dict | None = None) -> None:
     except Exception:
         pass
 
+
+def _get_upload_by_id(upload_id):
+    try:
+        from database import get_client as _db_get_client, _tq as _db_tq
+
+        _tenant_id = st.session_state.get("tenant_id", "")
+        if not _tenant_id or not upload_id:
+            return None
+        _sb = _db_get_client()
+        _res = _db_tq(
+            _sb.table("uploaded_files")
+            .select("id, filename, row_count, header_mapping, is_active, created_at")
+            .eq("id", upload_id)
+            .eq("tenant_id", _tenant_id)
+            .limit(1)
+        ).execute()
+        _rows = _res.data or []
+        return _rows[0] if _rows else None
+    except Exception:
+        return None
+
 def page_import():
     st.title("📁 Import Data")
 
@@ -620,16 +641,24 @@ def _import_step3():
             return False
 
         try:
+            _upload_id = _undo.get("upload_id")
             _tenant_id = str(_undo.get("tenant_id", "") or "")
+            _payload = {}
+
+            if _upload_id:
+                _upload_row = _get_upload_by_id(_upload_id)
+                _payload = _decode_jsonish((_upload_row or {}).get("header_mapping")) if _upload_row else {}
+            else:
+                _payload = _decode_jsonish(_undo.get("upload_payload") or {})
+
+            _undo_data = _payload.get("undo", {}) if isinstance(_payload, dict) else {}
             _restore_uph_snapshot(
                 _tenant_id,
-                _undo.get("touched_keys", []) or [],
-                _undo.get("previous_rows", []) or [],
+                _undo_data.get("touched_keys", []) or _undo.get("touched_keys", []) or [],
+                _undo_data.get("previous_rows", []) or _undo.get("previous_rows", []) or [],
             )
 
-            _upload_id = _undo.get("upload_id")
             if _upload_id:
-                _payload = _decode_jsonish(_undo.get("upload_payload") or {})
                 if not isinstance(_payload, dict):
                     _payload = {}
                 _payload["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
@@ -1348,12 +1377,9 @@ def _import_step3():
                     _upload_log_id = _record_upload_event(_upload_filename, _candidate_count, _upload_payload)
                     st.session_state["_last_import_undo"] = {
                         "tenant_id": _bg_tid,
-                        "touched_keys": _undo_touched_keys,
-                        "previous_rows": _undo_previous_rows,
                         "row_count": len(uph_batch),
                         "created_at": time.time(),
                         "upload_id": _upload_log_id,
-                        "upload_payload": _upload_payload,
                     }
                 if _dup_skipped:
                     _new_count = max(0, _candidate_count - _dup_skipped)
