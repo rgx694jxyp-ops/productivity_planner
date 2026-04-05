@@ -1208,7 +1208,8 @@ def _import_step3():
                     "UPH": str(_r.get(_uph_col, "") if _uph_col else "").strip(),
                 })
 
-    _preview_new_count = max(0, len(_candidate_preview_rows) - _preview_dup_count)
+    _preview_overlap_count = _preview_dup_count
+    _preview_new_count = 0 if _preview_exact_duplicate_import else len(_candidate_preview_rows)
     with st.expander("👀 Preview parsed data before import", expanded=True):
         _preview_days = len(_preview_dates) if _preview_dates else 1
         st.caption(
@@ -1216,17 +1217,30 @@ def _import_step3():
             f"{len(_preview_emp_ids)} unique employee ID(s) detected."
         )
         if _candidate_preview_rows:
-            st.markdown(
-                f"**Duplicate summary**\n"
-                f"File rows selected: **{total_rows:,}**  \n"
-                f"History rows derived from file: **{len(_candidate_preview_rows):,}**  \n"
-                f"Exact duplicates already in system: **{_preview_dup_count:,}**  \n"
-                f"Rows that will be uploaded: **{_preview_new_count:,}**"
-            )
-            st.caption(
-                f"Duplicate check (exact row match against history): "
-                f"{_preview_dup_count}/{len(_candidate_preview_rows)} row(s) already exist."
-            )
+            if _preview_exact_duplicate_import:
+                st.markdown(
+                    f"**Duplicate summary**\n"
+                    f"File rows selected: **{total_rows:,}**  \n"
+                    f"History rows derived from file: **{len(_candidate_preview_rows):,}**  \n"
+                    f"Exact duplicates already in system: **{len(_candidate_preview_rows):,}**  \n"
+                    f"Rows that will be uploaded: **0**"
+                )
+                st.caption(
+                    "This upload matches a previously imported dataset fingerprint exactly."
+                )
+            else:
+                st.markdown(
+                    f"**Import summary**\n"
+                    f"File rows selected: **{total_rows:,}**  \n"
+                    f"History rows derived from file: **{len(_candidate_preview_rows):,}**  \n"
+                    f"Existing employee/day keys already in system: **{_preview_overlap_count:,}**  \n"
+                    f"Rows that will be uploaded after overlap replacement: **{_preview_new_count:,}**"
+                )
+                if _preview_overlap_count:
+                    st.caption(
+                        f"Overlap detected for {_preview_overlap_count}/{len(_candidate_preview_rows)} row(s). "
+                        "Existing history for those employee/day keys will be replaced before insert."
+                    )
             if _preview_exact_duplicate_import:
                 st.warning("All derived rows are duplicates. Nothing new will be uploaded.")
                 if _matching_upload:
@@ -1550,8 +1564,11 @@ def _import_step3():
                     "hours_worked": hours_total,
                     "department":   dept,
                 })
-            # Avoid inserting exact duplicates when users import the same file again.
+            # Import policy:
+            # - exact repeat dataset => skip entirely
+            # - overlapping employee/date keys => replace existing rows for those keys
             _dup_skipped = 0
+            _replaced_existing_rows = 0
             _candidate_count = len(uph_batch)
             _exact_duplicate_import = False
             _undo_previous_rows = []
@@ -1594,11 +1611,10 @@ def _import_step3():
                     for _rid in _candidate_rowids(_r.get("emp_id"))
                     if _rid
                 })
-                _candidate_touched = {
+                _candidate_keys = {
                     (
-                        _db_emp_key(_r.get("emp_id")),
-                        str(_r.get("work_date", "")),
-                        str(_r.get("department", "") or ""),
+                        _cmp_emp_code(_r.get("emp_id")),
+                        str(_r.get("work_date", ""))[:10],
                     )
                     for _r in uph_batch
                 }
@@ -1609,14 +1625,16 @@ def _import_step3():
                     if str(_rid).lstrip("-").isdigit()
                 })
                 # Duplicate detection follows the import pipeline shape: one row
-                # per employee per day, regardless of department text drift.
+                # per employee per day. For overlapping uploads we replace old
+                # rows for the same employee/date keys before inserting fresh rows.
                 _existing_2key = set()
+                _rows_to_replace = []
                 def _norm_date(_v):
                     return str(_v or "").strip()[:10]
                 if _date_min and _date_max and _emp_ids_int:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
-                    _q = _sb.table("uph_history").select("emp_id, work_date")
+                    _q = _sb.table("uph_history").select("id, emp_id, work_date, uph, units, hours_worked, department")
                     if _tenant_id:
                         _q = _q.eq("tenant_id", _tenant_id)
                     _q = _q.gte("work_date", _date_min).lte("work_date", _date_max).in_("emp_id", _emp_ids_int)
@@ -1624,27 +1642,41 @@ def _import_step3():
                     for _er in (_res.data or []):
                         _er_emp = str(_er.get("emp_id", "") or "").strip()
                         if _er_emp:
-                            _existing_2key.add((
-                                _er_emp,
-                                _norm_date(_er.get("work_date", "")),
-                            ))
+                            _er_code = _rowid_to_code.get(_er_emp, "")
+                            _key2 = (_er_code, _norm_date(_er.get("work_date", "")))
+                            if _er_code:
+                                _existing_2key.add(_key2)
+                                if _key2 in _candidate_keys:
+                                    _rows_to_replace.append({
+                                        "id": _er.get("id"),
+                                        "emp_id": _er.get("emp_id"),
+                                        "work_date": _er.get("work_date"),
+                                        "uph": _er.get("uph"),
+                                        "units": _er.get("units"),
+                                        "hours_worked": _er.get("hours_worked"),
+                                        "department": _er.get("department", ""),
+                                    })
 
-                _filtered_batch = []
+                _undo_previous_rows = list(_rows_to_replace)
+                _rows_to_delete = [int(_r["id"]) for _r in _rows_to_replace if _r.get("id") is not None]
+                if _rows_to_delete and _tenant_id:
+                    from database import get_client as _db_get_client, _tq as _db_tq
+                    _sb_del = _db_get_client()
+                    _db_tq(
+                        _sb_del.table("uph_history")
+                        .delete()
+                        .eq("tenant_id", _tenant_id)
+                        .in_("id", _rows_to_delete)
+                    ).execute()
+                    _replaced_existing_rows = len(_rows_to_delete)
+
                 _inserted_key3 = set()
                 for _r in uph_batch:
                     _key_emp = str(_db_emp_key(_r.get("emp_id", "")))
                     _key_date = _norm_date(_r.get("work_date", ""))
                     _key_dept = str(_r.get("department", "") or "")
-                    _rowids = _candidate_rowids(_r.get("emp_id", ""))
-                    _is_dup = any((str(_rid), _key_date) in _existing_2key for _rid in _rowids)
-                    if _is_dup:
-                        _dup_skipped += 1
-                        continue
-                    _filtered_batch.append(_r)
                     _inserted_key3.add((_key_emp, _key_date, _key_dept))
-                uph_batch = _filtered_batch
                 _undo_touched_keys = [list(_k) for _k in sorted(_inserted_key3)]
-                _exact_duplicate_import = (_candidate_count > 0 and _dup_skipped == _candidate_count)
             except Exception:
                 pass
 
@@ -1708,6 +1740,7 @@ def _import_step3():
                             "candidate_rows": int(_candidate_count),
                             "inserted_rows": int(len(uph_batch)),
                             "duplicate_rows": int(_dup_skipped),
+                            "replaced_rows": int(_replaced_existing_rows),
                             "exact_duplicate_import": bool(_exact_duplicate_import),
                         },
                         "undo": {
@@ -1739,6 +1772,11 @@ def _import_step3():
                             f"Duplicate check complete: {_dup_skipped} duplicate row(s) skipped, "
                             f"{_new_count} row(s) uploaded."
                         )
+                elif _replaced_existing_rows:
+                    st.info(
+                        f"Overlap handled: replaced {_replaced_existing_rows} existing history row(s) "
+                        f"and uploaded {len(uph_batch)} fresh row(s)."
+                    )
             except Exception as _uph_err:
                 st.error(f"UPH history storage failed: {_uph_err}")
                 st.info(
