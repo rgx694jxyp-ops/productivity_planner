@@ -234,19 +234,34 @@ Deno.serve(async (req) => {
         let plan = resolvePlan(sub);
         let limit = PLAN_LIMITS[plan] ?? 25;
 
-        // Find tenant by stripe_customer_id
+        // Find tenant by stripe_customer_id (primary path)
         const { data: tenants } = await supabase
           .from("tenants")
           .select("id")
           .eq("stripe_customer_id", customerId)
           .limit(1);
 
-        if (!tenants?.length) {
-          console.error(`No tenant found for Stripe customer ${customerId}`);
-          break;
-        }
+        let tenantId = tenants?.length ? tenants[0].id : null;
 
-        const tenantId = tenants[0].id;
+        // Fallback: recover tenant from Stripe metadata if customer lookup fails.
+        // This covers cases where checkout completed but tenants.stripe_customer_id
+        // was not yet backfilled at the moment this event arrived.
+        if (!tenantId) {
+          tenantId =
+            sub.metadata?.tenant_id ||
+            sub.items?.data?.[0]?.metadata?.tenant_id ||
+            null;
+          if (!tenantId) {
+            console.error(`No tenant found for Stripe customer ${customerId} and no tenant_id metadata on subscription ${sub.id}`);
+            break;
+          }
+
+          // Self-heal: backfill customer id on tenant for future events.
+          await supabase
+            .from("tenants")
+            .update({ stripe_customer_id: customerId })
+            .eq("id", tenantId);
+        }
 
         // If Stripe has a pending update (common for end-of-period downgrades),
         // keep current access until the cycle actually flips.
@@ -265,19 +280,25 @@ Deno.serve(async (req) => {
           }
         }
 
-        await supabase
+        const upsertRow: Record<string, unknown> = {
+          tenant_id: tenantId,
+          stripe_customer_id: customerId,
+          stripe_subscription_id: sub.id,
+          plan: plan,
+          status: sub.status,
+          employee_limit: limit,
+          current_period_start: getPeriodStart(sub),
+          current_period_end: getPeriodEnd(sub),
+          cancel_at_period_end: sub.cancel_at_period_end || false,
+          updated_at: new Date().toISOString(),
+        };
+
+        const { error: upsertErr } = await supabase
           .from("subscriptions")
-          .update({
-            plan: plan,
-            status: sub.status, // active, past_due, canceled, etc.
-            employee_limit: limit,
-            current_period_start: getPeriodStart(sub),
-            current_period_end: getPeriodEnd(sub),
-            cancel_at_period_end: sub.cancel_at_period_end || false,
-            stripe_subscription_id: sub.id,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("tenant_id", tenantId);
+          .upsert(upsertRow, { onConflict: "tenant_id" });
+        if (upsertErr) {
+          throw new Error(`subscriptions upsert (customer.subscription.*) failed: ${upsertErr.message} (code=${upsertErr.code})`);
+        }
 
         await logSubscriptionEvent(supabase, tenantId, event.type, event.data.object);
         console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${plan}, pending=${hasPendingUpdate}`);
