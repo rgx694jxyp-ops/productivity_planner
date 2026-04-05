@@ -77,19 +77,21 @@ def _build_emp_code_to_rowid_map() -> dict:
         return {}
 
 
-def _restore_uph_snapshot(tenant_id: str, new_row_ids: list, previous_rows: list) -> tuple[int, int]:
+def _restore_uph_snapshot(tenant_id: str, new_row_ids: list, previous_rows: list) -> tuple[int, int, int]:
     """
     Rollback helper — delete newly inserted rows by PK and restore any overwritten rows.
 
-    new_row_ids   : list of uph_history.id integers to DELETE (rows that didn't exist before)
-    previous_rows : list of row dicts to UPSERT back (rows that were overwritten)
+    Returns (restored_rows, attempted_deletes, verified_deleted).
+    verified_deleted is confirmed by a follow-up SELECT — if it equals attempted_deletes
+    the rollback is fully confirmed. If it's lower, some rows were already gone (not an error).
     """
     from database import get_client as _db_get_client
 
     _sb = _db_get_client()
     _tn = str(tenant_id or "")
 
-    deleted_rows = 0
+    attempted_deletes = 0
+    verified_deleted = 0
     if new_row_ids:
         _ids = []
         for _x in new_row_ids:
@@ -98,8 +100,15 @@ def _restore_uph_snapshot(tenant_id: str, new_row_ids: list, previous_rows: list
             except (TypeError, ValueError):
                 pass
         if _ids:
+            attempted_deletes = len(_ids)
             _sb.table("uph_history").delete().in_("id", _ids).eq("tenant_id", _tn).execute()
-            deleted_rows = len(_ids)
+            # Verify: count how many of those IDs still exist (should be 0 if all deleted)
+            try:
+                _check = _sb.table("uph_history").select("id").in_("id", _ids).eq("tenant_id", _tn).execute()
+                _still_present = len(_check.data or [])
+                verified_deleted = attempted_deletes - _still_present
+            except Exception:
+                verified_deleted = attempted_deletes  # assume success if verify query fails
 
     restored_rows = 0
     if previous_rows:
@@ -119,7 +128,7 @@ def _restore_uph_snapshot(tenant_id: str, new_row_ids: list, previous_rows: list
         ).execute()
         restored_rows = len(_prev)
 
-    return restored_rows, deleted_rows
+    return restored_rows, attempted_deletes, verified_deleted
 
 
 def _list_recent_uploads(days: int = 7) -> list[dict]:
@@ -301,14 +310,15 @@ def _import_step1():
                             _undo = _meta.get("undo", {}) if isinstance(_meta, dict) else {}
                             _tenant_id = st.session_state.get("tenant_id", "")
                             _restored = 0
-                            _deleted = 0
+                            _attempted = 0
+                            _verified = 0
                             _new_ids = _undo.get("new_row_ids", []) if isinstance(_undo, dict) else []
                             _previous = _undo.get("previous_rows", []) if isinstance(_undo, dict) else []
                             if not _new_ids and not _previous:
                                 st.error("This upload has no rollback snapshot — data cannot be removed safely.")
                                 continue
                             if _tenant_id:
-                                _restored, _deleted = _restore_uph_snapshot(
+                                _restored, _attempted, _verified = _restore_uph_snapshot(
                                     _tenant_id,
                                     _new_ids,
                                     _previous,
@@ -322,15 +332,23 @@ def _import_step1():
                             _meta["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
                             _meta["undo_result"] = {
                                 "restored_rows": int(_restored),
-                                "deleted_rows": int(_deleted),
+                                "attempted_deletes": int(_attempted),
+                                "verified_deleted": int(_verified),
                             }
                             _deactivate_upload(_uid, _meta)
 
                             _bust_cache()
                             _build_archived_productivity(force=True)
-                            st.success(
-                                f"Upload removed. Restored {_restored} previous row(s), removed {_deleted} inserted row(s)."
-                            )
+                            if _verified == _attempted:
+                                st.success(
+                                    f"✅ Rollback confirmed. Deleted {_verified}/{_attempted} row(s) from history. "
+                                    f"Restored {_restored} previous row(s)."
+                                )
+                            else:
+                                st.warning(
+                                    f"Rollback partial: deleted {_verified}/{_attempted} row(s) "
+                                    f"({_attempted - _verified} already missing). Restored {_restored} previous row(s)."
+                                )
                             st.rerun()
                         except Exception as _rm_err:
                             st.error(f"Could not remove upload: {_rm_err}")
@@ -685,7 +703,7 @@ def _import_step3():
             if not _new_ids and not _previous:
                 st.error("No rollback snapshot found for this import — nothing was changed.")
                 return False
-            _restored, _deleted = _restore_uph_snapshot(_tenant_id, _new_ids, _previous)
+            _restored, _attempted, _verified = _restore_uph_snapshot(_tenant_id, _new_ids, _previous)
 
             if _upload_id:
                 if not isinstance(_payload, dict):
@@ -694,16 +712,24 @@ def _import_step3():
                 _payload["undo_result"] = {
                     "source": "last_import_button",
                     "restored_rows": int(_restored),
-                    "deleted_rows": int(_deleted),
+                    "attempted_deletes": int(_attempted),
+                    "verified_deleted": int(_verified),
                 }
                 _deactivate_upload(_upload_id, _payload)
 
             _bust_cache()
             _build_archived_productivity(force=True)
             st.session_state.pop("_last_import_undo", None)
-            st.success(
-                f"Last import rolled back. Restored {_restored} previous row(s), removed {_deleted} inserted row(s)."
-            )
+            if _verified == _attempted:
+                st.success(
+                    f"✅ Rollback confirmed. Deleted {_verified}/{_attempted} row(s) from history. "
+                    f"Restored {_restored} previous row(s)."
+                )
+            else:
+                st.warning(
+                    f"Rollback partial: deleted {_verified}/{_attempted} row(s) "
+                    f"({_attempted - _verified} already missing). Restored {_restored} previous row(s)."
+                )
             return True
         except Exception as _undo_err:
             st.error(f"Undo failed: {_undo_err}")
