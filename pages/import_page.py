@@ -318,11 +318,18 @@ def _import_step1():
     st.caption("Upload a CSV or Excel export, or type a few rows in manually. We will help make it usable.")
 
     _recent_uploads = _list_recent_uploads(days=7)
-    with st.expander("This week's uploads", expanded=bool(_recent_uploads)):
-        if not _recent_uploads:
+    _recent_uploads_visible = []
+    for _u in _recent_uploads:
+        _meta = _decode_jsonish(_u.get("header_mapping"))
+        _undo_applied = bool(_meta.get("undo_applied_at")) if isinstance(_meta, dict) else False
+        if not _undo_applied:
+            _recent_uploads_visible.append(_u)
+
+    with st.expander("This week's uploads", expanded=bool(_recent_uploads_visible)):
+        if not _recent_uploads_visible:
             st.caption("No uploads logged in the last 7 days.")
         else:
-            for _u in _recent_uploads:
+            for _u in _recent_uploads_visible:
                 _uid = _u.get("id")
                 _meta = _decode_jsonish(_u.get("header_mapping"))
                 _stats = _meta.get("stats", {}) if isinstance(_meta, dict) else {}

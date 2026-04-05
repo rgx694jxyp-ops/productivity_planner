@@ -1187,6 +1187,9 @@ def main():
                 _log_app_error("email", f"Schedule check error: {_eml_err}", detail=traceback.format_exc())
 
     page = render_sidebar()
+    _prev_page = str(st.session_state.get("_last_rendered_page_key", "") or "")
+    st.session_state["_entered_from_page_key"] = _prev_page
+    st.session_state["_last_rendered_page_key"] = page
     handlers = {
         "supervisor": page_supervisor,
         "dashboard": page_dashboard,
