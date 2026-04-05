@@ -60,21 +60,44 @@ def _decode_jsonish(raw_val):
     return {}
 
 
-def _build_emp_code_to_rowid_map() -> dict:
-    """Return {employee_code: db_row_id_as_str} using a fresh DB read."""
+def _build_emp_code_maps() -> tuple[dict, dict, dict]:
+    """
+    Return employee ID maps from a fresh DB read.
+
+    Returns:
+      code_to_primary_rowid: {emp_code: preferred_rowid_str}
+      code_to_all_rowids:    {emp_code: set(rowid_str, ...)}
+      rowid_to_code:         {rowid_str: emp_code}
+    """
     try:
         from database import get_employees as _db_get_employees
 
         _rows = _db_get_employees() or []
-        _out = {}
+        _code_to_all = {}
+        _rowid_to_code = {}
         for _e in _rows:
             _code = str(_e.get("emp_id", "") or "").strip()
-            _rid = _e.get("id")
-            if _code and _rid is not None:
-                _out[_code] = str(_rid)
-        return _out
+            _rid_raw = _e.get("id")
+            if not _code or _rid_raw is None:
+                continue
+            _rid = str(_rid_raw).strip()
+            if not _rid:
+                continue
+            _rowid_to_code[_rid] = _code
+            if _code not in _code_to_all:
+                _code_to_all[_code] = set()
+            _code_to_all[_code].add(_rid)
+
+        _code_to_primary = {}
+        for _code, _rid_set in _code_to_all.items():
+            try:
+                _code_to_primary[_code] = str(min(int(_x) for _x in _rid_set))
+            except Exception:
+                _code_to_primary[_code] = sorted(_rid_set)[0]
+
+        return _code_to_primary, _code_to_all, _rowid_to_code
     except Exception:
-        return {}
+        return {}, {}, {}
 
 
 def _restore_uph_snapshot(
@@ -268,6 +291,15 @@ def page_import():
 
     if not require_db(): return
 
+    _entered_from = str(st.session_state.get("_entered_from_page_key", "") or "")
+    if _entered_from and _entered_from != "import":
+        for _k in [
+            "uploaded_sessions", "alloc_rows", "pipeline_done", "mapping",
+            "_import_complete_summary", "confirm_import_preview",
+        ]:
+            st.session_state.pop(_k, None)
+        st.session_state.import_step = 1
+
     step = st.session_state.import_step
 
     # ── Reset button — shown whenever something is in progress ───────────────
@@ -317,90 +349,91 @@ def _import_step1():
     st.subheader("Bring in whatever you have")
     st.caption("Upload a CSV or Excel export, or type a few rows in manually. We will help make it usable.")
 
-    _recent_uploads = _list_recent_uploads(days=7)
-    _recent_uploads_visible = []
-    for _u in _recent_uploads:
-        _meta = _decode_jsonish(_u.get("header_mapping"))
-        _undo_applied = bool(_meta.get("undo_applied_at")) if isinstance(_meta, dict) else False
-        if not _undo_applied:
-            _recent_uploads_visible.append(_u)
+    def _render_recent_uploads_panel():
+        _recent_uploads = _list_recent_uploads(days=7)
+        _recent_uploads_visible = []
+        for _u in _recent_uploads:
+            _meta = _decode_jsonish(_u.get("header_mapping"))
+            _undo_applied = bool(_meta.get("undo_applied_at")) if isinstance(_meta, dict) else False
+            if not _undo_applied:
+                _recent_uploads_visible.append(_u)
 
-    with st.expander("This week's uploads", expanded=bool(_recent_uploads_visible)):
-        if not _recent_uploads_visible:
-            st.caption("No uploads logged in the last 7 days.")
-        else:
-            for _u in _recent_uploads_visible:
-                _uid = _u.get("id")
-                _meta = _decode_jsonish(_u.get("header_mapping"))
-                _stats = _meta.get("stats", {}) if isinstance(_meta, dict) else {}
-                _undo_applied = bool(_meta.get("undo_applied_at")) if isinstance(_meta, dict) else False
-                _is_active = bool(_u.get("is_active"))
-                _dup = int(_stats.get("duplicate_rows", 0) or 0)
-                _ins = int(_stats.get("inserted_rows", 0) or 0)
-                _cand = int(_stats.get("candidate_rows", _u.get("row_count", 0)) or 0)
-                _exact_dup = bool(_stats.get("exact_duplicate_import"))
-                _status = "Undone" if _undo_applied else ("Active" if _is_active else "Inactive")
+        with st.expander("This week's uploads", expanded=False):
+            if not _recent_uploads_visible:
+                st.caption("No uploads logged in the last 7 days.")
+            else:
+                for _u in _recent_uploads_visible:
+                    _uid = _u.get("id")
+                    _meta = _decode_jsonish(_u.get("header_mapping"))
+                    _stats = _meta.get("stats", {}) if isinstance(_meta, dict) else {}
+                    _undo_applied = bool(_meta.get("undo_applied_at")) if isinstance(_meta, dict) else False
+                    _is_active = bool(_u.get("is_active"))
+                    _dup = int(_stats.get("duplicate_rows", 0) or 0)
+                    _ins = int(_stats.get("inserted_rows", 0) or 0)
+                    _cand = int(_stats.get("candidate_rows", _u.get("row_count", 0)) or 0)
+                    _exact_dup = bool(_stats.get("exact_duplicate_import"))
+                    _status = "Undone" if _undo_applied else ("Active" if _is_active else "Inactive")
 
-                _hdr = f"{_u.get('filename', 'Upload')} ({(_u.get('created_at') or '')[:16].replace('T', ' ')})"
-                with st.expander(_hdr, expanded=False):
-                    st.caption(
-                        f"Status: {_status} · Candidate rows: {_cand} · Inserted: {_ins} · "
-                        f"Duplicates: {_dup}{' · Exact duplicate import' if _exact_dup else ''}"
-                    )
+                    _hdr = f"{_u.get('filename', 'Upload')} ({(_u.get('created_at') or '')[:16].replace('T', ' ')})"
+                    with st.expander(_hdr, expanded=False):
+                        st.caption(
+                            f"Status: {_status} · Candidate rows: {_cand} · Inserted: {_ins} · "
+                            f"Duplicates: {_dup}{' · Exact duplicate import' if _exact_dup else ''}"
+                        )
 
-                    if _is_active and _ins > 0:
-                        if st.button("Remove upload and rollback data", key=f"remove_upload_{_uid}"):
-                            try:
-                                _undo = _meta.get("undo", {}) if isinstance(_meta, dict) else {}
-                                _tenant_id = st.session_state.get("tenant_id", "")
-                                _restored = 0
-                                _attempted = 0
-                                _verified = 0
-                                _new_ids = _undo.get("new_row_ids", []) if isinstance(_undo, dict) else []
-                                _previous = _undo.get("previous_rows", []) if isinstance(_undo, dict) else []
-                                _touched = _undo.get("touched_keys", []) if isinstance(_undo, dict) else []
-                                if not _new_ids and not _previous and not _touched:
-                                    st.error("This upload has no rollback snapshot — data cannot be removed safely.")
-                                    continue
-                                if _tenant_id:
-                                    _restored, _attempted, _verified = _restore_uph_snapshot(
-                                        _tenant_id,
-                                        _new_ids,
-                                        _previous,
-                                        _touched,
-                                    )
-                                else:
-                                    st.error("Missing tenant context. Please refresh and try again.")
-                                    continue
+                        if _is_active and _ins > 0:
+                            if st.button("Remove upload and rollback data", key=f"remove_upload_{_uid}"):
+                                try:
+                                    _undo = _meta.get("undo", {}) if isinstance(_meta, dict) else {}
+                                    _tenant_id = st.session_state.get("tenant_id", "")
+                                    _restored = 0
+                                    _attempted = 0
+                                    _verified = 0
+                                    _new_ids = _undo.get("new_row_ids", []) if isinstance(_undo, dict) else []
+                                    _previous = _undo.get("previous_rows", []) if isinstance(_undo, dict) else []
+                                    _touched = _undo.get("touched_keys", []) if isinstance(_undo, dict) else []
+                                    if not _new_ids and not _previous and not _touched:
+                                        st.error("This upload has no rollback snapshot — data cannot be removed safely.")
+                                        continue
+                                    if _tenant_id:
+                                        _restored, _attempted, _verified = _restore_uph_snapshot(
+                                            _tenant_id,
+                                            _new_ids,
+                                            _previous,
+                                            _touched,
+                                        )
+                                    else:
+                                        st.error("Missing tenant context. Please refresh and try again.")
+                                        continue
 
-                                if not isinstance(_meta, dict):
-                                    _meta = {}
-                                _meta["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
-                                _meta["undo_result"] = {
-                                    "restored_rows": int(_restored),
-                                    "attempted_deletes": int(_attempted),
-                                    "verified_deleted": int(_verified),
-                                }
-                                _deactivate_upload(_uid, _meta)
+                                    if not isinstance(_meta, dict):
+                                        _meta = {}
+                                    _meta["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
+                                    _meta["undo_result"] = {
+                                        "restored_rows": int(_restored),
+                                        "attempted_deletes": int(_attempted),
+                                        "verified_deleted": int(_verified),
+                                    }
+                                    _deactivate_upload(_uid, _meta)
 
-                                _bust_cache()
-                                _build_archived_productivity(force=True)
-                                if _verified == _attempted:
-                                    st.success(
-                                        f"✅ Rollback confirmed. Deleted {_verified}/{_attempted} row(s) from history. "
-                                        f"Restored {_restored} previous row(s)."
-                                    )
-                                else:
-                                    st.warning(
-                                        f"Rollback partial: deleted {_verified}/{_attempted} row(s) "
-                                        f"({_attempted - _verified} already missing). Restored {_restored} previous row(s)."
-                                    )
-                                st.rerun()
-                            except Exception as _rm_err:
-                                st.error(f"Could not remove upload: {_rm_err}")
-                                _log_app_error("import", f"Remove upload failed: {_rm_err}", detail=traceback.format_exc(), severity="error")
-                    elif _is_active and _ins == 0:
-                        st.caption("No rollback needed: this upload inserted 0 new rows (all duplicates).")
+                                    _bust_cache()
+                                    _build_archived_productivity(force=True)
+                                    if _verified == _attempted:
+                                        st.success(
+                                            f"✅ Rollback confirmed. Deleted {_verified}/{_attempted} row(s) from history. "
+                                            f"Restored {_restored} previous row(s)."
+                                        )
+                                    else:
+                                        st.warning(
+                                            f"Rollback partial: deleted {_verified}/{_attempted} row(s) "
+                                            f"({_attempted - _verified} already missing). Restored {_restored} previous row(s)."
+                                        )
+                                    st.rerun()
+                                except Exception as _rm_err:
+                                    st.error(f"Could not remove upload: {_rm_err}")
+                                    _log_app_error("import", f"Remove upload failed: {_rm_err}", detail=traceback.format_exc(), severity="error")
+                        elif _is_active and _ins == 0:
+                            st.caption("No rollback needed: this upload inserted 0 new rows (all duplicates).")
 
     mode = st.radio(
         "Choose a starting point",
@@ -434,6 +467,8 @@ def _import_step1():
             st.session_state.split_overrides = {}
             st.session_state.import_step = 3
             st.rerun()
+        st.divider()
+        _render_recent_uploads_panel()
         return
 
     files = st.file_uploader(
@@ -445,6 +480,8 @@ def _import_step1():
 
     if not files:
         st.info("Upload anything you have. Even partial data is enough to start.")
+        st.divider()
+        _render_recent_uploads_panel()
         return
 
     _MAX_FILE_MB = 50
@@ -542,6 +579,9 @@ def _import_step1():
             else:
                 st.session_state.import_step = 2
             st.rerun()
+
+    st.divider()
+    _render_recent_uploads_panel()
 
 
 def _import_step2():
@@ -968,14 +1008,26 @@ def _import_step3():
         _tenant_id = st.session_state.get("tenant_id", "")
         if _tenant_id and _candidate_preview_rows:
             from database import get_client as _db_get_client, _tq as _db_tq
-            _emp_code_to_rowid = _build_emp_code_to_rowid_map()
+            _code_to_primary, _code_to_all, _rowid_to_code = _build_emp_code_maps()
 
-            def _db_emp(_eid):
-                _s = str(_eid or "").strip()
-                return _emp_code_to_rowid.get(_s, _s)
+            def _emp_code(_eid):
+                return str(_eid or "").strip()
+
+            def _candidate_rowids(_code):
+                _s = _emp_code(_code)
+                _all = _code_to_all.get(_s)
+                if _all:
+                    return set(_all)
+                _p = _code_to_primary.get(_s, _s)
+                return {_p} if _p else set()
 
             _dates = sorted({r.get("work_date") for r in _candidate_preview_rows if r.get("work_date")})
-            _emp_ids = sorted({_db_emp(r.get("emp_id")) for r in _candidate_preview_rows if r.get("emp_id")})
+            _emp_ids = sorted({
+                _rid
+                for _r in _candidate_preview_rows
+                for _rid in _candidate_rowids(_r.get("emp_id"))
+                if _rid
+            })
             _dmin = _dates[0] if _dates else ""
             _dmax = _dates[-1] if _dates else ""
             _existing_exact = set()
@@ -990,8 +1042,10 @@ def _import_step3():
                     .in_("emp_id", _emp_ids)
                 ).execute()
                 for _er in (_res.data or []):
+                    _er_emp_raw = str(_er.get("emp_id", ""))
+                    _er_emp_code = _rowid_to_code.get(_er_emp_raw, _er_emp_raw)
                     _existing_exact.add((
-                        str(_er.get("emp_id", "")),
+                        _er_emp_code,
                         str(_er.get("work_date", "")),
                         str(_er.get("department", "") or ""),
                         round(float(_er.get("uph") or 0), 4),
@@ -1001,7 +1055,7 @@ def _import_step3():
 
             for _r in _candidate_preview_rows:
                 _k = (
-                    str(_db_emp(_r.get("emp_id", ""))),
+                    _emp_code(_r.get("emp_id", "")),
                     str(_r.get("work_date", "")),
                     str(_r.get("department", "") or ""),
                     round(float(_r.get("uph") or 0), 4),
@@ -1381,13 +1435,29 @@ def _import_step3():
                 _dates = sorted({r.get("work_date") for r in uph_batch if r.get("work_date")})
                 _date_min = _dates[0] if _dates else ""
                 _date_max = _dates[-1] if _dates else ""
-                _emp_code_to_rowid = _build_emp_code_to_rowid_map()
+                _code_to_primary, _code_to_all, _rowid_to_code = _build_emp_code_maps()
 
                 def _db_emp_key(_eid):
                     _s = str(_eid or "").strip()
-                    return _emp_code_to_rowid.get(_s, _s)
+                    return _code_to_primary.get(_s, _s)
 
-                _emp_ids = sorted({_db_emp_key(r.get("emp_id")) for r in uph_batch if r.get("emp_id")})
+                def _cmp_emp_code(_eid):
+                    return str(_eid or "").strip()
+
+                def _candidate_rowids(_code):
+                    _s = _cmp_emp_code(_code)
+                    _all = _code_to_all.get(_s)
+                    if _all:
+                        return set(_all)
+                    _p = _code_to_primary.get(_s, _s)
+                    return {_p} if _p else set()
+
+                _emp_ids = sorted({
+                    _rid
+                    for _r in uph_batch
+                    for _rid in _candidate_rowids(_r.get("emp_id"))
+                    if _rid
+                })
                 _candidate_touched = {
                     (
                         _db_emp_key(_r.get("emp_id")),
@@ -1425,7 +1495,7 @@ def _import_step3():
                                 "department": _er.get("department", ""),
                             }
                         _existing_keys.add((
-                            str(_er.get("emp_id", "")),
+                            _rowid_to_code.get(str(_er.get("emp_id", "")), str(_er.get("emp_id", ""))),
                             str(_er.get("work_date", "")),
                             str(_er.get("department", "") or ""),
                             round(float(_er.get("uph") or 0), 4),
@@ -1441,7 +1511,7 @@ def _import_step3():
                     _key_date = str(_r.get("work_date", ""))
                     _key_dept = str(_r.get("department", "") or "")
                     _key = (
-                        _key_emp,
+                        _cmp_emp_code(_r.get("emp_id", "")),
                         _key_date,
                         _key_dept,
                         round(float(_r.get("uph") or 0), 4),
