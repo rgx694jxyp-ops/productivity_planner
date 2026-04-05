@@ -14,6 +14,16 @@ def apply_global_styles():
   [data-testid="stDecoration"], [data-testid="stStatusWidget"] { visibility: hidden !important; display: none !important; }
   header[data-testid="stHeader"] { background: transparent !important; }
 
+  /* When sidebar is hidden, make the expand arrow dark and visible. */
+  [data-testid="stSidebarCollapsedControl"] [data-testid="stIconMaterial"],
+  [data-testid="stSidebarCollapsedControl"] span,
+  [data-testid="stSidebarCollapsedControl"] svg,
+  [data-testid="stSidebarCollapsedControl"] * {
+    color: #000000 !important;
+    fill: #000000 !important;
+    opacity: 1 !important;
+  }
+
   /* Page background */
   .stApp { background: #F7F9FC !important; }
   .main .block-container { padding-top: 1.8rem; padding-bottom: 3rem; max-width: 1200px; }

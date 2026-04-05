@@ -69,10 +69,22 @@ def get_client():
         import streamlit as st
         cached = st.session_state.get("_sb_client")
         if cached is not None:
+            # Always re-attach latest session tokens before reusing cached client.
+            # Without this, a client created pre-login can stay anonymous and fail
+            # INSERT/UPDATE RLS checks even though the UI shows logged in.
+            session = st.session_state.get("supabase_session")
+            if session and session.get("access_token") and session.get("refresh_token"):
+                try:
+                    cached.auth.set_session(
+                        session["access_token"],
+                        session["refresh_token"],
+                    )
+                except Exception:
+                    pass
+
             # Check if token needs refresh (refresh 5 min before expiry)
             expires_at = st.session_state.get("_sb_token_expires_at", 0)
             if _time.time() > expires_at - 300:
-                session = st.session_state.get("supabase_session")
                 if session and session.get("refresh_token"):
                     try:
                         resp = cached.auth.refresh_session(session["refresh_token"])
