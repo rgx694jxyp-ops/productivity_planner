@@ -31,6 +31,7 @@ def page_settings():
             from database import (
                 get_subscription, get_employee_count, get_employee_limit,
                 create_billing_portal_url, get_live_stripe_subscription_status,
+                modify_subscription,
                 _get_config,
             )
             _tid_local = st.session_state.get("tenant_id", "")
@@ -88,22 +89,16 @@ def page_settings():
                     "pro": _get_config("STRIPE_PRICE_PRO") or "",
                     "business": _get_config("STRIPE_PRICE_BUSINESS") or "",
                 }
-                _plan_portal_urls = {}
-                if _portal_url:
-                    for _plan_key in ("starter", "pro", "business"):
-                        _target_price = _price_map.get(_plan_key, "")
-                        _target_url = create_billing_portal_url(
-                            return_url=_return_url,
-                            target_price_id=_target_price,
-                            flow="subscription_update",
-                        )
-                        _plan_portal_urls[_plan_key] = _target_url or _portal_url
 
                 if _manage_plan_url:
                     st.link_button("Manage Subscription (change plan tier)",
                                    _manage_plan_url, use_container_width=True, type="primary")
                 else:
                     st.info("Billing portal not available. Contact support.")
+
+                if _portal_url:
+                    st.link_button("Open Billing Portal (card, invoices, cancel)",
+                                   _portal_url, use_container_width=True)
 
                 with st.expander("Live Stripe verification", expanded=False):
                     _live_cache_key = f"_live_stripe_status_{_tid_local}"
@@ -141,7 +136,8 @@ def page_settings():
 
                 # ── Plan comparison ───────────────────────────────────
                 st.markdown("---")
-                st.markdown("##### Compare Plans")
+                st.markdown("##### Change Plan")
+                st.caption("Pick a different tier below. Your current tier is hidden.")
 
                 _PORD  = ["starter", "pro", "business"]
                 _PINFO = {
@@ -178,57 +174,57 @@ def page_settings():
                                               "Custom date ranges", "Coaching notes per employee"],
                 }
 
-                _cur_idx = _PORD.index(_plan_raw) if _plan_raw in _PORD else -1
-                _pcols   = st.columns(3)
-                for _ci, _pk in enumerate(_PORD):
+                _alternatives = [p for p in _PORD if p != _plan_raw]
+                _pcols = st.columns(len(_alternatives)) if _alternatives else []
+                for _ci, _pk in enumerate(_alternatives):
                     _pi    = _PINFO[_pk]
-                    _is_cur = _pk == _plan_raw
-                    _is_up  = _ci > _cur_idx >= 0
-                    _is_dn  = _ci < _cur_idx
                     with _pcols[_ci]:
-                        if _is_cur:
-                            _badge_html = f"<div style='color:{_pc};font-size:11px;font-weight:700;text-transform:uppercase;'>✓ Your Plan</div>"
-                        elif _is_up:
-                            _badge_html = "<div style='color:#16a34a;font-size:11px;font-weight:700;text-transform:uppercase;'>↑ Upgrade</div>"
-                        else:
-                            _badge_html = "<div style='color:#dc2626;font-size:11px;font-weight:700;text-transform:uppercase;'>↓ Downgrade</div>"
+                        _cur_rank = {"starter": 1, "pro": 2, "business": 3}.get(_plan_raw, 1)
+                        _new_rank = {"starter": 1, "pro": 2, "business": 3}.get(_pk, 1)
+                        _is_up = _new_rank > _cur_rank
+                        _badge_html = (
+                            "<div style='color:#16a34a;font-size:11px;font-weight:700;text-transform:uppercase;'>↑ Upgrade</div>"
+                            if _is_up else
+                            "<div style='color:#dc2626;font-size:11px;font-weight:700;text-transform:uppercase;'>↓ Downgrade</div>"
+                        )
                         st.markdown(_badge_html, unsafe_allow_html=True)
                         st.markdown(f"**{_pi['label']}** &nbsp; {_pi['price']}")
                         st.caption(_pi['emp'] + " employees")
 
-                        if _is_cur:
-                            for _f in _FEATS.get(_pk, []):
-                                st.markdown(f"<div style='font-size:12px;color:#555;line-height:1.8;'>✓ {_f}</div>",
-                                            unsafe_allow_html=True)
-                            st.markdown("")
-                            st.button("Current Plan", disabled=True,
-                                      use_container_width=True, key=f"sub_btn_{_pk}")
-                        elif _is_up:
-                            _delta = _GAINS.get((_plan_raw, _pk), [])
-                            if _delta:
-                                st.markdown("<div style='font-size:12px;font-weight:600;margin-top:4px;'>You'd gain:</div>",
-                                            unsafe_allow_html=True)
-                                for _g in _delta:
-                                    st.markdown(f"<div style='font-size:12px;color:#16a34a;line-height:1.8;'>+ {_g}</div>",
-                                                unsafe_allow_html=True)
-                            st.markdown("")
-                            _target_url = _plan_portal_urls.get(_pk)
-                            if _target_url:
-                                st.link_button(f"Upgrade to {_pi['label']} →", _target_url,
-                                               use_container_width=True, type="primary")
-                        else:  # downgrade
-                            _delta = _GAINS.get((_pk, _plan_raw), [])
-                            if _delta:
-                                st.markdown("<div style='font-size:12px;font-weight:600;margin-top:4px;'>You'd lose:</div>",
-                                            unsafe_allow_html=True)
-                                for _l in _delta:
-                                    st.markdown(f"<div style='font-size:12px;color:#dc2626;line-height:1.8;'>− {_l}</div>",
-                                                unsafe_allow_html=True)
-                            st.markdown("")
-                            _target_url = _plan_portal_urls.get(_pk)
-                            if _target_url:
-                                st.link_button(f"Downgrade to {_pi['label']}", _target_url,
-                                               use_container_width=True)
+                        _delta = _GAINS.get((_plan_raw, _pk), [])
+                        if _delta:
+                            _label = "You'd gain:" if _is_up else "Change impact:"
+                            _clr = "#16a34a" if _is_up else "#dc2626"
+                            st.markdown(
+                                f"<div style='font-size:12px;font-weight:600;margin-top:4px;'>{_label}</div>",
+                                unsafe_allow_html=True,
+                            )
+                            for _x in _delta:
+                                _prefix = "+" if _is_up else "•"
+                                st.markdown(
+                                    f"<div style='font-size:12px;color:{_clr};line-height:1.8;'>{_prefix} {_x}</div>",
+                                    unsafe_allow_html=True,
+                                )
+
+                        st.markdown("")
+                        _target_price = _price_map.get(_pk, "")
+                        _btn_label = f"Switch to {_pi['label']}"
+                        if st.button(_btn_label, key=f"switch_plan_{_pk}", use_container_width=True, type="primary" if _is_up else "secondary"):
+                            if not _target_price:
+                                st.error(f"Price for {_pi['label']} is not configured.")
+                            else:
+                                with st.spinner("Requesting plan change in Stripe…"):
+                                    _ok, _msg = modify_subscription(_target_price, _tid_local)
+                                if _ok:
+                                    st.success("Plan change submitted. Status will refresh shortly.")
+                                    st.session_state.pop("_sub_check_result", None)
+                                    st.session_state.pop("_sub_check_ts", None)
+                                    st.session_state.pop("_current_plan", None)
+                                    st.session_state.pop("_current_plan_ts", None)
+                                    _bust_cache()
+                                    st.rerun()
+                                else:
+                                    st.error(_msg or "Could not change plan.")
             else:
                 st.info("No active subscription found.")
                 _app_url = st.context.headers.get("Origin", "http://localhost:8501")
