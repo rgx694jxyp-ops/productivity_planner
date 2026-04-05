@@ -19,6 +19,7 @@ from app import (
     time,
     traceback,
 )
+import re
 from data_loader import auto_detect as _auto_detect, parse_csv_bytes as _parse_csv
 try:
     from pages.common import _normalize_label_text
@@ -32,6 +33,20 @@ except Exception:
             s = s[: max_len - 3].rstrip() + "..."
         return s or "Unknown"
 from pages.employees import _build_archived_productivity
+
+
+_SUSPICIOUS_NAME_RE = re.compile(r"(<\s*/?\s*script\b|drop\s+table|;--|javascript:)", re.IGNORECASE)
+
+
+def _sanitize_employee_name(raw_name, emp_id: str = "") -> tuple[str, bool]:
+    """Return a cleaned display name and suspicious-input flag."""
+    raw = str(raw_name or "")
+    suspicious = bool(_SUSPICIOUS_NAME_RE.search(raw))
+    cleaned = _normalize_label_text(raw, max_len=64)
+    if suspicious:
+        fallback = f"Employee {emp_id}".strip() if emp_id else "Employee"
+        return _normalize_label_text(fallback, max_len=64), True
+    return cleaned, False
 
 def page_import():
     st.title("📁 Import Data")
