@@ -129,9 +129,12 @@ Deno.serve(async (req) => {
     return new Response(`Webhook Error: ${err.message}`, { status: 400 });
   }
 
-  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
 
   try {
+    console.log(`Processing event: ${event.type}, supa_url=${SUPABASE_URL?.slice(0, 30)}, key_len=${SUPABASE_SERVICE_ROLE_KEY?.length}`);
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
@@ -161,7 +164,10 @@ Deno.serve(async (req) => {
         const plan = resolvePlan(sub);
         const limit = PLAN_LIMITS[plan] ?? 25;
 
-        // Upsert subscription — include user_id atomically so RLS SELECT policy works immediately
+        // Upsert subscription — omit user_id from webhook write to avoid FK constraint
+        // violations (the userId comes from session metadata, not guaranteed to be a
+        // confirmed auth.users row at webhook time). The RLS SELECT policy uses
+        // tenant_id via user_profiles as the primary lookup anyway.
         const upsertRow: Record<string, unknown> = {
           tenant_id: tenantId,
           stripe_customer_id: customerId,
@@ -173,13 +179,13 @@ Deno.serve(async (req) => {
           cancel_at_period_end: sub.cancel_at_period_end || false,
           updated_at: new Date().toISOString(),
         };
-        if (userId) upsertRow.user_id = userId;
 
         const { error: upsertErr } = await supabase.from("subscriptions").upsert(
           upsertRow,
           { onConflict: "tenant_id" }
         );
         if (upsertErr) throw new Error(`subscriptions upsert failed: ${upsertErr.message} (code=${upsertErr.code})`);
+        console.log(`Upsert OK for tenant ${tenantId}, plan: ${plan}`);
 
         // Also store customer ID on tenants table
         await supabase
