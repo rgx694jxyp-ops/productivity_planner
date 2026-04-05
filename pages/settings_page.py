@@ -903,14 +903,12 @@ def _login_page():
     # ── Sign in mode ──────────────────────────────────────────────────
     st.markdown("<div style='max-width:400px;margin:24px auto 0;'>", unsafe_allow_html=True)
 
-    if _check_login_lockout():
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+    _is_locked_out = _check_login_lockout()
 
     email    = st.text_input("Email",    placeholder="you@company.com",  key="login_email")
     password = st.text_input("Password", placeholder="••••••••••••",      key="login_password", type="password")
 
-    if st.button("Sign in", type="primary", use_container_width=True):
+    if st.button("Sign in", type="primary", use_container_width=True, disabled=_is_locked_out):
         if not email.strip() or not password.strip():
             st.error("Enter your email and password.")
         else:
