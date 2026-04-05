@@ -45,6 +45,8 @@ def diagnose_upload(pending_files: list[dict]) -> dict:
     depts = set()
     emps = set()
     hours_count = 0
+    warnings = []
+    malformed_rows_seen = False
     
     for file_info in pending_files:
         rows = file_info.get("rows", [])
@@ -53,7 +55,7 @@ def diagnose_upload(pending_files: list[dict]) -> dict:
         
         for row in rows:
             if not isinstance(row, dict):
-                warnings.append("Some uploaded rows could not be parsed cleanly and were skipped during diagnosis")
+                malformed_rows_seen = True
                 continue
             # Extract info
             if row.get("Date") or row.get("work_date") or row.get("date"):
@@ -76,7 +78,9 @@ def diagnose_upload(pending_files: list[dict]) -> dict:
                 hours_count += 1
     
     # Build diagnosis
-    warnings = []
+
+    if malformed_rows_seen:
+        warnings.append("Some uploaded rows could not be parsed cleanly and were skipped during diagnosis")
     
     if total_rows == 0:
         warnings.append("No data rows found")

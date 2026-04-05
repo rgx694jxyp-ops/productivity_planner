@@ -1069,12 +1069,12 @@ def main():
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         _clear_auth_cookies()
+        try:
+            del st.query_params["logout"]
+        except Exception:
+            st.query_params.clear()
         st.session_state["show_login"] = False
-        st.markdown("Signing you out…")
-        st.components.v1.html(
-            "<script>window.setTimeout(function(){ window.location.replace(window.location.origin + window.location.pathname); }, 150);</script>",
-            height=0,
-        )
+        show_landing_page()
         st.stop()
 
     # ── Landing CTA query actions ─────────────────────────────────────────
