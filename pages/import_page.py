@@ -306,7 +306,7 @@ def _import_step1():
                     f"Duplicates: {_dup}{' · Exact duplicate import' if _exact_dup else ''}"
                 )
 
-                if _is_active:
+                if _is_active and _ins > 0:
                     if st.button("Remove upload and rollback data", key=f"remove_upload_{_uid}"):
                         try:
                             _undo = _meta.get("undo", {}) if isinstance(_meta, dict) else {}
@@ -346,6 +346,8 @@ def _import_step1():
                         except Exception as _rm_err:
                             st.error(f"Could not remove upload: {_rm_err}")
                             _log_app_error("import", f"Remove upload failed: {_rm_err}", detail=traceback.format_exc(), severity="error")
+                elif _is_active and _ins == 0:
+                    st.caption("No rollback needed: this upload inserted 0 new rows (all duplicates).")
                 st.divider()
 
     mode = st.radio(
@@ -1322,7 +1324,7 @@ def _import_step3():
                     return _emp_code_to_rowid.get(_s, _s)
 
                 _emp_ids = sorted({_db_emp_key(r.get("emp_id")) for r in uph_batch if r.get("emp_id")})
-                _touched = {
+                _candidate_touched = {
                     (
                         _db_emp_key(_r.get("emp_id")),
                         str(_r.get("work_date", "")),
@@ -1330,7 +1332,6 @@ def _import_step3():
                     )
                     for _r in uph_batch
                 }
-                _undo_touched_keys = [list(_k) for _k in sorted(_touched)]
                 _existing_keys = set()
                 _existing_rows_by_key3 = {}
                 if _tenant_id and _date_min and _date_max and _emp_ids:
@@ -1350,7 +1351,7 @@ def _import_step3():
                             str(_er.get("work_date", "")),
                             str(_er.get("department", "") or ""),
                         )
-                        if _key3 in _touched and _key3 not in _existing_rows_by_key3:
+                        if _key3 in _candidate_touched and _key3 not in _existing_rows_by_key3:
                             _existing_rows_by_key3[_key3] = {
                                 "emp_id": _er.get("emp_id"),
                                 "work_date": _er.get("work_date"),
@@ -1370,6 +1371,7 @@ def _import_step3():
 
                 _filtered_batch = []
                 _undo_prev_seen = set()
+                _inserted_key3 = set()
                 for _r in uph_batch:
                     _key_emp = str(_db_emp_key(_r.get("emp_id", "")))
                     _key_date = str(_r.get("work_date", ""))
@@ -1390,7 +1392,9 @@ def _import_step3():
                         _undo_previous_rows.append(_existing_rows_by_key3[_k3])
                         _undo_prev_seen.add(_k3)
                     _filtered_batch.append(_r)
+                    _inserted_key3.add(_k3)
                 uph_batch = _filtered_batch
+                _undo_touched_keys = [list(_k) for _k in sorted(_inserted_key3)]
                 _exact_duplicate_import = (_candidate_count > 0 and _dup_skipped == _candidate_count)
             except Exception:
                 pass
@@ -1402,7 +1406,7 @@ def _import_step3():
                     uph_batch = [{**r, "tenant_id": _bg_tid} for r in uph_batch]
                 from database import batch_store_uph_history as _batch_store_uph_history
                 _batch_store_uph_history(uph_batch)
-                if _bg_tid and _undo_touched_keys:
+                if _bg_tid:
                     _upload_payload = {
                         "files": [s.get("filename", "") for s in sessions],
                         "stats": {
@@ -1420,13 +1424,14 @@ def _import_step3():
                     }
                     _upload_filename = ", ".join([s.get("filename", "") for s in sessions if s.get("filename")]).strip() or "Import"
                     _upload_log_id = _record_upload_event(_upload_filename, _candidate_count, _upload_payload)
-                    st.session_state["_last_import_undo"] = {
-                        "tenant_id": _bg_tid,
-                        "touched_keys": _undo_touched_keys,
-                        "row_count": len(uph_batch),
-                        "created_at": time.time(),
-                        "upload_id": _upload_log_id,
-                    }
+                    if len(uph_batch) > 0 and _undo_touched_keys:
+                        st.session_state["_last_import_undo"] = {
+                            "tenant_id": _bg_tid,
+                            "touched_keys": _undo_touched_keys,
+                            "row_count": len(uph_batch),
+                            "created_at": time.time(),
+                            "upload_id": _upload_log_id,
+                        }
                 if _dup_skipped:
                     _new_count = max(0, _candidate_count - _dup_skipped)
                     if _new_count == 0:
