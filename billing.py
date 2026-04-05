@@ -40,8 +40,41 @@ def verify_checkout_and_activate():
         _debug.append(f"tenant lookup err: {e}")
         st.session_state["_verify_debug"] = _debug
         return False
+
+    # Fallback: recover customer from Stripe if tenant row is missing/stale.
+    # This can happen when checkout succeeds but local tenant mirror update lags.
     if not cust_id:
-        _debug.append("no stripe_customer_id on tenant")
+        _debug.append("no stripe_customer_id on tenant; trying Stripe fallbacks")
+        try:
+            _email = st.session_state.get("user_email", "").strip().lower()
+            c_resp = _req.get(
+                "https://api.stripe.com/v1/customers",
+                auth=(stripe_key, ""),
+                params={"limit": 20, "email": _email} if _email else {"limit": 20},
+                timeout=10,
+            )
+            if c_resp.status_code == 200:
+                for _c in c_resp.json().get("data", []):
+                    _meta_tid = ((_c.get("metadata") or {}).get("tenant_id") or "").strip()
+                    if _meta_tid == tid:
+                        cust_id = _c.get("id")
+                        break
+                if not cust_id and c_resp.json().get("data"):
+                    # Last-resort heuristic: use first exact-email hit
+                    _c0 = c_resp.json().get("data", [])[0]
+                    if (_c0.get("email") or "").strip().lower() == _email and _email:
+                        cust_id = _c0.get("id")
+            if cust_id:
+                _debug.append(f"recovered stripe_customer_id={cust_id}")
+                try:
+                    sb.table("tenants").update({"stripe_customer_id": cust_id}).eq("id", tid).execute()
+                except Exception:
+                    pass
+        except Exception as _ce:
+            _debug.append(f"customer fallback err: {_ce}")
+
+    if not cust_id:
+        _debug.append("no stripe_customer_id after fallback")
         st.session_state["_verify_debug"] = _debug
         return False
 
@@ -59,6 +92,45 @@ def verify_checkout_and_activate():
             st.session_state["_verify_debug"] = _debug
             return False
         subs = sub_resp.json().get("data", [])
+
+        # Fallback: if no subs found by customer, inspect recent completed
+        # checkout sessions and recover subscription id from tenant metadata.
+        if not subs:
+            _debug.append("no subscriptions by customer; checking recent checkout sessions")
+            cs_resp = _req.get(
+                "https://api.stripe.com/v1/checkout/sessions",
+                auth=(stripe_key, ""),
+                params={"limit": 25},
+                timeout=10,
+            )
+            if cs_resp.status_code == 200:
+                _sessions = cs_resp.json().get("data", [])
+                _match_sub = ""
+                _match_cust = ""
+                for _s in _sessions:
+                    _meta = _s.get("metadata") or {}
+                    _tid = (_meta.get("tenant_id") or "").strip()
+                    _mode = (_s.get("mode") or "").strip()
+                    _status = (_s.get("status") or "").strip()
+                    _sub = (_s.get("subscription") or "").strip()
+                    if _tid == tid and _mode == "subscription" and _status == "complete" and _sub:
+                        _match_sub = _sub
+                        _match_cust = (_s.get("customer") or "").strip()
+                        break
+                if _match_sub:
+                    _debug.append(f"recovered subscription from checkout session: {_match_sub[:18]}...")
+                    _single = _req.get(
+                        f"https://api.stripe.com/v1/subscriptions/{_match_sub}",
+                        auth=(stripe_key, ""),
+                        timeout=10,
+                    )
+                    if _single.status_code == 200:
+                        subs = [_single.json()]
+                        if _match_cust and not cust_id:
+                            cust_id = _match_cust
+                    else:
+                        _debug.append(f"single subscription fetch failed: {_single.status_code}")
+
         if not subs:
             _debug.append("no subscriptions found in Stripe")
             st.session_state["_verify_debug"] = _debug
@@ -207,6 +279,12 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
             st.session_state.pop("_banner_sub_ts", None)
             st.rerun()
         st.info("No subscription update found yet. Please wait a few seconds and try again.")
+
+    _dbg = st.session_state.get("_verify_debug") or []
+    if _dbg:
+        with st.expander("Subscription activation diagnostics", expanded=False):
+            for _line in _dbg[-20:]:
+                st.caption(str(_line))
 
     try:
         existing_sub = get_subscription()

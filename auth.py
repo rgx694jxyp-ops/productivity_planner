@@ -224,6 +224,12 @@ def login_page(bust_cache_cb, log_app_error_cb):
 
     st.markdown("<div style='max-width:400px;margin:24px auto 0;'>", unsafe_allow_html=True)
 
+    st.info(
+        "New users: enter your email and password to sign in. "
+        "If your company does not have an active subscription yet, you'll be redirected to choose and purchase a plan.\n\n"
+        "Existing users: sign in as normal with your current email and password."
+    )
+
     if check_login_lockout():
         st.markdown("</div>", unsafe_allow_html=True)
         return
