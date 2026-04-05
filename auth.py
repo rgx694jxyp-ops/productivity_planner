@@ -116,13 +116,12 @@ def restore_session_from_cookies() -> bool:
 
 def full_sign_out(bust_cache_cb):
     bust_cache_cb()
+    st.session_state["_logout_requested"] = True
     try:
         st.query_params["logout"] = "1"
     except Exception:
         pass
     clear_auth_cookies()
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
 
 
 def check_access() -> bool:

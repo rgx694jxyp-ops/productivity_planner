@@ -1203,7 +1203,7 @@ def show_landing_page():
 # ════════════════════════════════════════════════════════════════════════════════
 
 def main():
-    if st.query_params.get("logout") == "1":
+    if st.session_state.get("_logout_requested") or st.query_params.get("logout") == "1":
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         _clear_auth_cookies()
@@ -1307,6 +1307,15 @@ def main():
 
         st.session_state["_sub_active"] = bool(_sub_cached)
         if not _sub_cached:
+            # Recover from webhook/DB lag by checking Stripe directly once more
+            # before forcing the user back to the subscription page.
+            try:
+                _stripe_sync_ok = _verify_checkout_and_activate()
+            except Exception:
+                _stripe_sync_ok = False
+            if _stripe_sync_ok:
+                st.session_state["_sub_active"] = True
+                st.rerun()
             _subscription_page()
             st.stop()
 
