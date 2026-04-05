@@ -258,6 +258,9 @@ def page_import():
         div[data-testid="stExpander"] summary p {
             color: #ffffff !important;
         }
+        div[data-testid="stExpander"] div[data-testid="stExpander"] summary p {
+            color: #000000 !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
