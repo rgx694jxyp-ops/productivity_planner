@@ -292,7 +292,7 @@ def page_supervisor():
                     if emp["trend"] == "down":
                         actions.append("💬 **Identify obstacles** — Ask what's changed. Check for workload/personal issues.")
                     elif emp["trend"] == "flat":
-                        actions.append("📈 **Break the plateau** — Try new training, task rotation, or peer mentoring.")
+                        actions.append("📈 **Break the plateau** — Try different task rotation or side-by-side work with a high performer.")
                 
                 # Gap-based actions
                 try:
@@ -451,7 +451,7 @@ def page_supervisor():
 **For Medium Risk (🟡):**
 - Proactive check-in within 3-5 days
 - Discuss trends: "I've noticed a dip the last few days"
-- Offer support: extra training, peer mentoring, resources
+- Offer support: extra training, side-by-side observation, additional resources
 - Set clear improvement goals
 
 **For Trending Down (but still on goal):**

@@ -439,49 +439,66 @@ def _emp_coaching():
 
             # ── Header ────────────────────────────────────────────────────────
             is_flagged = emp_id in flags
+            flag_info  = flags.get(emp_id, {}) if is_flagged else {}
+            flag_type  = flag_info.get("flag_type", "followup") if flag_info else "followup"
             hc1, hc2 = st.columns([4, 1])
             hc1.markdown(f"### {emp_name}")
             hc1.caption(emp_dept)
 
-            # Show trend + goal summary inline
+            # UPH status + delta since last view
             _emp_gs = next((r for r in gs if str(r.get("EmployeeID","")) == str(emp_id)), None)
             if _emp_gs:
                 _trend_icon = {"up": "↑", "down": "↓", "flat": "→"}.get(_emp_gs.get("trend",""), "—")
                 _chg = _emp_gs.get("change_pct", 0)
                 _chg_str = f"+{_chg:.1f}%" if _chg > 0 else f"{_chg:.1f}%"
-                _uph = _emp_gs.get("Average UPH", 0)
+                _uph = float(_emp_gs.get("Average UPH") or 0)
                 _tgt = _emp_gs.get("Target UPH", "—")
+
+                # Delta since last time this employee was selected
+                _uph_cache_key = f"_last_uph_{emp_id}"
+                _prev_uph = st.session_state.get(_uph_cache_key)
+                _delta_str = ""
+                if _prev_uph is not None and _uph != _prev_uph:
+                    _d = round(_uph - _prev_uph, 2)
+                    _delta_icon = "↑" if _d > 0 else "↓"
+                    _delta_str  = f" &nbsp;·&nbsp; <span style='color:{'#1B5E20' if _d > 0 else '#B71C1C'};font-size:12px;'>{_delta_icon} {_d:+.2f} UPH since last viewed</span>"
+                st.session_state[_uph_cache_key] = _uph
+
                 st.markdown(
                     f"<span style='font-size:13px;'>"
                     f"Avg UPH: <strong>{_uph:.1f}</strong> · "
                     f"Target: <strong>{_tgt}</strong> · "
                     f"Status: <strong>{translate_to_floor_language(_emp_gs.get('goal_status', ''))}</strong> · "
                     f"Direction: {_trend_icon} {_chg_str}"
-                    f"</span>",
+                    f"{_delta_str}</span>",
                     unsafe_allow_html=True)
 
-                st.markdown("##### ▶ Next Coaching Step")
+                # ── Coaching impact (big visual card) ─────────────────────────
                 _recent_notes = _cached_coaching_notes_for(emp_id)
-                if _recent_notes:
-                    _last_note = _recent_notes[0]
-                    _last_date = str(_last_note.get("created_at", ""))[:10]
-                    st.caption(f"Last conversation: {_last_date}")
-                    _impact = find_coaching_impact(emp_id, _recent_notes, history_rows)
-                    if _impact:
-                        show_coaching_impact(emp_name, _impact)
+                _impact = find_coaching_impact(emp_id, _recent_notes, history_rows)
+                if _impact:
+                    show_coaching_impact(emp_name, _impact)
+                elif _recent_notes:
+                    _last_date = str(_recent_notes[0].get("created_at", ""))[:10]
+                    st.caption(f"Last coaching: {_last_date} · Not enough post-coaching data yet.")
                 else:
-                    st.caption("No prior coaching note on file yet.")
-                if _emp_gs.get("trend", "") == "down" and _emp_gs.get("goal_status", "") == "below_goal":
-                    st.warning("Performance is dropping while already below target. Suggested: reset the standard and remove blockers now.")
-                elif _emp_gs.get("trend", "") == "down":
+                    st.caption("No coaching on record yet.")
+
+                # ── Next step suggestion ──────────────────────────────────────
+                if _emp_gs.get("trend") == "down" and _emp_gs.get("goal_status") == "below_goal":
+                    st.warning("⚠ Performance is dropping while already below target. Reset the standard and remove blockers today.")
+                elif _emp_gs.get("trend") == "down":
                     st.info("Performance is slipping. Suggested: quick check-in and reset one daily focus target.")
-                else:
+                elif not _impact:
                     st.info("Suggested: confirm what is working and set one measurable next-step target.")
 
+            # ── Flag status ───────────────────────────────────────────────────
             if is_flagged:
-                flag_info = flags.get(emp_id, {})
-                st.warning(f"🚩 Flagged for performance tracking since **{flag_info.get('flagged_on','')}**")
-                if st.button("✓ Remove flag", key="cn_unflag", type="secondary"):
+                _flag_emoji = {"followup": "🚩", "performance": "⚠️"}.get(flag_type, "🚩")
+                _flag_label = {"followup": "Follow-up", "performance": "Performance Issue"}.get(flag_type, "Follow-up")
+                fc1, fc2 = st.columns([3, 1])
+                fc1.warning(f"{_flag_emoji} **{_flag_label}** · Flagged since {flag_info.get('flagged_on','')}")
+                if fc2.button("Remove", key="cn_unflag", type="secondary", use_container_width=True):
                     from goals import unflag_employee
                     unflag_employee(emp_id)
                     _raw_cached_active_flags.clear()
@@ -489,79 +506,205 @@ def _emp_coaching():
                         if str(r.get("EmployeeID","")) == str(emp_id):
                             r["flagged"] = False
                     st.rerun()
+            
+            st.divider()
+
+            # ── Show follow-up scheduler if just saved ────────────────────────
+            _fu_key = f"_cn_show_followup_{emp_id}"
+            if st.session_state.get(_fu_key):
+                _note_prev = st.session_state.get(f"_cn_last_note_{emp_id}", "")
+                st.markdown("**📅 Schedule a follow-up?**")
+                _today   = date.today()
+                _fu_c1, _fu_c2, _fu_c3, _fu_c4 = st.columns(4)
+                _fu_date = None
+                if _fu_c1.button("In 3 days", key="fu_3d", use_container_width=True):
+                    _fu_date = (_today + __import__("datetime").timedelta(days=3)).isoformat()
+                if _fu_c2.button("In 7 days", key="fu_7d", use_container_width=True):
+                    _fu_date = (_today + __import__("datetime").timedelta(days=7)).isoformat()
+                _fu_custom = _fu_c3.text_input("Custom (MM/DD)", key="fu_custom", placeholder="e.g. 04/15",
+                                                label_visibility="collapsed")
+                if _fu_c4.button("Set date", key="fu_set", use_container_width=True) and _fu_custom.strip():
+                    try:
+                        _fu_date = datetime.strptime(_fu_custom.strip(), "%m/%d").replace(year=date.today().year).strftime("%Y-%m-%d")
+                        if _fu_date < date.today().isoformat():
+                            _fu_date = datetime.strptime(_fu_custom.strip(), "%m/%d").replace(year=date.today().year + 1).strftime("%Y-%m-%d")
+                    except Exception:
+                        st.error("Invalid date format.")
+                if _fu_date:
+                    try:
+                        from followup_manager import add_followup
+                        add_followup(emp_id, emp_name, emp_dept, _fu_date, _note_prev)
+                        st.success(f"✓ Follow-up scheduled for {_fu_date}")
+                    except Exception as _fue:
+                        st.error(f"Could not save follow-up: {_fue}")
+                    del st.session_state[_fu_key]
+                    st.rerun()
+                if st.button("Skip — no follow-up needed", key="fu_skip", type="secondary"):
+                    del st.session_state[_fu_key]
+                    st.rerun()
+                st.divider()
+
+            # ── Coaching templates ────────────────────────────────────────────
+            st.caption("**Quick Actions** — click to pre-fill:")
+            _tpl_cols = st.columns(4)
+            _templates = {
+                "Station Setup":     "Checked station setup. ",
+                "Side-by-Side":      "Paired with a high performer for side-by-side work. ",
+                "Speed Coaching":    "Ran a speed coaching session. ",
+                "Attendance Check":  "Followed up on attendance pattern. ",
+            }
+            _tpl_key = f"_tpl_prefill_{emp_id}"
+            for _ti, (_tlabel, _ttext) in enumerate(_templates.items()):
+                if _tpl_cols[_ti].button(_tlabel, key=f"tpl_{emp_id}_{_ti}", use_container_width=True):
+                    st.session_state.cn_note_val = (st.session_state.get("cn_note_val","") + _ttext).lstrip()
+                    st.rerun()
 
             # ── Add entry ────────────────────────────────────────────────────
             if "cn_note_val" not in st.session_state: st.session_state.cn_note_val = ""
             if "cn_by_val"   not in st.session_state: st.session_state.cn_by_val   = ""
-            note_text  = st.text_area("Add a journal entry", height=130, key="cn_note",
+            note_text  = st.text_area("Add a coaching note", height=120, key="cn_note",
                                        value=st.session_state.cn_note_val,
-                                       placeholder="What did you discuss? What's the plan? Any follow-up needed?")
-            nc1, nc2 = st.columns([2, 3])
+                                       placeholder="What did you discuss? What's the plan?")
+            nc1, nc2, nc3 = st.columns([2, 3, 1])
             created_by = nc2.text_input("Your name (optional)", key="cn_by",
                                          value=st.session_state.cn_by_val,
                                          placeholder="Your name")
-            if nc1.button("💾 Save entry", type="primary", use_container_width=True):
+
+            # Quick note presets
+            _quick_note = nc3.selectbox("Quick note", ["—", "✓ Checked in, no issues", "⚠ Needs follow-up", "✓ Hit target today"],
+                                         key="cn_quick", label_visibility="collapsed")
+            if _quick_note and _quick_note != "—" and not st.session_state.get("_qn_applied"):
+                st.session_state.cn_note_val = _quick_note.strip()
+                st.session_state["_qn_applied"] = True
+                st.rerun()
+            if _quick_note == "—":
+                st.session_state.pop("_qn_applied", None)
+
+            _sv1, _sv2 = st.columns(2)
+            if _sv1.button("💾 Save note", type="primary", use_container_width=True):
                 if note_text.strip():
                     add_coaching_note(emp_id, note_text.strip(), created_by.strip())
                     _raw_cached_coaching_notes_for.clear()
                     _raw_cached_all_coaching_notes.clear()
+                    _preview = note_text.strip()[:80]
+                    st.session_state[f"_cn_last_note_{emp_id}"] = _preview
+                    st.session_state[_fu_key] = True   # prompt follow-up scheduler
                     st.session_state.cn_note_val = ""
                     st.session_state.cn_by_val   = ""
-                    # Increment session count and track last coached employee
+                    st.session_state.pop("_qn_applied", None)
+                    # Track coaching session progress
                     st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
-                    st.session_state["_last_coached_emp_id"] = emp_id  # Track for adaptive rail
-                    # Count remaining below-goal (excluding current employee)
+                    st.session_state["_last_coached_emp_id"] = emp_id
                     _remaining_risk = [
                         r for r in st.session_state.get("goal_status", [])
                         if r.get("goal_status") == "below_goal"
                         and str(r.get("EmployeeID", r.get("Employee Name", ""))) != str(emp_id)
                     ]
-                    _n_rem = len(_remaining_risk)
-                    # Store feedback in session_state — survives rerun and shows
-                    # on the very next render so the user sees real context.
                     st.session_state["_cn_feedback"] = {
                         "emp_name": emp_name,
                         "emp_id": emp_id,
-                        "remaining": _n_rem,
+                        "remaining": len(_remaining_risk),
                         "coached_today": int(st.session_state.get("_coached_today", 0)),
                     }
                     st.rerun()
                 else:
-                    st.warning("Write something before saving the entry.")
+                    st.warning("Write something before saving the note.")
 
-            # ── Past entries (collapsed to reduce visual noise, expand on demand) ─
-            notes = _cached_coaching_notes_for(emp_id)
+            if _sv2.button("Skip for now →", key="cn_skip", use_container_width=True):
+                # Advance to next below-goal or trending-down employee
+                _skip_candidates = sorted(
+                    [r for r in st.session_state.get("goal_status", [])
+                     if (r.get("goal_status") == "below_goal" or r.get("trend") == "down")
+                     and str(r.get("EmployeeID", r.get("Employee Name", ""))) != str(emp_id)],
+                    key=lambda x: float(x.get("risk_score", 0) or 0), reverse=True
+                )
+                if _skip_candidates:
+                    _next_id = str(_skip_candidates[0].get("EmployeeID", _skip_candidates[0].get("Employee Name", "")))
+                    st.session_state["cn_selected_emp"] = _next_id
+                    st.rerun()
+
             st.divider()
+
+            # ── Flag / unflag actions (below note box) ────────────────────────
+            if not is_flagged:
+                with st.expander("🚩 Flag this employee", expanded=False):
+                    _ft_col1, _ft_col2 = st.columns(2)
+                    _new_flag_type = _ft_col1.radio(
+                        "Flag type",
+                        ["🚩 Follow-up", "⚠️ Performance Issue"],
+                        key="cn_flag_type",
+                        horizontal=True,
+                    )
+                    _ft_reason = _ft_col2.text_input("Reason (optional)", key="cn_flag_reason")
+                    if st.button("Apply flag", key="cn_flag_btn", type="secondary"):
+                        from goals import flag_employee
+                        _ft_mapped = "followup" if "Follow-up" in _new_flag_type else "performance"
+                        flag_employee(emp_id, emp_name, emp_dept, _ft_reason, flag_type=_ft_mapped)
+                        _raw_cached_active_flags.clear()
+                        for r in st.session_state.get("goal_status", []):
+                            if str(r.get("EmployeeID","")) == str(emp_id):
+                                r["flagged"] = True
+                        st.rerun()
+
+            # ── Coaching timeline ─────────────────────────────────────────────
+            notes = _cached_coaching_notes_for(emp_id)
             _n_count = len(notes)
-            if _n_count == 1:
-                _notes_lbl = "📋 1 past entry — click to view"
-            elif _n_count > 1:
-                _notes_lbl = f"📋 {_n_count} past entries — click to view"
-            else:
-                _notes_lbl = "📋 No past entries yet"
-            with st.expander(_notes_lbl, expanded=(_n_count > 0 and _n_count <= 2)):
+            _tl_lbl = f"📋 Coaching Timeline ({_n_count} entries)" if _n_count else "📋 No coaching history yet"
+            with st.expander(_tl_lbl, expanded=(_n_count > 0 and _n_count <= 3)):
                 if notes:
-                    for n in notes:
-                        with st.container():
-                            nc1, nc2 = st.columns([10, 1])
-                            _n_date = _html_mod.escape(str(n.get('created_at',''))[:10])
-                            _n_by = _html_mod.escape(n.get('created_by',''))
-                            _n_text = _html_mod.escape(n.get('note',''))
-                            nc1.markdown(
-                                f"<div style='background:#F7F9FC;border-left:3px solid #0F2D52;"
-                                f"border-radius:4px;padding:8px 12px;margin-bottom:4px;'>"
-                                f"<span style='color:#5A7A9C;font-size:11px;'>"
-                                f"{_n_date}"
-                                f"{'  ·  ' + _n_by if _n_by else ''}</span>"
-                                f"<br><span style='color:#1A2D42;font-size:13px;'>{_n_text}</span>"
-                                f"</div>",
-                                unsafe_allow_html=True)
-                            note_id = n.get("id")
-                            if note_id and nc2.button("🗑", key=f"del_{note_id}", help="Delete"):
-                                delete_coaching_note(str(note_id))
-                                _raw_cached_coaching_notes_for.clear()
-                                _raw_cached_all_coaching_notes.clear()
-                                st.rerun()
+                    # Build per-note UPH impact
+                    _all_h = st.session_state.get("history", [])
+                    for _ni, n in enumerate(notes):
+                        _note_date_str = str(n.get("created_at",""))[:10]
+                        _note_text_raw = n.get("note","")
+                        _note_by       = n.get("created_by","")
+                        _note_id       = n.get("id")
+
+                        # Compute UPH change following this note
+                        _uph_change_str = ""
+                        try:
+                            from datetime import datetime as _dtcls, timedelta as _tdcls
+                            _nc_date = _dtcls.fromisoformat(_note_date_str).date()
+                            _nc_before = [float(h.get("uph") or 0) for h in _all_h
+                                          if str(h.get("emp_id")) == str(emp_id)
+                                          and (_nc_date - _tdcls(days=7)) <= _dtcls.fromisoformat(h.get("work_date","")).date() < _nc_date
+                                          and float(h.get("uph") or 0) > 0]
+                            _nc_after  = [float(h.get("uph") or 0) for h in _all_h
+                                          if str(h.get("emp_id")) == str(emp_id)
+                                          and _nc_date < _dtcls.fromisoformat(h.get("work_date","")).date() <= (_nc_date + _tdcls(days=7))
+                                          and float(h.get("uph") or 0) > 0]
+                            if _nc_before and _nc_after:
+                                _b_avg = sum(_nc_before) / len(_nc_before)
+                                _a_avg = sum(_nc_after)  / len(_nc_after)
+                                _delta = round(_a_avg - _b_avg, 1)
+                                if _delta > 0.2:
+                                    _uph_change_str = f" · <span style='color:#1B5E20;font-size:11px;'>↑ +{_delta} UPH</span>"
+                                elif _delta < -0.2:
+                                    _uph_change_str = f" · <span style='color:#B71C1C;font-size:11px;'>↓ {_delta} UPH</span>"
+                                else:
+                                    _uph_change_str = f" · <span style='color:#5A7A9C;font-size:11px;'>→ stable</span>"
+                        except Exception:
+                            pass
+
+                        # Timeline entry card
+                        _nby_safe   = _html_mod.escape(_note_by) if _note_by else ""
+                        _ntxt_safe  = _html_mod.escape(_note_text_raw[:160] + ("…" if len(_note_text_raw) > 160 else ""))
+                        _ndate_safe = _html_mod.escape(_note_date_str)
+                        tl1, tl2 = st.columns([11, 1])
+                        tl1.markdown(
+                            f"<div style='border-left:3px solid #0F2D52;padding:8px 12px;margin-bottom:6px;'>"
+                            f"<span style='color:#5A7A9C;font-size:11px;'>{_ndate_safe}"
+                            f"{'  ·  ' + _nby_safe if _nby_safe else ''}{_uph_change_str}</span>"
+                            f"<br><span style='color:#1A2D42;font-size:13px;'>{_ntxt_safe}</span>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                        if _note_id and tl2.button("🗑", key=f"del_{_note_id}", help="Delete"):
+                            delete_coaching_note(str(_note_id))
+                            _raw_cached_coaching_notes_for.clear()
+                            _raw_cached_all_coaching_notes.clear()
+                            st.rerun()
+
                     st.divider()
                     ac1, ac2 = st.columns(2)
                     if ac1.button("⬇️ Export journal", key="cn_export", use_container_width=True):
@@ -584,7 +727,7 @@ def _emp_coaching():
                         st.session_state.pop("cn_selected_emp", None)
                         st.rerun()
                 else:
-                    st.caption("No journal entries yet — add one above.")
+                    st.caption("No coaching history yet — add a note above.")
 
 
 

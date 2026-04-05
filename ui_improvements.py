@@ -286,24 +286,47 @@ def find_coaching_impact(emp_id: str, coaching_notes: list[dict],
 
 def show_coaching_impact(emp_name: str, impact: dict):
     """
-    Display coaching impact in human-friendly language.
+    Display coaching impact as a prominent before/after card.
     """
     if not impact:
         return
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.caption(f"**Coaching:** {impact['coached_date'].strftime('%b %d')} ({impact['days_since']}d ago)")
-        st.caption(f"*{impact['note']}*")
-    
-    with col2:
-        if impact["improvement"]:
-            st.success(f"↑ +{impact['change_uph']} UPH improvement")
-            st.caption(f"{impact['before_uph']} → {impact['after_uph']}")
-        else:
-            st.warning(f"↓ {impact['change_uph']} UPH (pattern may need adjustment)")
-            st.caption(f"{impact['before_uph']} → {impact['after_uph']}")
+
+    before = impact["before_uph"]
+    after  = impact["after_uph"]
+    change = impact["change_uph"]
+    days   = impact["days_since"]
+    date_fmt = impact["coached_date"].strftime("%b %d")
+    improved = impact["improvement"]
+
+    if improved:
+        pct = round((change / before) * 100, 1) if before else 0
+        arrow = "📈"
+        status_txt = "Improving 👍"
+        bg  = "linear-gradient(90deg,#E8F5E9 0%,#E3F2FD 100%)"
+        brd = "#43A047"
+        clr = "#1B5E20"
+        chg_str = f"+{change} (+{pct}%)"
+    else:
+        pct = round((change / before) * 100, 1) if before else 0
+        arrow = "📉"
+        status_txt = "No improvement ⚠️"
+        bg  = "linear-gradient(90deg,#FFF8E1 0%,#FFF1EC 100%)"
+        brd = "#E65100"
+        clr = "#7F3606"
+        chg_str = f"{change} ({pct}%)"
+
+    st.markdown(
+        f"<div style='background:{bg};border-left:4px solid {brd};border-radius:8px;"
+        f"padding:12px 16px;margin:8px 0 12px;'>"
+        f"<div style='font-size:11px;font-weight:700;text-transform:uppercase;"
+        f"letter-spacing:.06em;color:#666;margin-bottom:4px;'>"
+        f"{arrow} After Last Coaching · {date_fmt} ({days}d ago)</div>"
+        f"<div style='font-size:18px;font-weight:800;color:{clr};'>"
+        f"UPH: {before} → {after} &nbsp; <span style='font-size:14px;'>{chg_str}</span></div>"
+        f"<div style='font-size:13px;color:{clr};margin-top:2px;'>Status: {status_txt}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════════

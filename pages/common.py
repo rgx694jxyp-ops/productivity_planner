@@ -111,7 +111,7 @@ def _build_coaching_recommendations():
                 f"Schedule one-on-one coaching session — {name} is significantly below the {dept} target of {target} UPH."
             )
             rec["actions"].append("Review workstation setup and process efficiency for immediate improvements.")
-            rec["actions"].append("Consider pairing with a top performer for peer mentoring.")
+            rec["actions"].append("Pair with a high performer for side-by-side work to share techniques.")
             if trend_dir == "down":
                 rec["actions"].append("URGENT: Performance is declining. Investigate equipment, training, or workload blockers.")
         elif target and gap_pct < -10:
@@ -131,7 +131,7 @@ def _build_coaching_recommendations():
         elif target and gap_pct >= 20:
             rec["priority"] = "star"
             rec["status"] = f"+{gap_pct}% above target"
-            rec["actions"].append(f"Top performer! Consider {name} for peer mentoring or team lead coverage.")
+            rec["actions"].append(f"⭐ {name} is a top performer — consistent strong results.")
             rec["actions"].append("Recognize achievement publicly to reinforce best practices.")
         elif target and gap_pct >= 0:
             rec["priority"] = "low"

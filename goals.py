@@ -118,24 +118,32 @@ def get_all_targets() -> dict[str, float]:
 
 # ── Employee flagging ──��───────────────────────────���──────────────────────────
 
-def flag_employee(emp_id: str, emp_name: str, dept: str, reason: str = ""):
-    """Flag an employee for performance tracking and log to coaching notes. Idempotent."""
+def flag_employee(emp_id: str, emp_name: str, dept: str, reason: str = "",
+                  flag_type: str = "followup"):
+    """Flag an employee for performance tracking and log to coaching notes.
+
+    flag_type: "followup" (🚩 Follow-up) | "performance" (⚠️ Performance Issue)
+    Idempotent — re-flagging updates the type and reason.
+    """
     data = load_goals()
     already_active = (emp_id in data["flagged_employees"]
                       and data["flagged_employees"][emp_id].get("active"))
     if emp_id not in data["flagged_employees"]:
         data["flagged_employees"][emp_id] = {
-            "name":      emp_name,
-            "dept":      dept,
-            "flagged_on": _get_user_timezone_now().strftime("%Y-%m-%d"),
-            "reason":    reason,
-            "notes":     [],
+            "name":         emp_name,
+            "dept":         dept,
+            "flagged_on":   _get_user_timezone_now().strftime("%Y-%m-%d"),
+            "reason":       reason,
+            "flag_type":    flag_type,
+            "notes":        [],
             "context_tags": [],
-            "active":    True,
+            "active":       True,
         }
     else:
-        data["flagged_employees"][emp_id]["active"] = True
-        # Ensure context_tags field exists
+        data["flagged_employees"][emp_id]["active"]    = True
+        data["flagged_employees"][emp_id]["flag_type"] = flag_type
+        if reason:
+            data["flagged_employees"][emp_id]["reason"] = reason
         if "context_tags" not in data["flagged_employees"][emp_id]:
             data["flagged_employees"][emp_id]["context_tags"] = []
     save_goals(data)
@@ -143,8 +151,8 @@ def flag_employee(emp_id: str, emp_name: str, dept: str, reason: str = ""):
     if not already_active:
         try:
             from database import add_coaching_note
-            note = (f"Flagged for performance tracking. Reason: {reason}"
-                    if reason.strip() else "Flagged for performance tracking.")
+            note = (f"Flagged ({flag_type}). Reason: {reason}"
+                    if reason.strip() else f"Flagged for follow-up ({flag_type}).")
             add_coaching_note(emp_id, note, created_by="System")
         except Exception:
             pass   # non-critical — flag is still saved

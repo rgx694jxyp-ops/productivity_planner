@@ -1250,7 +1250,7 @@ def page_productivity():
                     if emp["trend"] == "down":
                         actions.append("**Identify obstacles** — Ask what's changed. Look for workload spikes or personal issues.")
                     elif emp["trend"] == "flat":
-                        actions.append("**Break the plateau** — Try new training, task rotation, or peer mentoring.")
+                        actions.append("**Break the plateau** — Try different task rotation or side-by-side work with a high performer.")
 
                 # Gap-based actions
                 try:
