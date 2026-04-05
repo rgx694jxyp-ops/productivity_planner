@@ -349,9 +349,15 @@ def page_settings():
         # ── Preserved: chart/labor/audit/cleanup settings ─────────────────────
         st.subheader("⚙️ App Settings")
         st.caption("Configure team-level behavior, labor assumptions, and cleanup tools.")
-        st.session_state.chart_months = st.slider("History window used across charts (months)", 0, 60, st.session_state.chart_months)
+        _chart_months_default = int(st.session_state.get("chart_months", 12) or 12)
+        st.session_state["chart_months"] = st.slider(
+            "History window used across charts (months)",
+            0,
+            60,
+            _chart_months_default,
+        )
         st.caption("This limits how many months of historical data are included in dashboard/productivity trend charts.")
-        st.session_state.smart_merge  = True   # always on
+        st.session_state["smart_merge"] = True   # always on
         from settings import Settings as _AppSettings
         _tzs = _AppSettings()
 
@@ -596,16 +602,7 @@ def page_settings():
                     except Exception:
                         pass
                 if "_tz_offset_min" not in st.session_state:
-                    st.components.v1.html(
-                        "<script>"
-                        "const off = new Date().getTimezoneOffset();"
-                        "const url = new URL(window.parent.location.href);"
-                        "url.searchParams.set('_tz', off);"
-                        "window.parent.history.replaceState(null,'',url.toString());"
-                        "window.parent.location.reload();"
-                        "</script>",
-                        height=0,
-                    )
+                    st.session_state["_tz_offset_min"] = 0
 
                 for err in errors:
                     sev = err.get("severity", "error")
