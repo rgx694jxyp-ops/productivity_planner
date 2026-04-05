@@ -902,162 +902,139 @@ def _login_page():
 
     # ── Sign in mode ──────────────────────────────────────────────────
     st.markdown("<div style='max-width:400px;margin:24px auto 0;'>", unsafe_allow_html=True)
+    _tab_signin, _tab_signup = st.tabs(["Sign in", "Create account"])
 
-    _is_locked_out = _check_login_lockout()
+    with _tab_signin:
+        _is_locked_out = _check_login_lockout()
 
-    email    = st.text_input("Email",    placeholder="you@company.com",  key="login_email")
-    password = st.text_input("Password", placeholder="••••••••••••",      key="login_password", type="password")
+        email = st.text_input("Email", placeholder="you@company.com", key="login_email")
+        password = st.text_input("Password", placeholder="••••••••••••", key="login_password", type="password")
 
-    if st.button("Sign in", type="primary", use_container_width=True, disabled=_is_locked_out):
-        if not email.strip() or not password.strip():
-            st.error("Enter your email and password.")
-        else:
-            try:
-                from database import get_supabase_credentials
-                from supabase import create_client as _sc
-                SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
-                _sb   = _sc(SUPABASE_URL, SUPABASE_KEY)
-                resp  = _sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
+        if st.button("Sign in", type="primary", use_container_width=True, disabled=_is_locked_out):
+            if not email.strip() or not password.strip():
+                st.error("Enter your email and password.")
+            else:
+                try:
+                    from database import get_supabase_credentials
+                    from supabase import create_client as _sc
+                    SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
+                    _sb = _sc(SUPABASE_URL, SUPABASE_KEY)
+                    resp = _sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
 
-                # ── Email verification check ──────────────────────────
-                _user = resp.user
-                _email_confirmed = getattr(_user, "email_confirmed_at", None)
-                if not _email_confirmed:
-                    st.warning("Your email has not been verified. Check your inbox for a confirmation link.")
-                    _log_app_error("login", f"Unverified email login attempt: {email.strip()}")
-                    st.markdown("</div>", unsafe_allow_html=True)
-                    return
+                    _user = resp.user
+                    _email_confirmed = getattr(_user, "email_confirmed_at", None)
+                    if not _email_confirmed:
+                        st.warning("Your email has not been verified. Check your inbox for a confirmation link.")
+                        _log_app_error("login", f"Unverified email login attempt: {email.strip()}")
+                        st.markdown("</div>", unsafe_allow_html=True)
+                        return
 
-                _at = resp.session.access_token
-                _rt = resp.session.refresh_token
-                # Store session tokens + expiry for auto-refresh
-                st.session_state["supabase_session"] = {
-                    "access_token": _at, "refresh_token": _rt,
-                }
-                _set_auth_cookies(_at, _rt)
-                st.session_state["_sb_token_expires_at"] = (
-                    resp.session.expires_at
-                    if hasattr(resp.session, "expires_at") and resp.session.expires_at
-                    else time.time() + 3600
-                )
-                # Create a fresh client with the auth session baked in
-                _sb2 = _sc(SUPABASE_URL, SUPABASE_KEY)
-                _sb2.auth.set_session(_at, _rt)
+                    _at = resp.session.access_token
+                    _rt = resp.session.refresh_token
+                    st.session_state["supabase_session"] = {
+                        "access_token": _at, "refresh_token": _rt,
+                    }
+                    _set_auth_cookies(_at, _rt)
+                    st.session_state["_sb_token_expires_at"] = (
+                        resp.session.expires_at
+                        if hasattr(resp.session, "expires_at") and resp.session.expires_at
+                        else time.time() + 3600
+                    )
+                    _sb2 = _sc(SUPABASE_URL, SUPABASE_KEY)
+                    _sb2.auth.set_session(_at, _rt)
 
-                _uid = resp.user.id
-                prof_resp = _sb2.table("user_profiles").select("tenant_id, role, name") \
-                               .eq("id", _uid).execute()
-                if prof_resp.data:
-                    _prof = prof_resp.data[0]
-                else:
-                    # First login — check for pending invite code first
-                    _pending_invite = st.session_state.get("_pending_invite", "")
-                    if _pending_invite:
-                        # Join existing tenant via invite code
-                        try:
-                            from database import join_tenant_by_invite as _join_invite
-                            _display = email.strip().split("@")[0]
-                            _joined_tid = _join_invite(_uid, _pending_invite, _display)
-                            if _joined_tid:
-                                st.session_state.pop("_pending_invite", None)
-                                _prof = {"tenant_id": _joined_tid, "role": "member", "name": _display}
-                            else:
-                                st.error("That invite code is not valid. Contact your supervisor for a new link.")
+                    _uid = resp.user.id
+                    prof_resp = _sb2.table("user_profiles").select("tenant_id, role, name") \
+                                   .eq("id", _uid).execute()
+                    if prof_resp.data:
+                        _prof = prof_resp.data[0]
+                    else:
+                        _pending_invite = st.session_state.get("_pending_invite", "")
+                        if _pending_invite:
+                            try:
+                                from database import join_tenant_by_invite as _join_invite
+                                _display = email.strip().split("@")[0]
+                                _joined_tid = _join_invite(_uid, _pending_invite, _display)
+                                if _joined_tid:
+                                    st.session_state.pop("_pending_invite", None)
+                                    _prof = {"tenant_id": _joined_tid, "role": "member", "name": _display}
+                                else:
+                                    st.error("That invite code is not valid. Contact your supervisor for a new link.")
+                                    st.markdown("</div>", unsafe_allow_html=True)
+                                    return
+                            except Exception as _inv_err:
+                                st.error(f"Could not join team: {_inv_err}")
                                 st.markdown("</div>", unsafe_allow_html=True)
                                 return
-                        except Exception as _inv_err:
-                            st.error(f"Could not join team: {_inv_err}")
-                            st.markdown("</div>", unsafe_allow_html=True)
-                            return
+                        else:
+                            import uuid as _uuid
+                            _new_tid = str(_uuid.uuid4())
+                            _display = email.strip().split("@")[0]
+                            try:
+                                _rpc_result = _sb2.rpc("provision_tenant", {
+                                    "p_user_id": _uid,
+                                    "p_tenant_name": _display,
+                                    "p_user_name": _display,
+                                }).execute()
+                                if _rpc_result.data:
+                                    _new_tid = _rpc_result.data
+                            except Exception as _rpc_err:
+                                _log_app_error("provision_tenant", f"RPC failed for {_uid}: {_rpc_err}, trying direct insert")
+                                _sb2.table("tenants").insert({
+                                    "id": _new_tid, "name": _display,
+                                }).execute()
+                                _sb2.table("user_profiles").insert({
+                                    "id": _uid, "tenant_id": _new_tid,
+                                    "role": "admin", "name": _display,
+                                }).execute()
+                            _prof = {"tenant_id": _new_tid, "role": "admin", "name": _display}
+
+                    st.session_state["tenant_id"] = _prof["tenant_id"]
+                    st.session_state["user_role"] = _prof.get("role", "member")
+                    st.session_state["user_name"] = _prof.get("name") or email.strip()
+                    st.session_state["user_email"] = email.strip()
+                    st.session_state["user_id"] = _uid
+                    st.session_state["_login_attempts"] = 0
+                    st.session_state["_login_lockout_until"] = 0
+                    _bust_cache()
+                    st.rerun()
+                except Exception as _le:
+                    _msg = str(_le).strip()
+                    _msg_l = _msg.lower()
+                    if "email not confirmed" in _msg_l:
+                        st.warning("This user exists, but the email is not confirmed yet. In Supabase Auth, open the user and confirm them, or disable email confirmation while setting up.")
+                    elif any(s in _msg_l for s in [
+                        "invalid login credentials",
+                        "invalid password",
+                        "email or password",
+                    ]):
+                        _record_failed_login()
+                        st.info("If you are new here, use the Create account tab above instead of Sign in.")
+                    elif any(s in _msg_l for s in [
+                        "invalid api key",
+                        "invalid jwt",
+                        "failed to fetch",
+                        "name or service not known",
+                        "connection refused",
+                        "timed out",
+                    ]):
+                        st.error("Supabase connection failed. Check SUPABASE_URL and SUPABASE_KEY in .streamlit/secrets.toml.")
+                    elif "user not found" in _msg_l or "signup disabled" in _msg_l:
+                        st.error("This email does not exist in Supabase Auth yet. Use the Create account tab.")
                     else:
-                        # No invite — provision a new tenant for this user
-                        import uuid as _uuid
-                        _new_tid = str(_uuid.uuid4())
-                        _display = email.strip().split("@")[0]
-                        # Use RPC to bypass RLS — falls back to direct insert
-                        try:
-                            _rpc_result = _sb2.rpc("provision_tenant", {
-                                "p_user_id":     _uid,
-                                "p_tenant_name": _display,
-                                "p_user_name":   _display,
-                            }).execute()
-                            # RPC returns the generated tenant_id
-                            if _rpc_result.data:
-                                _new_tid = _rpc_result.data
-                        except Exception as _rpc_err:
-                            # RPC doesn't exist yet — try direct insert
-                            _log_app_error("provision_tenant", f"RPC failed for {_uid}: {_rpc_err}, trying direct insert")
-                            _sb2.table("tenants").insert({
-                                "id": _new_tid, "name": _display,
-                            }).execute()
-                            _sb2.table("user_profiles").insert({
-                                "id": _uid, "tenant_id": _new_tid,
-                                "role": "admin", "name": _display,
-                            }).execute()
-                        _prof = {"tenant_id": _new_tid, "role": "admin",
-                                 "name": _display}
-                st.session_state["tenant_id"] = _prof["tenant_id"]
-                st.session_state["user_role"] = _prof.get("role", "member")
-                st.session_state["user_name"]  = _prof.get("name") or email.strip()
-                st.session_state["user_email"] = email.strip()
-                st.session_state["user_id"] = _uid
-                # Clear login attempt counter on success
-                st.session_state["_login_attempts"] = 0
-                st.session_state["_login_lockout_until"] = 0
-                _bust_cache()
-                st.rerun()
-            except Exception as _le:
-                _msg = str(_le).strip()
-                _msg_l = _msg.lower()
-                if "email not confirmed" in _msg_l:
-                    st.warning("This user exists, but the email is not confirmed yet. In Supabase Auth, open the user and confirm them, or disable email confirmation while setting up.")
-                elif any(s in _msg_l for s in [
-                    "invalid login credentials",
-                    "invalid password",
-                    "email or password",
-                ]):
-                    _record_failed_login()
-                elif any(s in _msg_l for s in [
-                    "invalid api key",
-                    "invalid jwt",
-                    "failed to fetch",
-                    "name or service not known",
-                    "connection refused",
-                    "timed out",
-                ]):
-                    st.error("Supabase connection failed. Check SUPABASE_URL and SUPABASE_KEY in .streamlit/secrets.toml.")
-                elif "user not found" in _msg_l or "signup disabled" in _msg_l:
-                    st.error("This email does not exist in Supabase Auth yet. Use the 'New here? Create account' section below.")
-                else:
-                    st.error(f"Login failed: {_msg or 'Unknown Supabase auth error'}")
-                _log_app_error("login", f"Failed login for {email.strip()}: {_le}")
+                        st.error(f"Login failed: {_msg or 'Unknown Supabase auth error'}")
+                    _log_app_error("login", f"Failed login for {email.strip()}: {_le}")
 
-    # Forgot password link
-    if st.button("Forgot password?", type="secondary", use_container_width=True, key="forgot_pw_btn"):
-        st.session_state["_show_reset_pw"] = True
-        st.rerun()
+        if st.button("Forgot password?", type="secondary", use_container_width=True, key="forgot_pw_btn"):
+            st.session_state["_show_reset_pw"] = True
+            st.rerun()
 
-    st.markdown("---")
-    with st.expander("New here? Create account"):
+    with _tab_signup:
         st.caption("Create your account here instead of adding users manually in Supabase.")
-        _signup_email = st.text_input(
-            "Email",
-            placeholder="you@company.com",
-            key="signup_email",
-        )
-        _signup_pw = st.text_input(
-            "Password",
-            placeholder="At least 6 characters",
-            type="password",
-            key="signup_password",
-        )
-        _signup_pw2 = st.text_input(
-            "Confirm password",
-            placeholder="Re-enter password",
-            type="password",
-            key="signup_password_confirm",
-        )
-        if st.button("Create account", key="create_account_btn", use_container_width=True):
+        _signup_email = st.text_input("Email", placeholder="you@company.com", key="signup_email")
+        _signup_pw = st.text_input("Password", placeholder="At least 6 characters", type="password", key="signup_password")
+        _signup_pw2 = st.text_input("Confirm password", placeholder="Re-enter password", type="password", key="signup_password_confirm")
+        if st.button("Create account", key="create_account_btn", use_container_width=True, type="primary"):
             if not _signup_email.strip() or not _signup_pw.strip() or not _signup_pw2.strip():
                 st.warning("Enter email, password, and confirmation.")
             elif _signup_pw != _signup_pw2:
