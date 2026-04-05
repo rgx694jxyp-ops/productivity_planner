@@ -1,2 +1,11 @@
 [client]
 showSidebarNavigation = false
+
+[server]
+# Keep upload transport limits explicit to prevent client-side 400s from
+# message/file-size mismatches across environments.
+maxUploadSize = 200
+maxMessageSize = 200
+
+[logger]
+level = "debug"
