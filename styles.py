@@ -186,5 +186,23 @@ def apply_global_styles():
     from { opacity: 0.4; transform: translateY(5px); }
     to   { opacity: 1;   transform: translateY(0); }
   }
+
+  /* Expander header text color: black when collapsed, white when expanded */
+  [data-testid="stExpander"] > details summary {
+    color: #1A2D42 !important;
+  }
+  [data-testid="stExpander"] > details[open] summary {
+    color: #ffffff !important;
+    background: linear-gradient(135deg, #0F2D52 0%, #1A4A8A 100%) !important;
+    border-radius: 8px 8px 0 0 !important;
+    padding: 12px 16px !important;
+    margin: -16px -16px 12px -16px !important;
+  }
+  [data-testid="stExpander"] > details summary:hover {
+    background: #f0f4f8 !important;
+  }
+  [data-testid="stExpander"] > details[open] summary:hover {
+    background: linear-gradient(135deg, #1A4A8A 0%, #2563A8 100%) !important;
+  }
 </style>
 """)

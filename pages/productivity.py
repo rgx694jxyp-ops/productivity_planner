@@ -539,8 +539,10 @@ def page_productivity():
         st.caption("Each point shows the rolling average UPH for that employee on that date.")
 
         # Select rolling period
-        roll_period = st.selectbox("Rolling Period", ["7-Day", "14-Day"], key="roll_period")
-
+        _roll_col1, _roll_col2 = st.columns(2)
+        with _roll_col1:
+            roll_period = st.radio("Rolling Period", ["7-Day", "14-Day"], horizontal=True, key="roll_period_selection")
+        
         # Chart
         try:
             col_name = "7DayRollingAvg" if roll_period == "7-Day" else "14DayRollingAvg"
@@ -550,7 +552,7 @@ def page_productivity():
             if not df_r_clean.empty:
                 max_date = df_r_clean["Date"].max()
                 cutoff = max_date - pd.Timedelta(days=int(lookback_days) - 1)
-                df_r_clean = df_r_clean[df_r_clean["Date"] >= cutoff]
+                df_r_clean = df_r_clean[df_r_clean["Date"] >= cutoff].copy()
                 # Avoid duplicate employee/date keys from mixed import paths.
                 df_r_clean = (
                     df_r_clean.groupby(["Date", "Employee"], as_index=False)[col_name]

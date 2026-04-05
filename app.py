@@ -215,12 +215,36 @@ def _tenant_log_path(base_name: str) -> str:
         return _os.path.join(_dir, f"{base_name}_{tid}.log")
     return _os.path.join(_dir, f"{base_name}.log")
 
+def _get_audit_timestamp() -> str:
+    """Get current timestamp in user's timezone (if configured) for audit logs."""
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        from settings import Settings
+        
+        tenant_id = st.session_state.get("tenant_id", "")
+        settings = Settings(tenant_id)
+        tz_str = settings.get("timezone", "").strip()
+        
+        if tz_str:
+            try:
+                tz = ZoneInfo(tz_str)
+                now = _dt.now(tz)
+                return now.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            return _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        from datetime import datetime as _dt
+        return _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _audit(action: str, detail: str = ""):
     """Append a timestamped entry to tenant-specific audit log."""
     try:
-        from datetime import datetime as _dt
         log_path = _tenant_log_path("dpd_audit")
-        entry    = f"{_dt.now().strftime('%Y-%m-%d %H:%M:%S')} | {action} | {detail}\n"
+        entry    = f"{_get_audit_timestamp()} | {action} | {detail}\n"
         with open(log_path, "a", encoding="utf-8") as _f:
             _f.write(entry)
     except Exception:

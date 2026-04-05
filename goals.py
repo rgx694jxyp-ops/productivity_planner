@@ -11,8 +11,40 @@ import os
 from datetime import datetime, date
 from collections import defaultdict
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
+
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _get_user_timezone_now() -> datetime:
+    """Get current datetime in user's configured timezone.
+    
+    If timezone is configured in settings, returns timezone-aware datetime.
+    Otherwise, returns server local time (naive datetime).
+    """
+    tz_str = ""
+    try:
+        from settings import Settings
+        import streamlit as st
+        tenant_id = st.session_state.get("tenant_id", "")
+        settings = Settings(tenant_id)
+        tz_str = settings.get("timezone", "").strip()
+    except Exception:
+        pass
+    
+    now = None
+    if tz_str and ZoneInfo:
+        try:
+            tz = ZoneInfo(tz_str)
+            return datetime.now(tz)
+        except Exception:
+            return datetime.now()
+    else:
+        return datetime.now()
 
 
 def _goals_file() -> str:
@@ -95,7 +127,7 @@ def flag_employee(emp_id: str, emp_name: str, dept: str, reason: str = ""):
         data["flagged_employees"][emp_id] = {
             "name":      emp_name,
             "dept":      dept,
-            "flagged_on": datetime.now().strftime("%Y-%m-%d"),
+            "flagged_on": _get_user_timezone_now().strftime("%Y-%m-%d"),
             "reason":    reason,
             "notes":     [],
             "context_tags": [],
@@ -131,7 +163,7 @@ def add_note(emp_id: str, note_text: str):
     if emp_id not in data["flagged_employees"]:
         return
     data["flagged_employees"][emp_id]["notes"].append({
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "date": _get_user_timezone_now().strftime("%Y-%m-%d %H:%M"),
         "text": note_text.strip(),
     })
     save_goals(data)

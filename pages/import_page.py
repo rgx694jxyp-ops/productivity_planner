@@ -19,6 +19,7 @@ from app import (
     time,
     traceback,
 )
+from pages.common import get_user_timezone_now
 import hashlib
 import json
 import re
@@ -202,7 +203,7 @@ def _list_recent_uploads(days: int = 7) -> list[dict]:
             return []
 
         _sb = _db_get_client()
-        _since = (datetime.now() - _td(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+        _since = (get_user_timezone_now() - _td(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
         _res = _db_tq(
             _sb.table("uploaded_files")
             .select("id, filename, row_count, header_mapping, is_active, created_at")
@@ -467,7 +468,7 @@ def _import_step1():
 
                                     if not isinstance(_meta, dict):
                                         _meta = {}
-                                    _meta["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
+                                    _meta["undo_applied_at"] = get_user_timezone_now().isoformat(timespec="seconds")
                                     _meta["undo_result"] = {
                                         "restored_rows": int(_restored),
                                         "attempted_deletes": int(_attempted),
@@ -520,7 +521,7 @@ def _import_step1():
                     "Units": "Units",
                     "HoursWorked": "HoursWorked",
                 },
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "timestamp": get_user_timezone_now().strftime("%Y-%m-%d %H:%M"),
             }]
             st.session_state.submission_plan = None
             st.session_state.split_overrides = {}
@@ -604,7 +605,7 @@ def _import_step1():
 
         if st.button("Continue →", type="primary", use_container_width=True):
             sessions = [
-                {**p, "mapping": {}, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
+                {**p, "mapping": {}, "timestamp": get_user_timezone_now().strftime("%Y-%m-%d %H:%M")}
                 for p in pending
             ]
             # Auto-detect columns for each file
@@ -858,7 +859,7 @@ def _import_step3():
             if _upload_id:
                 if not isinstance(_payload, dict):
                     _payload = {}
-                _payload["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
+                _payload["undo_applied_at"] = get_user_timezone_now().isoformat(timespec="seconds")
                 _payload["undo_result"] = {
                     "source": "last_import_button",
                     "restored_rows": int(_restored),
@@ -1284,7 +1285,9 @@ def _import_step3():
             if not all_mapping and s.get("mapping"):
                 all_mapping = s["mapping"]
 
-        bar = st.progress(0, text="Registering employees…")
+        _progress_container = st.container()
+        with _progress_container:
+            bar = st.progress(0, text="Registering employees…")
 
         # Register all employees — one batch upsert instead of N individual calls
         id_col    = all_mapping.get("EmployeeID","EmployeeID")
@@ -1749,7 +1752,7 @@ def _import_step3():
                             "touched_keys": _undo_touched_keys,
                             "previous_rows": _undo_previous_rows,
                         },
-                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                        "created_at": get_user_timezone_now().isoformat(timespec="seconds"),
                     }
                     _upload_filename = ", ".join([s.get("filename", "") for s in sessions if s.get("filename")]).strip() or "Import"
                     _upload_log_id = _record_upload_event(_upload_filename, _candidate_count, _upload_payload)
@@ -1842,6 +1845,9 @@ def _import_step3():
                 "risks":     _risks_final,
                 "days":      _estimated_days,
             }
+            
+            # Clear the progress bar before rerun
+            _progress_container.empty()
             st.rerun()
 
         except Exception as _pipe_err:

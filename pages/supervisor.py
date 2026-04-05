@@ -405,6 +405,32 @@ def page_supervisor():
     
     st.divider()
 
+    # ── Department Trends Chart ──────────────────────────────────────────────
+    st.subheader("📈 Department UPH Trends")
+    try:
+        import pandas as pd
+        import math as _math
+        dept_trends = st.session_state.get("dept_trends", [])
+        if dept_trends:
+            df_trends = pd.DataFrame(dept_trends)
+            df_trends_clean = df_trends[df_trends["Average UPH"].apply(
+                lambda x: _math.isfinite(float(x)) if x is not None else False
+            )].copy()
+            if not df_trends_clean.empty:
+                st.caption("Average UPH by department across all employees each month.")
+                st.line_chart(
+                    df_trends_clean.pivot(index="Month", columns="Department", values="Average UPH"),
+                    use_container_width=True
+                )
+            else:
+                st.info("No department trend data available yet.")
+        else:
+            st.info("No department trend data available yet.")
+    except Exception:
+        pass
+
+    st.divider()
+
     show_coaching_activity_summary(_coaching_activity)
 
     st.divider()

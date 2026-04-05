@@ -9,6 +9,11 @@ import csv
 import os
 from datetime import datetime
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
+
 
 # ── Issue categories (mirrors the VBA colour-coding logic) ──────────────────
 CATEGORY_COLOURS = {
@@ -37,6 +42,36 @@ def _tenant_suffix() -> str:
     return ""
 
 
+def _get_user_timezone_string() -> str:
+    """Get the user's configured timezone, or empty string for server local time."""
+    try:
+        import streamlit as st
+        from settings import Settings
+        
+        tenant_id = st.session_state.get("tenant_id", "")
+        settings = Settings(tenant_id)
+        return settings.get("timezone", "").strip()
+    except Exception:
+        return ""
+
+
+def _get_now_timestamp() -> str:
+    """Get current timestamp in user's timezone (if configured) in ISO format."""
+    tz_str = _get_user_timezone_string()
+    now = None
+    
+    if tz_str and ZoneInfo:
+        try:
+            tz = ZoneInfo(tz_str)
+            now = datetime.now(tz)
+        except Exception:
+            now = datetime.now()
+    else:
+        now = datetime.now()
+    
+    return now.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class ErrorLog:
     """Collects issues during a pipeline run and writes them to CSV at the end."""
 
@@ -50,7 +85,7 @@ class ErrorLog:
     def log(self, step: str, row_num: int, issue_type: str, detail: str, raw_value: str = ""):
         """Record one issue.  row_num=0 means it's not row-specific."""
         self._records.append({
-            "Timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Timestamp":  _get_now_timestamp(),
             "Step":       step,
             "Row #":      row_num if row_num > 0 else "",
             "Issue Type": issue_type,
