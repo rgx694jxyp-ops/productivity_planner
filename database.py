@@ -1119,6 +1119,144 @@ PLAN_LIMITS = {
 }
 
 
+def _get_live_subscription_fallback(tenant_id: str = "") -> Optional[dict]:
+    """Return a synthetic subscription object from Stripe when DB mirror is missing."""
+    import requests
+    import time as _time
+
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return None
+
+    stripe_key = _get_config("STRIPE_SECRET_KEY")
+    if not stripe_key:
+        return None
+
+    try:
+        import streamlit as st
+        _cache_key = f"_live_subscription_fallback_{tid}"
+        _ts_key = f"_live_subscription_fallback_ts_{tid}"
+        _cached = st.session_state.get(_cache_key)
+        _cached_ts = float(st.session_state.get(_ts_key, 0) or 0)
+        if _cached and (_time.time() - _cached_ts) < 60:
+            return _cached
+    except Exception:
+        st = None
+
+    sb = get_client()
+    cust_id = ""
+    try:
+        t_resp = sb.table("tenants").select("stripe_customer_id").eq("id", tid).execute()
+        cust_id = (t_resp.data[0].get("stripe_customer_id") if t_resp.data else "") or ""
+    except Exception:
+        cust_id = ""
+
+    if not cust_id:
+        try:
+            import streamlit as st
+            _email = (st.session_state.get("user_email", "") or "").strip().lower()
+        except Exception:
+            _email = ""
+        try:
+            c_resp = requests.get(
+                "https://api.stripe.com/v1/customers",
+                auth=(stripe_key, ""),
+                params={"limit": 20, "email": _email} if _email else {"limit": 20},
+                timeout=10,
+            )
+            if c_resp.status_code == 200:
+                for _c in c_resp.json().get("data", []):
+                    _meta_tid = ((_c.get("metadata") or {}).get("tenant_id") or "").strip()
+                    if _meta_tid == tid:
+                        cust_id = (_c.get("id") or "").strip()
+                        break
+                if not cust_id and _email:
+                    for _c in c_resp.json().get("data", []):
+                        if ((_c.get("email") or "").strip().lower() == _email):
+                            cust_id = (_c.get("id") or "").strip()
+                            break
+        except Exception:
+            cust_id = ""
+
+    if not cust_id:
+        return None
+
+    try:
+        sub_resp = requests.get(
+            "https://api.stripe.com/v1/subscriptions",
+            auth=(stripe_key, ""),
+            params={"customer": cust_id, "status": "all", "limit": 10},
+            timeout=10,
+        )
+        if sub_resp.status_code != 200:
+            return None
+        subs = sub_resp.json().get("data", [])
+    except Exception:
+        return None
+
+    if not subs:
+        return None
+
+    _preferred = ["active", "trialing", "past_due", "unpaid", "incomplete"]
+    subs_sorted = sorted(
+        subs,
+        key=lambda s: (
+            _preferred.index(s.get("status")) if s.get("status") in _preferred else 999,
+            -(s.get("created") or 0),
+        ),
+    )
+    stripe_sub = subs_sorted[0]
+
+    plan = ""
+    try:
+        price_obj = stripe_sub["items"]["data"][0]["price"]
+        price_meta = price_obj.get("metadata", {})
+        plan = (price_meta.get("plan", "") or "").lower().strip()
+    except Exception:
+        plan = ""
+
+    if not plan or plan not in PLAN_LIMITS:
+        try:
+            _price_id = stripe_sub["items"]["data"][0]["price"]["id"]
+            plan = _resolve_plan_from_price_id(_price_id)
+        except Exception:
+            plan = "starter"
+
+    limit = PLAN_LIMITS.get(plan or "starter", 25)
+
+    def _iso_from_ts(_ts):
+        if not _ts:
+            return None
+        try:
+            return datetime.fromtimestamp(int(_ts)).isoformat()
+        except Exception:
+            return None
+
+    out = {
+        "tenant_id": tid,
+        "stripe_customer_id": cust_id,
+        "stripe_subscription_id": stripe_sub.get("id", ""),
+        "plan": plan or "starter",
+        "status": stripe_sub.get("status", ""),
+        "employee_limit": limit,
+        "current_period_start": _iso_from_ts(
+            stripe_sub.get("current_period_start") or ((stripe_sub.get("items") or {}).get("data") or [{}])[0].get("current_period_start")
+        ),
+        "current_period_end": _iso_from_ts(
+            stripe_sub.get("current_period_end") or ((stripe_sub.get("items") or {}).get("data") or [{}])[0].get("current_period_end")
+        ),
+        "cancel_at_period_end": bool(stripe_sub.get("cancel_at_period_end")),
+        "_source": "stripe_fallback",
+    }
+
+    try:
+        st.session_state[_cache_key] = out
+        st.session_state[_ts_key] = _time.time()
+    except Exception:
+        pass
+    return out
+
+
 def get_subscription(tenant_id: str = "") -> Optional[dict]:
     """Return the subscription row for the current tenant, or None."""
     sb = get_client()
@@ -1131,7 +1269,7 @@ def get_subscription(tenant_id: str = "") -> Optional[dict]:
             return resp.data[0]
     except Exception:
         pass
-    return None
+    return _get_live_subscription_fallback(tid)
 
 
 def has_active_subscription(tenant_id: str = "") -> bool:

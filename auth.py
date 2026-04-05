@@ -39,6 +39,7 @@ def set_auth_cookies(access_token: str, refresh_token: str, max_age: int = MAX_S
         f"document.cookie = 'dpd_at={_at}; path=/; max-age={int(max_age)}; SameSite=Lax';"
         f"document.cookie = 'dpd_rt={_rt}; path=/; max-age={int(max_age)}; SameSite=Lax';"
         f"document.cookie = 'dpd_auth_ts={_ts}; path=/; max-age={int(max_age)}; SameSite=Lax';"
+        "document.cookie = 'dpd_logged_out=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
         "</script>",
         height=0,
     )
@@ -50,6 +51,7 @@ def clear_auth_cookies():
         "document.cookie = 'dpd_at=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
         "document.cookie = 'dpd_rt=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
         "document.cookie = 'dpd_auth_ts=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';"
+        "document.cookie = 'dpd_logged_out=1; path=/; max-age=300; SameSite=Lax';"
         "</script>",
         height=0,
     )
@@ -63,6 +65,8 @@ def restore_session_from_cookies() -> bool:
         from urllib.parse import unquote as _unquote
 
         _cookies = st.context.cookies
+        if (_cookies.get("dpd_logged_out", "") or "") == "1":
+            return False
         _at = _unquote(_cookies.get("dpd_at", "") or "")
         _rt = _unquote(_cookies.get("dpd_rt", "") or "")
         _auth_ts_raw = _cookies.get("dpd_auth_ts", "") or ""
