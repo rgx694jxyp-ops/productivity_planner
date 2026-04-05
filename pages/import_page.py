@@ -1046,6 +1046,8 @@ def _import_step3():
             _existing_3key = set()
             def _norm_dept(_v):
                 return _normalize_label_text(_v, max_len=40).strip().lower()
+            def _norm_date(_v):
+                return str(_v or "").strip()[:10]
             if _dmin and _dmax and _emp_ids_int:
                 _sb = _db_get_client()
                 _q = _sb.table("uph_history").select("emp_id, work_date, department")
@@ -1058,12 +1060,12 @@ def _import_step3():
                     if _er_emp:
                         _existing_3key.add((
                             _er_emp,
-                            str(_er.get("work_date", "")),
+                            _norm_date(_er.get("work_date", "")),
                             _norm_dept(_er.get("department", "") or ""),
                         ))
 
             for _r in _candidate_preview_rows:
-                _k_date = str(_r.get("work_date", ""))
+                _k_date = _norm_date(_r.get("work_date", ""))
                 _k_dept = _norm_dept(_r.get("department", "") or "")
                 _rowids = _candidate_rowids(_r.get("emp_id", ""))
                 _is_dup = any((str(_rid), _k_date, _k_dept) in _existing_3key for _rid in _rowids)
@@ -1482,6 +1484,8 @@ def _import_step3():
                 _existing_3key = set()
                 def _norm_dept(_v):
                     return _normalize_label_text(_v, max_len=40).strip().lower()
+                def _norm_date(_v):
+                    return str(_v or "").strip()[:10]
                 if _date_min and _date_max and _emp_ids_int:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
@@ -1495,7 +1499,7 @@ def _import_step3():
                         if _er_emp:
                             _existing_3key.add((
                                 _er_emp,
-                                str(_er.get("work_date", "")),
+                                _norm_date(_er.get("work_date", "")),
                                 _norm_dept(_er.get("department", "") or ""),
                             ))
 
@@ -1503,7 +1507,7 @@ def _import_step3():
                 _inserted_key3 = set()
                 for _r in uph_batch:
                     _key_emp = str(_db_emp_key(_r.get("emp_id", "")))
-                    _key_date = str(_r.get("work_date", ""))
+                    _key_date = _norm_date(_r.get("work_date", ""))
                     _key_dept = _norm_dept(_r.get("department", "") or "")
                     _rowids = _candidate_rowids(_r.get("emp_id", ""))
                     _is_dup = any((str(_rid), _key_date, _key_dept) in _existing_3key for _rid in _rowids)
