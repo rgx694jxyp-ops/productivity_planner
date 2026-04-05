@@ -77,58 +77,47 @@ def _build_emp_code_to_rowid_map() -> dict:
         return {}
 
 
-def _restore_uph_snapshot(tenant_id: str, touched_keys: list, previous_rows: list) -> tuple[int, int]:
-    """Restore uph_history rows to a previous snapshot for a set of touched keys."""
-    from database import get_client as _db_get_client, _tq as _db_tq
+def _restore_uph_snapshot(tenant_id: str, new_row_ids: list, previous_rows: list) -> tuple[int, int]:
+    """
+    Rollback helper — delete newly inserted rows by PK and restore any overwritten rows.
+
+    new_row_ids   : list of uph_history.id integers to DELETE (rows that didn't exist before)
+    previous_rows : list of row dicts to UPSERT back (rows that were overwritten)
+    """
+    from database import get_client as _db_get_client
 
     _sb = _db_get_client()
-    _tenant_id = str(tenant_id or "")
-
-    _prev_map = {}
-    for _r in (previous_rows or []):
-        _k = (
-            str(_r.get("emp_id", "") or ""),
-            str(_r.get("work_date", "") or ""),
-            str(_r.get("department", "") or ""),
-        )
-        _prev_map[_k] = {
-            "emp_id": _r.get("emp_id"),
-            "work_date": _r.get("work_date"),
-            "uph": float(_r.get("uph") or 0),
-            "units": float(_r.get("units") or 0),
-            "hours_worked": float(_r.get("hours_worked") or 0),
-            "department": _r.get("department", ""),
-            "tenant_id": _tenant_id,
-        }
-
-    restored_rows = 0
-    if _prev_map:
-        _sb.table("uph_history").upsert(
-            list(_prev_map.values()),
-            on_conflict="tenant_id,emp_id,work_date,department",
-        ).execute()
-        restored_rows = len(_prev_map)
-
-    _delete_keys = []
-    for _k in (touched_keys or []):
-        if isinstance(_k, (list, tuple)) and len(_k) == 3:
-            _tk = (str(_k[0]), str(_k[1]), str(_k[2]))
-            if _tk not in _prev_map:
-                _delete_keys.append(_tk)
+    _tn = str(tenant_id or "")
 
     deleted_rows = 0
-    for _emp_id, _work_date, _dept in _delete_keys:
-        _q = _db_tq(
-            _sb.table("uph_history")
-            .delete()
-            .eq("emp_id", _emp_id)
-            .eq("work_date", _work_date)
-            .eq("department", _dept)
-        )
-        if _tenant_id:
-            _q = _q.eq("tenant_id", _tenant_id)
-        _q.execute()
-        deleted_rows += 1
+    if new_row_ids:
+        _ids = []
+        for _x in new_row_ids:
+            try:
+                _ids.append(int(_x))
+            except (TypeError, ValueError):
+                pass
+        if _ids:
+            _sb.table("uph_history").delete().in_("id", _ids).eq("tenant_id", _tn).execute()
+            deleted_rows = len(_ids)
+
+    restored_rows = 0
+    if previous_rows:
+        _prev = []
+        for _r in previous_rows:
+            _prev.append({
+                "emp_id": _r.get("emp_id"),
+                "work_date": _r.get("work_date"),
+                "uph": float(_r.get("uph") or 0),
+                "units": float(_r.get("units") or 0),
+                "hours_worked": float(_r.get("hours_worked") or 0),
+                "department": _r.get("department", ""),
+                "tenant_id": _tn,
+            })
+        _sb.table("uph_history").upsert(
+            _prev, on_conflict="tenant_id,emp_id,work_date,department"
+        ).execute()
+        restored_rows = len(_prev)
 
     return restored_rows, deleted_rows
 
@@ -313,15 +302,15 @@ def _import_step1():
                             _tenant_id = st.session_state.get("tenant_id", "")
                             _restored = 0
                             _deleted = 0
-                            _touched = _undo.get("touched_keys", []) if isinstance(_undo, dict) else []
+                            _new_ids = _undo.get("new_row_ids", []) if isinstance(_undo, dict) else []
                             _previous = _undo.get("previous_rows", []) if isinstance(_undo, dict) else []
-                            if not _touched:
-                                st.error("This upload has no rollback snapshot, so data cannot be removed safely.")
+                            if not _new_ids and not _previous:
+                                st.error("This upload has no rollback snapshot — data cannot be removed safely.")
                                 continue
                             if _tenant_id:
                                 _restored, _deleted = _restore_uph_snapshot(
                                     _tenant_id,
-                                    _touched,
+                                    _new_ids,
                                     _previous,
                                 )
                             else:
@@ -683,22 +672,20 @@ def _import_step3():
 
         try:
             _upload_id = _undo.get("upload_id")
-            _tenant_id = str(_undo.get("tenant_id", "") or "")
+            _tenant_id = str(_undo.get("tenant_id", "") or st.session_state.get("tenant_id", "") or "")
             _payload = {}
 
             if _upload_id:
                 _upload_row = _get_upload_by_id(_upload_id)
                 _payload = _decode_jsonish((_upload_row or {}).get("header_mapping")) if _upload_row else {}
-            else:
-                _payload = _decode_jsonish(_undo.get("upload_payload") or {})
 
             _undo_data = _payload.get("undo", {}) if isinstance(_payload, dict) else {}
-            _touched = _undo_data.get("touched_keys", []) or _undo.get("touched_keys", []) or []
-            _previous = _undo_data.get("previous_rows", []) or _undo.get("previous_rows", []) or []
-            if not _touched:
-                st.error("Undo snapshot not found for this import. Nothing was changed.")
+            _new_ids = _undo_data.get("new_row_ids", []) or []
+            _previous = _undo_data.get("previous_rows", []) or []
+            if not _new_ids and not _previous:
+                st.error("No rollback snapshot found for this import — nothing was changed.")
                 return False
-            _restored, _deleted = _restore_uph_snapshot(_tenant_id, _touched, _previous)
+            _restored, _deleted = _restore_uph_snapshot(_tenant_id, _new_ids, _previous)
 
             if _upload_id:
                 if not isinstance(_payload, dict):
@@ -1406,6 +1393,52 @@ def _import_step3():
                     uph_batch = [{**r, "tenant_id": _bg_tid} for r in uph_batch]
                 from database import batch_store_uph_history as _batch_store_uph_history
                 _batch_store_uph_history(uph_batch)
+
+                # -----------------------------------------------------------
+                # After the upsert, fetch the actual PK (id) for every row
+                # that was brand-new (not an overwrite).  Storing PKs instead
+                # of (emp_id, date, dept) triples means rollback is a simple
+                # DELETE WHERE id IN (...) with no type-coercion footguns.
+                # -----------------------------------------------------------
+                _new_row_ids = []
+                if _bg_tid and _undo_touched_keys:
+                    try:
+                        from database import get_client as _db_get_client, _tq as _db_tq
+                        _sb_pk = _db_get_client()
+                        # Only rows that were NOT overwrites need a PK for deletion
+                        _new_keys_set = {
+                            (str(_k[0]), str(_k[1]), str(_k[2]))
+                            for _k in _undo_touched_keys
+                            if tuple(_k) not in _existing_rows_by_key3
+                        }
+                        if _new_keys_set:
+                            _pk_emp_ids = []
+                            for _nk in _new_keys_set:
+                                try:
+                                    _pk_emp_ids.append(int(_nk[0]))
+                                except (TypeError, ValueError):
+                                    pass
+                            _pk_dates = sorted({_nk[1] for _nk in _new_keys_set})
+                            if _pk_emp_ids and _pk_dates:
+                                _pk_res = _db_tq(
+                                    _sb_pk.table("uph_history")
+                                    .select("id, emp_id, work_date, department")
+                                    .eq("tenant_id", _bg_tid)
+                                    .in_("emp_id", _pk_emp_ids)
+                                    .gte("work_date", _pk_dates[0])
+                                    .lte("work_date", _pk_dates[-1])
+                                ).execute()
+                                for _pk_row in (_pk_res.data or []):
+                                    _pk_k = (
+                                        str(_pk_row.get("emp_id", "")),
+                                        str(_pk_row.get("work_date", "")),
+                                        str(_pk_row.get("department", "") or ""),
+                                    )
+                                    if _pk_k in _new_keys_set and _pk_row.get("id") is not None:
+                                        _new_row_ids.append(_pk_row["id"])
+                    except Exception:
+                        pass
+
                 if _bg_tid:
                     _upload_payload = {
                         "files": [s.get("filename", "") for s in sessions],
@@ -1417,17 +1450,16 @@ def _import_step3():
                         },
                         "undo": {
                             "tenant_id": _bg_tid,
-                            "touched_keys": _undo_touched_keys,
+                            "new_row_ids": _new_row_ids,
                             "previous_rows": _undo_previous_rows,
                         },
                         "created_at": datetime.now().isoformat(timespec="seconds"),
                     }
                     _upload_filename = ", ".join([s.get("filename", "") for s in sessions if s.get("filename")]).strip() or "Import"
                     _upload_log_id = _record_upload_event(_upload_filename, _candidate_count, _upload_payload)
-                    if len(uph_batch) > 0 and _undo_touched_keys:
+                    if len(uph_batch) > 0 and (_new_row_ids or _undo_previous_rows):
                         st.session_state["_last_import_undo"] = {
                             "tenant_id": _bg_tid,
-                            "touched_keys": _undo_touched_keys,
                             "row_count": len(uph_batch),
                             "created_at": time.time(),
                             "upload_id": _upload_log_id,
