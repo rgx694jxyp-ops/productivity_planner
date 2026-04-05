@@ -19,6 +19,8 @@ from app import (
     time,
     traceback,
 )
+import hashlib
+import json
 import re
 from data_loader import auto_detect as _auto_detect, parse_csv_bytes as _parse_csv
 try:
@@ -270,6 +272,58 @@ def _get_upload_by_id(upload_id):
         return _rows[0] if _rows else None
     except Exception:
         return None
+
+
+def _build_import_fingerprint(rows: list[dict]) -> str:
+    """Create a stable fingerprint for derived UPH rows.
+
+    This catches repeat imports of the same dataset even when legacy employee-id
+    mappings make DB duplicate checks noisy.
+    """
+    try:
+        _canon = []
+        for _r in (rows or []):
+            try:
+                _uph = round(float(_r.get("uph") or 0), 4)
+            except Exception:
+                _uph = 0.0
+            try:
+                _units = round(float(_r.get("units") or 0), 4)
+            except Exception:
+                _units = 0.0
+            try:
+                _hours = round(float(_r.get("hours_worked") or 0), 4)
+            except Exception:
+                _hours = 0.0
+            _canon.append([
+                str(_r.get("emp_id", "") or "").strip(),
+                str(_r.get("work_date", "") or "").strip()[:10],
+                _normalize_label_text(_r.get("department", "") or "", max_len=40).strip().lower(),
+                _uph,
+                _units,
+                _hours,
+            ])
+        _canon.sort()
+        _raw = json.dumps(_canon, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(_raw.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
+
+def _find_matching_upload_by_fingerprint(fingerprint: str, days: int = 3650):
+    if not fingerprint:
+        return None
+    _uploads = _list_recent_uploads(days=days)
+    for _u in _uploads:
+        _meta = _decode_jsonish(_u.get("header_mapping"))
+        if not isinstance(_meta, dict):
+            continue
+        if _meta.get("undo_applied_at"):
+            continue
+        _fp = str(_meta.get("data_fingerprint") or _meta.get("fingerprint") or "").strip()
+        if _fp and _fp == fingerprint:
+            return _u
+    return None
 
 def page_import():
     st.title("📁 Import Data")
@@ -1011,107 +1065,113 @@ def _import_step3():
         return _out
 
     _candidate_preview_rows = _build_candidate_uph_rows(sessions, work_date)
+    _preview_fingerprint = _build_import_fingerprint(_candidate_preview_rows)
+    _matching_upload = _find_matching_upload_by_fingerprint(_preview_fingerprint)
     _preview_dup_count = 0
     _preview_exact_duplicate_import = False
     _preview_mismatch_rows = []
     try:
         _tenant_id = st.session_state.get("tenant_id", "")
         if _candidate_preview_rows:
-            from database import get_client as _db_get_client, _tq as _db_tq
-            _code_to_primary, _code_to_all, _rowid_to_code = _build_emp_code_maps()
+            if _matching_upload:
+                _preview_dup_count = len(_candidate_preview_rows)
+                _preview_exact_duplicate_import = True
+            else:
+                from database import get_client as _db_get_client, _tq as _db_tq
+                _code_to_primary, _code_to_all, _rowid_to_code = _build_emp_code_maps()
 
-            def _emp_code(_eid):
-                return str(_eid or "").strip()
+                def _emp_code(_eid):
+                    return str(_eid or "").strip()
 
-            def _candidate_rowids(_code):
-                _s = _emp_code(_code)
-                _all = _code_to_all.get(_s)
-                if _all:
-                    return set(_all)
-                _p = _code_to_primary.get(_s, _s)
-                return {_p} if _p else set()
+                def _candidate_rowids(_code):
+                    _s = _emp_code(_code)
+                    _all = _code_to_all.get(_s)
+                    if _all:
+                        return set(_all)
+                    _p = _code_to_primary.get(_s, _s)
+                    return {_p} if _p else set()
 
-            _dates = sorted({r.get("work_date") for r in _candidate_preview_rows if r.get("work_date")})
-            _emp_ids = sorted({
-                _rid
-                for _r in _candidate_preview_rows
-                for _rid in _candidate_rowids(_r.get("emp_id"))
-                if _rid
-            })
-            _dmin = _dates[0] if _dates else ""
-            _dmax = _dates[-1] if _dates else ""
-            # Use integer emp_ids only — strings silently fail against bigint column
-            _emp_ids_int = sorted({
-                int(_rid)
-                for _rid in _emp_ids
-                if str(_rid).lstrip("-").isdigit()
-            })
-            # Import history is stored as one row per employee per day for this
-            # pipeline, so duplicate detection should follow the same shape.
-            _existing_2key = set()
-            _history_emp_ids = set()
-            _history_dates_by_emp = {}
-            def _norm_date(_v):
-                return str(_v or "").strip()[:10]
-            if _dmin and _dmax and _emp_ids_int:
-                _sb = _db_get_client()
-                _q = _sb.table("uph_history").select("emp_id, work_date")
-                if _tenant_id:
-                    _q = _q.eq("tenant_id", _tenant_id)
-                _q = _q.gte("work_date", _dmin).lte("work_date", _dmax).in_("emp_id", _emp_ids_int)
-                _res = _db_tq(_q).execute()
-                for _er in (_res.data or []):
-                    _er_emp = str(_er.get("emp_id", "") or "").strip()
-                    if _er_emp:
-                        _history_emp_ids.add(_er_emp)
-                        _history_dates_by_emp.setdefault(_er_emp, set()).add(_norm_date(_er.get("work_date", "")))
-                        _existing_2key.add((
-                            _er_emp,
-                            _norm_date(_er.get("work_date", "")),
-                        ))
+                _dates = sorted({r.get("work_date") for r in _candidate_preview_rows if r.get("work_date")})
+                _emp_ids = sorted({
+                    _rid
+                    for _r in _candidate_preview_rows
+                    for _rid in _candidate_rowids(_r.get("emp_id"))
+                    if _rid
+                })
+                _dmin = _dates[0] if _dates else ""
+                _dmax = _dates[-1] if _dates else ""
+                # Use integer emp_ids only — strings silently fail against bigint column
+                _emp_ids_int = sorted({
+                    int(_rid)
+                    for _rid in _emp_ids
+                    if str(_rid).lstrip("-").isdigit()
+                })
+                # Import history is stored as one row per employee per day for this
+                # pipeline, so duplicate detection should follow the same shape.
+                _existing_2key = set()
+                _history_emp_ids = set()
+                _history_dates_by_emp = {}
+                def _norm_date(_v):
+                    return str(_v or "").strip()[:10]
+                if _dmin and _dmax and _emp_ids_int:
+                    _sb = _db_get_client()
+                    _q = _sb.table("uph_history").select("emp_id, work_date")
+                    if _tenant_id:
+                        _q = _q.eq("tenant_id", _tenant_id)
+                    _q = _q.gte("work_date", _dmin).lte("work_date", _dmax).in_("emp_id", _emp_ids_int)
+                    _res = _db_tq(_q).execute()
+                    for _er in (_res.data or []):
+                        _er_emp = str(_er.get("emp_id", "") or "").strip()
+                        if _er_emp:
+                            _history_emp_ids.add(_er_emp)
+                            _history_dates_by_emp.setdefault(_er_emp, set()).add(_norm_date(_er.get("work_date", "")))
+                            _existing_2key.add((
+                                _er_emp,
+                                _norm_date(_er.get("work_date", "")),
+                            ))
 
-            for _r in _candidate_preview_rows:
-                _k_date = _norm_date(_r.get("work_date", ""))
-                _rowids = _candidate_rowids(_r.get("emp_id", ""))
-                _is_dup = any((str(_rid), _k_date) in _existing_2key for _rid in _rowids)
-                if _is_dup:
-                    _preview_dup_count += 1
-                else:
-                    _resolved_rowids = [str(_rid) for _rid in sorted(_rowids)]
-                    _known_dates_str = ""
-                    _matching_emp_ids = [
-                        _rid for _rid in _resolved_rowids if _rid in _history_emp_ids
-                    ]
-                    if not _resolved_rowids:
-                        _reason = "Employee ID not found in employees table"
-                    elif not _matching_emp_ids:
-                        _reason = "No history rows found for this employee"
-                    elif not any(_k_date in _history_dates_by_emp.get(_rid, set()) for _rid in _matching_emp_ids):
-                        _known_dates = sorted({
-                            _d
-                            for _rid in _matching_emp_ids
-                            for _d in _history_dates_by_emp.get(_rid, set())
-                        })
-                        _known_dates_str = ", ".join(_known_dates[:5])
-                        if len(_known_dates) > 5:
-                            _known_dates_str += ", ..."
-                        _reason = "Employee exists in history, but not on this work date"
+                for _r in _candidate_preview_rows:
+                    _k_date = _norm_date(_r.get("work_date", ""))
+                    _rowids = _candidate_rowids(_r.get("emp_id", ""))
+                    _is_dup = any((str(_rid), _k_date) in _existing_2key for _rid in _rowids)
+                    if _is_dup:
+                        _preview_dup_count += 1
                     else:
-                        _reason = "Key mismatch after duplicate comparison"
-                    _preview_mismatch_rows.append({
-                        "Source File(s)": _r.get("source_files", ""),
-                        "Employee ID": str(_r.get("emp_id", "") or ""),
-                        "Resolved Row ID(s)": ", ".join(_resolved_rowids),
-                        "Work Date": _k_date,
-                        "Department": str(_r.get("department", "") or ""),
-                        "Reason": _reason,
-                        "Known History Dates": _known_dates_str,
-                    })
+                        _resolved_rowids = [str(_rid) for _rid in sorted(_rowids)]
+                        _known_dates_str = ""
+                        _matching_emp_ids = [
+                            _rid for _rid in _resolved_rowids if _rid in _history_emp_ids
+                        ]
+                        if not _resolved_rowids:
+                            _reason = "Employee ID not found in employees table"
+                        elif not _matching_emp_ids:
+                            _reason = "No history rows found for this employee"
+                        elif not any(_k_date in _history_dates_by_emp.get(_rid, set()) for _rid in _matching_emp_ids):
+                            _known_dates = sorted({
+                                _d
+                                for _rid in _matching_emp_ids
+                                for _d in _history_dates_by_emp.get(_rid, set())
+                            })
+                            _known_dates_str = ", ".join(_known_dates[:5])
+                            if len(_known_dates) > 5:
+                                _known_dates_str += ", ..."
+                            _reason = "Employee exists in history, but not on this work date"
+                        else:
+                            _reason = "Key mismatch after duplicate comparison"
+                        _preview_mismatch_rows.append({
+                            "Source File(s)": _r.get("source_files", ""),
+                            "Employee ID": str(_r.get("emp_id", "") or ""),
+                            "Resolved Row ID(s)": ", ".join(_resolved_rowids),
+                            "Work Date": _k_date,
+                            "Department": str(_r.get("department", "") or ""),
+                            "Reason": _reason,
+                            "Known History Dates": _known_dates_str,
+                        })
 
-            _preview_exact_duplicate_import = (
-                len(_candidate_preview_rows) > 0 and
-                _preview_dup_count == len(_candidate_preview_rows)
-            )
+                _preview_exact_duplicate_import = (
+                    len(_candidate_preview_rows) > 0 and
+                    _preview_dup_count == len(_candidate_preview_rows)
+                )
     except Exception:
         pass
 
@@ -1169,6 +1229,12 @@ def _import_step3():
             )
             if _preview_exact_duplicate_import:
                 st.warning("All derived rows are duplicates. Nothing new will be uploaded.")
+                if _matching_upload:
+                    st.caption(
+                        "Matched a previously uploaded dataset fingerprint "
+                        f"(upload id: {_matching_upload.get('id')}, "
+                        f"created: {str(_matching_upload.get('created_at', ''))[:19].replace('T', ' ')})."
+                    )
             elif _preview_mismatch_rows:
                 _reason_counts = (
                     pd.DataFrame(_preview_mismatch_rows)["Reason"]
@@ -1490,6 +1556,16 @@ def _import_step3():
             _exact_duplicate_import = False
             _undo_previous_rows = []
             _undo_touched_keys = []
+            _batch_fingerprint = _build_import_fingerprint(uph_batch)
+            _matching_upload = _find_matching_upload_by_fingerprint(_batch_fingerprint)
+            if _candidate_count > 0 and _matching_upload:
+                _dup_skipped = _candidate_count
+                _exact_duplicate_import = True
+                uph_batch = []
+                st.warning(
+                    "This dataset matches a previously uploaded file exactly. "
+                    "No new rows were uploaded."
+                )
             try:
                 _tenant_id = st.session_state.get("tenant_id", "")
                 _dates = sorted({r.get("work_date") for r in uph_batch if r.get("work_date")})
@@ -1627,6 +1703,7 @@ def _import_step3():
                 if _bg_tid:
                     _upload_payload = {
                         "files": [s.get("filename", "") for s in sessions],
+                        "data_fingerprint": _batch_fingerprint,
                         "stats": {
                             "candidate_rows": int(_candidate_count),
                             "inserted_rows": int(len(uph_batch)),
