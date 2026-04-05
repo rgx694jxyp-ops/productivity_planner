@@ -334,14 +334,22 @@ def page_import():
         """
         <style>
         /* Top-level expanders: black text when collapsed, white when expanded */
-        div[data-testid="stExpander"] details:not([open]) > summary p {
+        div[data-testid="stExpander"] details:not([open]) > summary p,
+        div[data-testid="stExpander"] details:not([open]) > summary span,
+        div[data-testid="stExpander"] details:not([open]) > summary * {
             color: #000000 !important;
         }
-        div[data-testid="stExpander"] details[open] > summary p {
+        div[data-testid="stExpander"] details[open] > summary p,
+        div[data-testid="stExpander"] details[open] > summary span,
+        div[data-testid="stExpander"] details[open] > summary * {
             color: #ffffff !important;
         }
+        div[data-testid="stExpander"] details[open] > summary svg {
+            fill: #ffffff !important;
+        }
         /* Nested upload-entry expanders: always black */
-        div[data-testid="stExpander"] div[data-testid="stExpander"] details summary p {
+        div[data-testid="stExpander"] div[data-testid="stExpander"] details summary p,
+        div[data-testid="stExpander"] div[data-testid="stExpander"] details summary * {
             color: #000000 !important;
         }
         </style>

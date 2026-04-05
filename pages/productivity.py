@@ -6,6 +6,7 @@ from app import (
     _cached_targets,
     _calc_risk_level,
     _get_current_plan,
+    _get_db_client,
     _html_mod,
     _log_app_error,
     _plan_gate,
@@ -1419,6 +1420,27 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
     except Exception:
         subs = []
         emps_lookup = {e["emp_id"]: e for e in (_cached_employees() or [])}
+    # Fallback to unit_submissions if uph_history returned nothing for that range
+    if not subs:
+        try:
+            _sb2 = _get_db_client()
+            _us_q = _sb2.table("unit_submissions").select(
+                "emp_id, units, hours_worked, work_date, department"
+            ).gte("work_date", from_iso).lte("work_date", to_iso)
+            if tenant_id:
+                _us_q = _us_q.eq("tenant_id", tenant_id)
+            else:
+                from database import _tq as _tq_us
+                _us_q = _tq_us(_us_q)
+            _us_rows = _us_q.execute().data or []
+            for row in _us_rows:
+                h = float(row.get("hours_worked") or 0)
+                u = float(row.get("units") or 0)
+                row["uph"] = round(u / h, 2) if h > 0 else 0.0
+            subs = _us_rows
+        except Exception:
+            pass
+
     if dept_choice != "All departments":
         subs = [s for s in subs
                 if (s.get("department","") == dept_choice or
