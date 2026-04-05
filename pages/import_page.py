@@ -304,7 +304,7 @@ def page_import():
 
     # ── Reset button — shown whenever something is in progress ───────────────
     if (step > 1 or st.session_state.get("uploaded_sessions") or
-            st.session_state.get("alloc_rows") or st.session_state.pipeline_done):
+            st.session_state.get("alloc_rows") or st.session_state.get("pipeline_done")):
         if st.button("↺ Start over", key="import_reset", type="secondary"):
             keys_to_clear = [
                 "uploaded_sessions", "import_step", "alloc_rows",
