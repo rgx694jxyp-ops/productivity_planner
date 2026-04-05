@@ -114,42 +114,33 @@ def verify_checkout_and_activate():
     limit = PLAN_LIMITS.get(plan, 25)
     _debug.append(f"plan={plan} limit={limit}")
 
-    try:
-        _existing_user_id = ""
-        if not uid:
-            try:
-                _prev = sb.table("subscriptions").select("user_id").eq("tenant_id", tid).execute()
-                if _prev.data:
-                    _existing_user_id = _prev.data[0].get("user_id") or ""
-            except Exception:
-                _existing_user_id = ""
+    # The Supabase edge function webhook handles writing to the DB (service role, bypasses RLS).
+    # Attempting an upsert here via the user's anon client would fail silently due to RLS
+    # (there is no INSERT/UPDATE policy for regular users on the subscriptions table).
+    # Instead, poll for the row the webhook wrote.
+    import time as _time
+    _poll_deadline = _time.time() + 8  # wait up to 8 seconds for webhook to land
+    _sub_row = None
+    while _time.time() < _poll_deadline:
+        try:
+            _check = sb.table("subscriptions").select("plan, status").eq("tenant_id", tid).execute()
+            if _check.data and _check.data[0].get("status") in ("active", "trialing"):
+                _sub_row = _check.data[0]
+                break
+        except Exception:
+            pass
+        _time.sleep(1)
 
-        _sub_row = {
-            "tenant_id": tid,
-            "stripe_customer_id": cust_id,
-            "stripe_subscription_id": stripe_sub["id"],
-            "plan": plan,
-            "status": stripe_sub.get("status", "active"),
-            "employee_limit": limit,
-            "cancel_at_period_end": stripe_sub.get("cancel_at_period_end", False),
-        }
-        _row_user_id = uid or _existing_user_id
-        if _row_user_id:
-            _sub_row["user_id"] = _row_user_id
-        _cpe = stripe_sub.get("current_period_end")
-        if _cpe:
-            from datetime import datetime, timezone
-
-            _sub_row["current_period_end"] = datetime.fromtimestamp(_cpe, tz=timezone.utc).isoformat()
-        sb.table("subscriptions").upsert(_sub_row, on_conflict="tenant_id").execute()
-        _debug.append("DB upsert SUCCESS")
-        st.session_state["_current_plan"] = plan
+    if _sub_row:
+        _debug.append(f"DB confirmed active: plan={_sub_row.get('plan')}")
+        st.session_state["_current_plan"] = _sub_row.get("plan", plan)
         st.session_state["_verify_debug"] = _debug
         return True
-    except Exception as e:
-        _debug.append(f"DB upsert FAILED: {e}")
-        st.session_state["_verify_debug"] = _debug
-        return False
+
+    _debug.append("DB row not yet active after polling — Stripe subscription is active, granting access")
+    st.session_state["_current_plan"] = plan
+    st.session_state["_verify_debug"] = _debug
+    return True
 
 
 def subscription_page(render_sign_out_button_cb, full_sign_out_cb):

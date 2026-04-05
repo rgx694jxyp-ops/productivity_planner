@@ -102,6 +102,17 @@ async function getSubscriptionDetails(subscriptionId: string) {
   return resp.json();
 }
 
+// Stripe moved current_period_end to items.data[0] in newer API versions.
+// Fall back gracefully between both locations.
+function getPeriodEnd(sub: any): string | null {
+  const ts =
+    sub.current_period_end ||
+    sub.items?.data?.[0]?.current_period_end ||
+    null;
+  if (!ts || !Number.isFinite(Number(ts))) return null;
+  return new Date(Number(ts) * 1000).toISOString();
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
@@ -150,28 +161,25 @@ Deno.serve(async (req) => {
         const plan = resolvePlan(sub);
         const limit = PLAN_LIMITS[plan] ?? 25;
 
-        // Upsert subscription
-        await supabase.from("subscriptions").upsert(
-          {
-            tenant_id: tenantId,
-            stripe_customer_id: customerId,
-            stripe_subscription_id: subscriptionId,
-            plan: plan,
-            status: "active",
-            employee_limit: limit,
-            current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
-            cancel_at_period_end: sub.cancel_at_period_end || false,
-            updated_at: new Date().toISOString(),
-          },
+        // Upsert subscription — include user_id atomically so RLS SELECT policy works immediately
+        const upsertRow: Record<string, unknown> = {
+          tenant_id: tenantId,
+          stripe_customer_id: customerId,
+          stripe_subscription_id: subscriptionId,
+          plan: plan,
+          status: "active",
+          employee_limit: limit,
+          current_period_end: getPeriodEnd(sub),
+          cancel_at_period_end: sub.cancel_at_period_end || false,
+          updated_at: new Date().toISOString(),
+        };
+        if (userId) upsertRow.user_id = userId;
+
+        const { error: upsertErr } = await supabase.from("subscriptions").upsert(
+          upsertRow,
           { onConflict: "tenant_id" }
         );
-
-        if (userId) {
-          await supabase
-            .from("subscriptions")
-            .update({ user_id: userId, updated_at: new Date().toISOString() })
-            .eq("tenant_id", tenantId);
-        }
+        if (upsertErr) throw new Error(`subscriptions upsert failed: ${upsertErr.message} (code=${upsertErr.code})`);
 
         // Also store customer ID on tenants table
         await supabase
@@ -227,7 +235,7 @@ Deno.serve(async (req) => {
             plan: plan,
             status: sub.status, // active, past_due, canceled, etc.
             employee_limit: limit,
-            current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
+            current_period_end: getPeriodEnd(sub),
             cancel_at_period_end: sub.cancel_at_period_end || false,
             stripe_subscription_id: sub.id,
             updated_at: new Date().toISOString(),
@@ -310,7 +318,7 @@ Deno.serve(async (req) => {
               status: "active",
               plan: plan,
               employee_limit: limit,
-              current_period_end: new Date(renewedSub.current_period_end * 1000).toISOString(),
+              current_period_end: getPeriodEnd(renewedSub),
               cancel_at_period_end: renewedSub.cancel_at_period_end || false,
               updated_at: new Date().toISOString(),
             })
