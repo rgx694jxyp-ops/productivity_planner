@@ -915,6 +915,7 @@ def _import_step3():
                     "UPH": str(_r.get(_uph_col, "") if _uph_col else "").strip(),
                 })
 
+    _preview_new_count = max(0, len(_candidate_preview_rows) - _preview_dup_count)
     with st.expander("👀 Preview parsed data before import", expanded=True):
         _preview_days = len(_preview_dates) if _preview_dates else 1
         st.caption(
@@ -922,12 +923,19 @@ def _import_step3():
             f"{len(_preview_emp_ids)} unique employee ID(s) detected."
         )
         if _candidate_preview_rows:
+            st.markdown(
+                f"**Duplicate summary**\n"
+                f"File rows selected: **{total_rows:,}**  \n"
+                f"History rows derived from file: **{len(_candidate_preview_rows):,}**  \n"
+                f"Exact duplicates already in system: **{_preview_dup_count:,}**  \n"
+                f"Rows that will be uploaded: **{_preview_new_count:,}**"
+            )
             st.caption(
                 f"Duplicate check (exact row match against history): "
                 f"{_preview_dup_count}/{len(_candidate_preview_rows)} row(s) already exist."
             )
             if _preview_exact_duplicate_import:
-                st.warning("Every candidate row is already in history. This looks like a full duplicate import.")
+                st.warning("All derived rows are duplicates. Nothing new will be uploaded.")
         if _preview_rows:
             st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
         else:
@@ -1348,7 +1356,17 @@ def _import_step3():
                         "upload_payload": _upload_payload,
                     }
                 if _dup_skipped:
-                    st.info(f"Skipped {_dup_skipped} duplicate UPH row(s) already in history.")
+                    _new_count = max(0, _candidate_count - _dup_skipped)
+                    if _new_count == 0:
+                        st.warning(
+                            f"All {_candidate_count} derived row(s) were duplicates. "
+                            "No new rows were uploaded."
+                        )
+                    else:
+                        st.info(
+                            f"Duplicate check complete: {_dup_skipped} duplicate row(s) skipped, "
+                            f"{_new_count} row(s) uploaded."
+                        )
             except Exception as _uph_err:
                 st.warning(f"UPH history storage warning: {_uph_err}")
                 _log_app_error("pipeline", f"UPH history storage failed: {_uph_err}",
