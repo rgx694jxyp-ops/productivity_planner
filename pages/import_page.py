@@ -48,6 +48,134 @@ def _sanitize_employee_name(raw_name, emp_id: str = "") -> tuple[str, bool]:
         return _normalize_label_text(fallback, max_len=64), True
     return cleaned, False
 
+
+def _decode_jsonish(raw_val):
+    if isinstance(raw_val, dict):
+        return raw_val
+    if isinstance(raw_val, str) and raw_val.strip():
+        try:
+            return json.loads(raw_val)
+        except Exception:
+            return {}
+    return {}
+
+
+def _restore_uph_snapshot(tenant_id: str, touched_keys: list, previous_rows: list) -> tuple[int, int]:
+    """Restore uph_history rows to a previous snapshot for a set of touched keys."""
+    from database import get_client as _db_get_client, _tq as _db_tq
+
+    _sb = _db_get_client()
+    _tenant_id = str(tenant_id or "")
+
+    _prev_map = {}
+    for _r in (previous_rows or []):
+        _k = (
+            str(_r.get("emp_id", "") or ""),
+            str(_r.get("work_date", "") or ""),
+            str(_r.get("department", "") or ""),
+        )
+        _prev_map[_k] = {
+            "emp_id": _r.get("emp_id"),
+            "work_date": _r.get("work_date"),
+            "uph": float(_r.get("uph") or 0),
+            "units": float(_r.get("units") or 0),
+            "hours_worked": float(_r.get("hours_worked") or 0),
+            "department": _r.get("department", ""),
+            "tenant_id": _tenant_id,
+        }
+
+    restored_rows = 0
+    if _prev_map:
+        _sb.table("uph_history").upsert(
+            list(_prev_map.values()),
+            on_conflict="tenant_id,emp_id,work_date,department",
+        ).execute()
+        restored_rows = len(_prev_map)
+
+    _delete_keys = []
+    for _k in (touched_keys or []):
+        if isinstance(_k, (list, tuple)) and len(_k) == 3:
+            _tk = (str(_k[0]), str(_k[1]), str(_k[2]))
+            if _tk not in _prev_map:
+                _delete_keys.append(_tk)
+
+    deleted_rows = 0
+    for _emp_id, _work_date, _dept in _delete_keys:
+        _q = _db_tq(
+            _sb.table("uph_history")
+            .delete()
+            .eq("emp_id", _emp_id)
+            .eq("work_date", _work_date)
+            .eq("department", _dept)
+        )
+        if _tenant_id:
+            _q = _q.eq("tenant_id", _tenant_id)
+        _q.execute()
+        deleted_rows += 1
+
+    return restored_rows, deleted_rows
+
+
+def _list_recent_uploads(days: int = 7) -> list[dict]:
+    try:
+        from database import get_client as _db_get_client, _tq as _db_tq
+        from datetime import timedelta as _td
+
+        _tenant_id = st.session_state.get("tenant_id", "")
+        if not _tenant_id:
+            return []
+
+        _sb = _db_get_client()
+        _since = (datetime.now() - _td(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+        _res = _db_tq(
+            _sb.table("uploaded_files")
+            .select("id, filename, row_count, header_mapping, is_active, created_at")
+            .eq("tenant_id", _tenant_id)
+            .gte("created_at", _since)
+            .order("created_at", desc=True)
+        ).execute()
+        return _res.data or []
+    except Exception:
+        return []
+
+
+def _record_upload_event(filename: str, row_count: int, payload: dict):
+    try:
+        from database import get_client as _db_get_client
+
+        _tenant_id = st.session_state.get("tenant_id", "")
+        if not _tenant_id:
+            return None
+
+        _sb = _db_get_client()
+        _res = _sb.table("uploaded_files").insert({
+            "filename": filename,
+            "row_count": int(row_count),
+            "header_mapping": payload,
+            "is_active": True,
+            "tenant_id": _tenant_id,
+        }).execute()
+        _data = _res.data or []
+        return (_data[0].get("id") if _data else None)
+    except Exception:
+        return None
+
+
+def _deactivate_upload(upload_id, payload: dict | None = None) -> None:
+    try:
+        from database import get_client as _db_get_client, _tq as _db_tq
+
+        _tenant_id = st.session_state.get("tenant_id", "")
+        if not _tenant_id:
+            return
+        _sb = _db_get_client()
+        _update_data = {"is_active": False}
+        if isinstance(payload, dict):
+            _update_data["header_mapping"] = payload
+        _db_tq(_sb.table("uploaded_files").update(_update_data).eq("id", upload_id).eq("tenant_id", _tenant_id)).execute()
+    except Exception:
+        pass
+
 def page_import():
     st.title("📁 Import Data")
 
@@ -101,6 +229,64 @@ def _import_step1():
     """Step 1 — upload files or enter lightweight production data manually."""
     st.subheader("Bring in whatever you have")
     st.caption("Upload a CSV or Excel export, or type a few rows in manually. We will help make it usable.")
+
+    _recent_uploads = _list_recent_uploads(days=7)
+    with st.expander("This week's uploads", expanded=bool(_recent_uploads)):
+        if not _recent_uploads:
+            st.caption("No uploads logged in the last 7 days.")
+        else:
+            for _u in _recent_uploads:
+                _uid = _u.get("id")
+                _meta = _decode_jsonish(_u.get("header_mapping"))
+                _stats = _meta.get("stats", {}) if isinstance(_meta, dict) else {}
+                _undo_applied = bool(_meta.get("undo_applied_at")) if isinstance(_meta, dict) else False
+                _is_active = bool(_u.get("is_active"))
+                _dup = int(_stats.get("duplicate_rows", 0) or 0)
+                _ins = int(_stats.get("inserted_rows", 0) or 0)
+                _cand = int(_stats.get("candidate_rows", _u.get("row_count", 0)) or 0)
+                _exact_dup = bool(_stats.get("exact_duplicate_import"))
+                _status = "Undone" if _undo_applied else ("Active" if _is_active else "Inactive")
+
+                st.markdown(
+                    f"**{_u.get('filename', 'Upload')}**  "
+                    f"({(_u.get('created_at') or '')[:16].replace('T', ' ')})"
+                )
+                st.caption(
+                    f"Status: {_status} · Candidate rows: {_cand} · Inserted: {_ins} · "
+                    f"Duplicates: {_dup}{' · Exact duplicate import' if _exact_dup else ''}"
+                )
+
+                if _is_active:
+                    if st.button("Remove upload and rollback data", key=f"remove_upload_{_uid}"):
+                        try:
+                            _undo = _meta.get("undo", {}) if isinstance(_meta, dict) else {}
+                            _tenant_id = st.session_state.get("tenant_id", "")
+                            _restored = 0
+                            _deleted = 0
+                            if _tenant_id and _undo.get("touched_keys") is not None:
+                                _restored, _deleted = _restore_uph_snapshot(
+                                    _tenant_id,
+                                    _undo.get("touched_keys", []),
+                                    _undo.get("previous_rows", []),
+                                )
+
+                            if not isinstance(_meta, dict):
+                                _meta = {}
+                            _meta["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
+                            _meta["undo_result"] = {
+                                "restored_rows": int(_restored),
+                                "deleted_rows": int(_deleted),
+                            }
+                            _deactivate_upload(_uid, _meta)
+
+                            _bust_cache()
+                            _build_archived_productivity(force=True)
+                            st.success("Upload removed and productivity data refreshed.")
+                            st.rerun()
+                        except Exception as _rm_err:
+                            st.error(f"Could not remove upload: {_rm_err}")
+                            _log_app_error("import", f"Remove upload failed: {_rm_err}", detail=traceback.format_exc(), severity="error")
+                st.divider()
 
     mode = st.radio(
         "Choose a starting point",
@@ -434,54 +620,21 @@ def _import_step3():
             return False
 
         try:
-            from database import get_client as _db_get_client, _tq as _db_tq
-
-            _sb = _db_get_client()
             _tenant_id = str(_undo.get("tenant_id", "") or "")
-            _prev_rows = _undo.get("previous_rows", []) or []
-            _touched_keys = _undo.get("touched_keys", []) or []
+            _restore_uph_snapshot(
+                _tenant_id,
+                _undo.get("touched_keys", []) or [],
+                _undo.get("previous_rows", []) or [],
+            )
 
-            _prev_map = {}
-            for _r in _prev_rows:
-                _k = (
-                    str(_r.get("emp_id", "") or ""),
-                    str(_r.get("work_date", "") or ""),
-                    str(_r.get("department", "") or ""),
-                )
-                _prev_map[_k] = {
-                    "emp_id": _r.get("emp_id"),
-                    "work_date": _r.get("work_date"),
-                    "uph": float(_r.get("uph") or 0),
-                    "units": float(_r.get("units") or 0),
-                    "hours_worked": float(_r.get("hours_worked") or 0),
-                    "department": _r.get("department", ""),
-                    "tenant_id": _tenant_id,
-                }
-
-            if _prev_map:
-                _sb.table("uph_history").upsert(
-                    list(_prev_map.values()),
-                    on_conflict="tenant_id,emp_id,work_date,department",
-                ).execute()
-
-            _delete_keys = []
-            for _k in _touched_keys:
-                if isinstance(_k, (list, tuple)) and len(_k) == 3:
-                    _tk = (str(_k[0]), str(_k[1]), str(_k[2]))
-                    if _tk not in _prev_map:
-                        _delete_keys.append(_tk)
-
-            for _emp_id, _work_date, _dept in _delete_keys:
-                _q = _db_tq(
-                    _sb.table("uph_history")
-                    .delete()
-                    .eq("emp_id", _emp_id)
-                    .eq("work_date", _work_date)
-                    .eq("department", _dept)
-                )
-                if _tenant_id:
-                    _q = _q.eq("tenant_id", _tenant_id)
-                _q.execute()
+            _upload_id = _undo.get("upload_id")
+            if _upload_id:
+                _payload = _decode_jsonish(_undo.get("upload_payload") or {})
+                if not isinstance(_payload, dict):
+                    _payload = {}
+                _payload["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
+                _payload["undo_result"] = {"source": "last_import_button"}
+                _deactivate_upload(_upload_id, _payload)
 
             _bust_cache()
             _build_archived_productivity(force=True)
@@ -591,6 +744,144 @@ def _import_step3():
         st.caption("Your CSV has no Date column mapped — all rows will be recorded under this date.")
         work_date = st.date_input("Work date", value=date.today(), label_visibility="collapsed")
 
+    def _build_candidate_uph_rows(_sessions, _fallback_date):
+        from collections import defaultdict as _dd
+
+        _agg = _dd(lambda: {"units": 0.0, "hours": 0.0, "uphs": []})
+        _max_uph = 500.0
+        for _sess in _sessions:
+            _m = _sess.get("mapping") or {}
+            _rows = _sess.get("rows") or []
+            _id_col = _m.get("EmployeeID", "EmployeeID")
+            _dept_col = _m.get("Department", "Department")
+            _date_col = _m.get("Date", "")
+            _u_col = _m.get("Units", "Units")
+            _h_col = _m.get("HoursWorked", "HoursWorked")
+            _uph_col = _m.get("UPH", "UPH")
+
+            for _row in _rows:
+                _eid = str(_row.get(_id_col, "") or "").strip()
+                if not _eid:
+                    continue
+                _dept = _normalize_label_text(_row.get(_dept_col, ""), max_len=40)
+                _row_date = _fallback_date.isoformat()
+                if _date_col and _row.get(_date_col):
+                    _raw_d = str(_row.get(_date_col, "") or "").strip()[:10]
+                    try:
+                        datetime.strptime(_raw_d, "%Y-%m-%d")
+                        _row_date = _raw_d
+                    except Exception:
+                        pass
+
+                try:
+                    _units = float(_row.get(_u_col, 0) or 0)
+                except Exception:
+                    _units = 0.0
+                try:
+                    _hours = float(_row.get(_h_col, 0) or 0)
+                except Exception:
+                    _hours = 0.0
+                if not math.isfinite(_units) or _units < 0:
+                    _units = 0.0
+                if not math.isfinite(_hours) or _hours < 0:
+                    _hours = 0.0
+
+                _valid_uph = None
+                _raw_uph = _row.get(_uph_col, None)
+                if str(_raw_uph or "").strip() != "":
+                    try:
+                        _uph = float(_raw_uph)
+                        if math.isfinite(_uph) and 0 <= _uph <= _max_uph:
+                            _valid_uph = _uph
+                    except Exception:
+                        pass
+
+                _k = (_eid, _row_date, _dept)
+                _agg[_k]["units"] += _units
+                _agg[_k]["hours"] += _hours
+                if _valid_uph is not None:
+                    _agg[_k]["uphs"].append(_valid_uph)
+
+        _out = []
+        for (_eid, _row_date, _dept), _vals in _agg.items():
+            if _vals["uphs"]:
+                _uph = round(sum(_vals["uphs"]) / len(_vals["uphs"]), 2)
+            elif _vals["hours"] > 0:
+                _uph = round(_vals["units"] / _vals["hours"], 2)
+            else:
+                _uph = 0.0
+            _out.append({
+                "emp_id": _eid,
+                "work_date": _row_date,
+                "department": _dept,
+                "uph": _uph,
+                "units": round(_vals["units"]),
+                "hours_worked": round(_vals["hours"], 2),
+            })
+        return _out
+
+    _candidate_preview_rows = _build_candidate_uph_rows(sessions, work_date)
+    _preview_dup_count = 0
+    _preview_exact_duplicate_import = False
+    try:
+        _tenant_id = st.session_state.get("tenant_id", "")
+        if _tenant_id and _candidate_preview_rows:
+            from database import get_client as _db_get_client, _tq as _db_tq
+            _emp_rows = _cached_employees() or []
+            _emp_code_to_rowid = {
+                str(_e.get("emp_id", "")).strip(): str(_e.get("id"))
+                for _e in _emp_rows
+                if _e.get("id") is not None and str(_e.get("emp_id", "")).strip()
+            }
+
+            def _db_emp(_eid):
+                _s = str(_eid or "").strip()
+                return _emp_code_to_rowid.get(_s, _s)
+
+            _dates = sorted({r.get("work_date") for r in _candidate_preview_rows if r.get("work_date")})
+            _emp_ids = sorted({_db_emp(r.get("emp_id")) for r in _candidate_preview_rows if r.get("emp_id")})
+            _dmin = _dates[0] if _dates else ""
+            _dmax = _dates[-1] if _dates else ""
+            _existing_exact = set()
+            if _dmin and _dmax and _emp_ids:
+                _sb = _db_get_client()
+                _res = _db_tq(
+                    _sb.table("uph_history")
+                    .select("emp_id, work_date, uph, units, hours_worked, department")
+                    .eq("tenant_id", _tenant_id)
+                    .gte("work_date", _dmin)
+                    .lte("work_date", _dmax)
+                    .in_("emp_id", _emp_ids)
+                ).execute()
+                for _er in (_res.data or []):
+                    _existing_exact.add((
+                        str(_er.get("emp_id", "")),
+                        str(_er.get("work_date", "")),
+                        str(_er.get("department", "") or ""),
+                        round(float(_er.get("uph") or 0), 4),
+                        round(float(_er.get("units") or 0), 4),
+                        round(float(_er.get("hours_worked") or 0), 4),
+                    ))
+
+            for _r in _candidate_preview_rows:
+                _k = (
+                    str(_db_emp(_r.get("emp_id", ""))),
+                    str(_r.get("work_date", "")),
+                    str(_r.get("department", "") or ""),
+                    round(float(_r.get("uph") or 0), 4),
+                    round(float(_r.get("units") or 0), 4),
+                    round(float(_r.get("hours_worked") or 0), 4),
+                )
+                if _k in _existing_exact:
+                    _preview_dup_count += 1
+
+            _preview_exact_duplicate_import = (
+                len(_candidate_preview_rows) > 0 and
+                _preview_dup_count == len(_candidate_preview_rows)
+            )
+    except Exception:
+        pass
+
     # Preview sample rows with selected mapping before writing to DB.
     _preview_rows = []
     _preview_emp_ids = set()
@@ -630,6 +921,13 @@ def _import_step3():
             f"Sample preview of parsed rows. About {_preview_days} day(s) and "
             f"{len(_preview_emp_ids)} unique employee ID(s) detected."
         )
+        if _candidate_preview_rows:
+            st.caption(
+                f"Duplicate check (exact row match against history): "
+                f"{_preview_dup_count}/{len(_candidate_preview_rows)} row(s) already exist."
+            )
+            if _preview_exact_duplicate_import:
+                st.warning("Every candidate row is already in history. This looks like a full duplicate import.")
         if _preview_rows:
             st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
         else:
@@ -930,6 +1228,8 @@ def _import_step3():
                 })
             # Avoid inserting exact duplicates when users import the same file again.
             _dup_skipped = 0
+            _candidate_count = len(uph_batch)
+            _exact_duplicate_import = False
             _undo_previous_rows = []
             _undo_touched_keys = []
             try:
@@ -988,6 +1288,7 @@ def _import_step3():
                         _existing_keys.add((
                             str(_er.get("emp_id", "")),
                             str(_er.get("work_date", "")),
+                            str(_er.get("department", "") or ""),
                             round(float(_er.get("uph") or 0), 4),
                             round(float(_er.get("units") or 0), 4),
                             round(float(_er.get("hours_worked") or 0), 4),
@@ -998,6 +1299,7 @@ def _import_step3():
                     _key = (
                         str(_db_emp_key(_r.get("emp_id", ""))),
                         str(_r.get("work_date", "")),
+                        str(_r.get("department", "") or ""),
                         round(float(_r.get("uph") or 0), 4),
                         round(float(_r.get("units") or 0), 4),
                         round(float(_r.get("hours_worked") or 0), 4),
@@ -1007,6 +1309,7 @@ def _import_step3():
                         continue
                     _filtered_batch.append(_r)
                 uph_batch = _filtered_batch
+                _exact_duplicate_import = (_candidate_count > 0 and _dup_skipped == _candidate_count)
             except Exception:
                 pass
 
@@ -1018,12 +1321,31 @@ def _import_step3():
                 from database import batch_store_uph_history as _batch_store_uph_history
                 _batch_store_uph_history(uph_batch)
                 if _bg_tid and _undo_touched_keys:
+                    _upload_payload = {
+                        "files": [s.get("filename", "") for s in sessions],
+                        "stats": {
+                            "candidate_rows": int(_candidate_count),
+                            "inserted_rows": int(len(uph_batch)),
+                            "duplicate_rows": int(_dup_skipped),
+                            "exact_duplicate_import": bool(_exact_duplicate_import),
+                        },
+                        "undo": {
+                            "tenant_id": _bg_tid,
+                            "touched_keys": _undo_touched_keys,
+                            "previous_rows": _undo_previous_rows,
+                        },
+                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    _upload_filename = ", ".join([s.get("filename", "") for s in sessions if s.get("filename")]).strip() or "Import"
+                    _upload_log_id = _record_upload_event(_upload_filename, _candidate_count, _upload_payload)
                     st.session_state["_last_import_undo"] = {
                         "tenant_id": _bg_tid,
                         "touched_keys": _undo_touched_keys,
                         "previous_rows": _undo_previous_rows,
                         "row_count": len(uph_batch),
                         "created_at": time.time(),
+                        "upload_id": _upload_log_id,
+                        "upload_payload": _upload_payload,
                     }
                 if _dup_skipped:
                     st.info(f"Skipped {_dup_skipped} duplicate UPH row(s) already in history.")
