@@ -46,11 +46,10 @@ def verify_checkout_and_activate():
     if not cust_id:
         _debug.append("no stripe_customer_id on tenant; trying Stripe fallbacks")
         try:
-            _email = st.session_state.get("user_email", "").strip().lower()
             c_resp = _req.get(
                 "https://api.stripe.com/v1/customers",
                 auth=(stripe_key, ""),
-                params={"limit": 20, "email": _email} if _email else {"limit": 20},
+                params={"limit": 100},
                 timeout=10,
             )
             if c_resp.status_code == 200:
@@ -59,11 +58,6 @@ def verify_checkout_and_activate():
                     if _meta_tid == tid:
                         cust_id = _c.get("id")
                         break
-                if not cust_id and c_resp.json().get("data"):
-                    # Last-resort heuristic: use first exact-email hit
-                    _c0 = c_resp.json().get("data", [])[0]
-                    if (_c0.get("email") or "").strip().lower() == _email and _email:
-                        cust_id = _c0.get("id")
             if cust_id:
                 _debug.append(f"recovered stripe_customer_id={cust_id}")
                 try:

@@ -1153,15 +1153,10 @@ def _get_live_subscription_fallback(tenant_id: str = "") -> Optional[dict]:
 
     if not cust_id:
         try:
-            import streamlit as st
-            _email = (st.session_state.get("user_email", "") or "").strip().lower()
-        except Exception:
-            _email = ""
-        try:
             c_resp = requests.get(
                 "https://api.stripe.com/v1/customers",
                 auth=(stripe_key, ""),
-                params={"limit": 20, "email": _email} if _email else {"limit": 20},
+                params={"limit": 100},
                 timeout=10,
             )
             if c_resp.status_code == 200:
@@ -1170,10 +1165,26 @@ def _get_live_subscription_fallback(tenant_id: str = "") -> Optional[dict]:
                     if _meta_tid == tid:
                         cust_id = (_c.get("id") or "").strip()
                         break
-                if not cust_id and _email:
-                    for _c in c_resp.json().get("data", []):
-                        if ((_c.get("email") or "").strip().lower() == _email):
-                            cust_id = (_c.get("id") or "").strip()
+        except Exception:
+            cust_id = ""
+
+    # Fallback through recent checkout sessions. This is safer than matching by
+    # email because the session carries tenant_id metadata from our app.
+    if not cust_id:
+        try:
+            cs_resp = requests.get(
+                "https://api.stripe.com/v1/checkout/sessions",
+                auth=(stripe_key, ""),
+                params={"limit": 100},
+                timeout=10,
+            )
+            if cs_resp.status_code == 200:
+                for _s in cs_resp.json().get("data", []):
+                    _meta = _s.get("metadata") or {}
+                    _tid = (_meta.get("tenant_id") or "").strip()
+                    if _tid == tid:
+                        cust_id = ((_s.get("customer") or "").strip())
+                        if cust_id:
                             break
         except Exception:
             cust_id = ""
