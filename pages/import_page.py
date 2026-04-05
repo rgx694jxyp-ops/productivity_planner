@@ -1011,7 +1011,7 @@ def _import_step3():
     _preview_exact_duplicate_import = False
     try:
         _tenant_id = st.session_state.get("tenant_id", "")
-        if _tenant_id and _candidate_preview_rows:
+        if _candidate_preview_rows:
             from database import get_client as _db_get_client, _tq as _db_tq
             _code_to_primary, _code_to_all, _rowid_to_code = _build_emp_code_maps()
 
@@ -1047,14 +1047,11 @@ def _import_step3():
             _existing_3key = set()
             if _dmin and _dmax and _emp_ids_int:
                 _sb = _db_get_client()
-                _res = _db_tq(
-                    _sb.table("uph_history")
-                    .select("emp_id, work_date, department")
-                    .eq("tenant_id", _tenant_id)
-                    .gte("work_date", _dmin)
-                    .lte("work_date", _dmax)
-                    .in_("emp_id", _emp_ids_int)
-                ).execute()
+                _q = _sb.table("uph_history").select("emp_id, work_date, department")
+                if _tenant_id:
+                    _q = _q.eq("tenant_id", _tenant_id)
+                _q = _q.gte("work_date", _dmin).lte("work_date", _dmax).in_("emp_id", _emp_ids_int)
+                _res = _db_tq(_q).execute()
                 for _er in (_res.data or []):
                     _er_code = _rowid_to_code.get(str(_er.get("emp_id", "")), None)
                     if _er_code:
@@ -1484,17 +1481,14 @@ def _import_step3():
                 # exists in DB regardless of stored values. Avoids false "new" rows
                 # caused by floating point drift after multiple upsert cycles.
                 _existing_3key = set()
-                if _tenant_id and _date_min and _date_max and _emp_ids_int:
+                if _date_min and _date_max and _emp_ids_int:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
-                    _res = _db_tq(
-                        _sb.table("uph_history")
-                        .select("emp_id, work_date, department")
-                        .eq("tenant_id", _tenant_id)
-                        .gte("work_date", _date_min)
-                        .lte("work_date", _date_max)
-                        .in_("emp_id", _emp_ids_int)
-                    ).execute()
+                    _q = _sb.table("uph_history").select("emp_id, work_date, department")
+                    if _tenant_id:
+                        _q = _q.eq("tenant_id", _tenant_id)
+                    _q = _q.gte("work_date", _date_min).lte("work_date", _date_max).in_("emp_id", _emp_ids_int)
+                    _res = _db_tq(_q).execute()
                     for _er in (_res.data or []):
                         _er_code = _rowid_to_code.get(str(_er.get("emp_id", "")), None)
                         if _er_code:
