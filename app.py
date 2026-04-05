@@ -1211,6 +1211,9 @@ def main():
             del st.query_params["logout"]
         except Exception:
             st.query_params.clear()
+        # Force next entry through explicit login flow (no cookie auto-restore)
+        # until user signs in again.
+        st.query_params["logged_out"] = "1"
         st.session_state["show_login"] = False
         show_landing_page()
         st.stop()
@@ -1238,7 +1241,10 @@ def main():
         st.query_params.clear()
 
     # ── Auth gate ──────────────────────────────────────────────────────────
-    if "supabase_session" not in st.session_state and not _restore_session_from_cookies():
+    _force_login_after_logout = st.query_params.get("logged_out") == "1"
+    _restored_from_cookie = False if _force_login_after_logout else _restore_session_from_cookies()
+
+    if "supabase_session" not in st.session_state and not _restored_from_cookie:
         if not st.session_state.get("show_login", False):
             show_landing_page()
             st.stop()
@@ -1247,6 +1253,13 @@ def main():
             st.rerun()
         _login_page()
         st.stop()
+
+    # User is authenticated now; clear logout guard so normal flows resume.
+    if st.query_params.get("logged_out") == "1":
+        try:
+            del st.query_params["logged_out"]
+        except Exception:
+            st.query_params.clear()
 
     # ── Idle timeout ──────────────────────────────────────────────────────
     if _check_session_timeout():
