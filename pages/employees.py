@@ -544,41 +544,16 @@ def _emp_coaching():
                     st.rerun()
                 st.divider()
 
-            # ── Coaching templates ────────────────────────────────────────────
-            st.caption("**Quick Actions** — click to pre-fill:")
-            _tpl_cols = st.columns(4)
-            _templates = {
-                "Station Setup":     "Checked station setup. ",
-                "Side-by-Side":      "Paired with a high performer for side-by-side work. ",
-                "Speed Coaching":    "Ran a speed coaching session. ",
-                "Attendance Check":  "Followed up on attendance pattern. ",
-            }
-            _tpl_key = f"_tpl_prefill_{emp_id}"
-            for _ti, (_tlabel, _ttext) in enumerate(_templates.items()):
-                if _tpl_cols[_ti].button(_tlabel, key=f"tpl_{emp_id}_{_ti}", use_container_width=True):
-                    st.session_state.cn_note_val = (st.session_state.get("cn_note_val","") + _ttext).lstrip()
-                    st.rerun()
-
             # ── Add entry ────────────────────────────────────────────────────
             if "cn_note_val" not in st.session_state: st.session_state.cn_note_val = ""
             if "cn_by_val"   not in st.session_state: st.session_state.cn_by_val   = ""
             note_text  = st.text_area("Add a coaching note", height=120, key="cn_note",
                                        value=st.session_state.cn_note_val,
                                        placeholder="What did you discuss? What's the plan?")
-            nc1, nc2, nc3 = st.columns([2, 3, 1])
+            nc1, nc2 = st.columns([2, 3])
             created_by = nc2.text_input("Your name (optional)", key="cn_by",
                                          value=st.session_state.cn_by_val,
                                          placeholder="Your name")
-
-            # Quick note presets
-            _quick_note = nc3.selectbox("Quick note", ["—", "✓ Checked in, no issues", "⚠ Needs follow-up", "✓ Hit target today"],
-                                         key="cn_quick", label_visibility="collapsed")
-            if _quick_note and _quick_note != "—" and not st.session_state.get("_qn_applied"):
-                st.session_state.cn_note_val = _quick_note.strip()
-                st.session_state["_qn_applied"] = True
-                st.rerun()
-            if _quick_note == "—":
-                st.session_state.pop("_qn_applied", None)
 
             _sv1, _sv2 = st.columns(2)
             if _sv1.button("💾 Save note", type="primary", use_container_width=True):
@@ -591,7 +566,6 @@ def _emp_coaching():
                     st.session_state[_fu_key] = True   # prompt follow-up scheduler
                     st.session_state.cn_note_val = ""
                     st.session_state.cn_by_val   = ""
-                    st.session_state.pop("_qn_applied", None)
                     # Track coaching session progress
                     st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
                     st.session_state["_last_coached_emp_id"] = emp_id
