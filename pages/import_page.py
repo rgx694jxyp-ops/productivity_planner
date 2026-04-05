@@ -933,11 +933,12 @@ def _import_step3():
     def _build_candidate_uph_rows(_sessions, _fallback_date):
         from collections import defaultdict as _dd
 
-        _agg = _dd(lambda: {"units": 0.0, "hours": 0.0, "uphs": []})
+        _agg = _dd(lambda: {"units": 0.0, "hours": 0.0, "uphs": [], "files": set()})
         _max_uph = 500.0
         for _sess in _sessions:
             _m = _sess.get("mapping") or {}
             _rows = _sess.get("rows") or []
+            _filename = str(_sess.get("filename", "") or "").strip()
             _id_col = _m.get("EmployeeID", "EmployeeID")
             _dept_col = _m.get("Department", "Department")
             _date_col = _m.get("Date", "")
@@ -985,6 +986,8 @@ def _import_step3():
                 _k = (_eid, _row_date, _dept)
                 _agg[_k]["units"] += _units
                 _agg[_k]["hours"] += _hours
+                if _filename:
+                    _agg[_k]["files"].add(_filename)
                 if _valid_uph is not None:
                     _agg[_k]["uphs"].append(_valid_uph)
 
@@ -1003,12 +1006,14 @@ def _import_step3():
                 "uph": _uph,
                 "units": round(_vals["units"]),
                 "hours_worked": round(_vals["hours"], 2),
+                "source_files": ", ".join(sorted(_vals["files"])),
             })
         return _out
 
     _candidate_preview_rows = _build_candidate_uph_rows(sessions, work_date)
     _preview_dup_count = 0
     _preview_exact_duplicate_import = False
+    _preview_mismatch_rows = []
     try:
         _tenant_id = st.session_state.get("tenant_id", "")
         if _candidate_preview_rows:
@@ -1044,6 +1049,8 @@ def _import_step3():
             # Import history is stored as one row per employee per day for this
             # pipeline, so duplicate detection should follow the same shape.
             _existing_2key = set()
+            _history_emp_ids = set()
+            _history_dates_by_emp = {}
             def _norm_date(_v):
                 return str(_v or "").strip()[:10]
             if _dmin and _dmax and _emp_ids_int:
@@ -1056,6 +1063,8 @@ def _import_step3():
                 for _er in (_res.data or []):
                     _er_emp = str(_er.get("emp_id", "") or "").strip()
                     if _er_emp:
+                        _history_emp_ids.add(_er_emp)
+                        _history_dates_by_emp.setdefault(_er_emp, set()).add(_norm_date(_er.get("work_date", "")))
                         _existing_2key.add((
                             _er_emp,
                             _norm_date(_er.get("work_date", "")),
@@ -1067,6 +1076,37 @@ def _import_step3():
                 _is_dup = any((str(_rid), _k_date) in _existing_2key for _rid in _rowids)
                 if _is_dup:
                     _preview_dup_count += 1
+                else:
+                    _resolved_rowids = [str(_rid) for _rid in sorted(_rowids)]
+                    _known_dates_str = ""
+                    _matching_emp_ids = [
+                        _rid for _rid in _resolved_rowids if _rid in _history_emp_ids
+                    ]
+                    if not _resolved_rowids:
+                        _reason = "Employee ID not found in employees table"
+                    elif not _matching_emp_ids:
+                        _reason = "No history rows found for this employee"
+                    elif not any(_k_date in _history_dates_by_emp.get(_rid, set()) for _rid in _matching_emp_ids):
+                        _known_dates = sorted({
+                            _d
+                            for _rid in _matching_emp_ids
+                            for _d in _history_dates_by_emp.get(_rid, set())
+                        })
+                        _known_dates_str = ", ".join(_known_dates[:5])
+                        if len(_known_dates) > 5:
+                            _known_dates_str += ", ..."
+                        _reason = "Employee exists in history, but not on this work date"
+                    else:
+                        _reason = "Key mismatch after duplicate comparison"
+                    _preview_mismatch_rows.append({
+                        "Source File(s)": _r.get("source_files", ""),
+                        "Employee ID": str(_r.get("emp_id", "") or ""),
+                        "Resolved Row ID(s)": ", ".join(_resolved_rowids),
+                        "Work Date": _k_date,
+                        "Department": str(_r.get("department", "") or ""),
+                        "Reason": _reason,
+                        "Known History Dates": _known_dates_str,
+                    })
 
             _preview_exact_duplicate_import = (
                 len(_candidate_preview_rows) > 0 and
@@ -1129,6 +1169,23 @@ def _import_step3():
             )
             if _preview_exact_duplicate_import:
                 st.warning("All derived rows are duplicates. Nothing new will be uploaded.")
+            elif _preview_mismatch_rows:
+                _reason_counts = (
+                    pd.DataFrame(_preview_mismatch_rows)["Reason"]
+                    .value_counts()
+                    .rename_axis("Reason")
+                    .reset_index(name="Count")
+                )
+                with st.expander("Why these rows are considered new", expanded=False):
+                    st.caption(
+                        "These derived history rows did not match existing history using the current duplicate rules."
+                    )
+                    st.dataframe(_reason_counts, use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        pd.DataFrame(_preview_mismatch_rows[:100]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
         if _preview_rows:
             st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
         else:
