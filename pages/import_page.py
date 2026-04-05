@@ -77,13 +77,21 @@ def _build_emp_code_to_rowid_map() -> dict:
         return {}
 
 
-def _restore_uph_snapshot(tenant_id: str, new_row_ids: list, previous_rows: list) -> tuple[int, int, int]:
+def _restore_uph_snapshot(
+    tenant_id: str,
+    new_row_ids: list,
+    previous_rows: list,
+    touched_keys: list | None = None,
+) -> tuple[int, int, int]:
     """
     Rollback helper — delete newly inserted rows by PK and restore any overwritten rows.
 
     Returns (restored_rows, attempted_deletes, verified_deleted).
     verified_deleted is confirmed by a follow-up SELECT — if it equals attempted_deletes
     the rollback is fully confirmed. If it's lower, some rows were already gone (not an error).
+
+    touched_keys is a backwards-compatible fallback for uploads that predate
+    new_row_ids. Each key is [emp_id, work_date, department].
     """
     from database import get_client as _db_get_client
 
@@ -109,6 +117,34 @@ def _restore_uph_snapshot(tenant_id: str, new_row_ids: list, previous_rows: list
                 verified_deleted = attempted_deletes - _still_present
             except Exception:
                 verified_deleted = attempted_deletes  # assume success if verify query fails
+
+    # Backwards-compatible fallback: delete by key triples when no PK snapshot exists.
+    if attempted_deletes == 0 and touched_keys:
+        _prev_key_set = {
+            (
+                str(_r.get("emp_id", "") or ""),
+                str(_r.get("work_date", "") or ""),
+                str(_r.get("department", "") or ""),
+            )
+            for _r in (previous_rows or [])
+        }
+        for _k in touched_keys:
+            if not (isinstance(_k, (list, tuple)) and len(_k) == 3):
+                continue
+            _emp_id = str(_k[0] or "")
+            _work_date = str(_k[1] or "")
+            _dept = str(_k[2] or "")
+            if (_emp_id, _work_date, _dept) in _prev_key_set:
+                continue
+            attempted_deletes += 1
+            _sb.table("uph_history").delete().eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
+                "work_date", _work_date
+            ).eq("department", _dept).execute()
+            _chk = _sb.table("uph_history").select("id").eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
+                "work_date", _work_date
+            ).eq("department", _dept).limit(1).execute()
+            if not (_chk.data or []):
+                verified_deleted += 1
 
     restored_rows = 0
     if previous_rows:
@@ -295,67 +331,66 @@ def _import_step1():
                 _exact_dup = bool(_stats.get("exact_duplicate_import"))
                 _status = "Undone" if _undo_applied else ("Active" if _is_active else "Inactive")
 
-                st.markdown(
-                    f"**{_u.get('filename', 'Upload')}**  "
-                    f"({(_u.get('created_at') or '')[:16].replace('T', ' ')})"
-                )
-                st.caption(
-                    f"Status: {_status} · Candidate rows: {_cand} · Inserted: {_ins} · "
-                    f"Duplicates: {_dup}{' · Exact duplicate import' if _exact_dup else ''}"
-                )
+                _hdr = f"{_u.get('filename', 'Upload')} ({(_u.get('created_at') or '')[:16].replace('T', ' ')})"
+                with st.expander(_hdr, expanded=False):
+                    st.caption(
+                        f"Status: {_status} · Candidate rows: {_cand} · Inserted: {_ins} · "
+                        f"Duplicates: {_dup}{' · Exact duplicate import' if _exact_dup else ''}"
+                    )
 
-                if _is_active and _ins > 0:
-                    if st.button("Remove upload and rollback data", key=f"remove_upload_{_uid}"):
-                        try:
-                            _undo = _meta.get("undo", {}) if isinstance(_meta, dict) else {}
-                            _tenant_id = st.session_state.get("tenant_id", "")
-                            _restored = 0
-                            _attempted = 0
-                            _verified = 0
-                            _new_ids = _undo.get("new_row_ids", []) if isinstance(_undo, dict) else []
-                            _previous = _undo.get("previous_rows", []) if isinstance(_undo, dict) else []
-                            if not _new_ids and not _previous:
-                                st.error("This upload has no rollback snapshot — data cannot be removed safely.")
-                                continue
-                            if _tenant_id:
-                                _restored, _attempted, _verified = _restore_uph_snapshot(
-                                    _tenant_id,
-                                    _new_ids,
-                                    _previous,
-                                )
-                            else:
-                                st.error("Missing tenant context. Please refresh and try again.")
-                                continue
+                    if _is_active and _ins > 0:
+                        if st.button("Remove upload and rollback data", key=f"remove_upload_{_uid}"):
+                            try:
+                                _undo = _meta.get("undo", {}) if isinstance(_meta, dict) else {}
+                                _tenant_id = st.session_state.get("tenant_id", "")
+                                _restored = 0
+                                _attempted = 0
+                                _verified = 0
+                                _new_ids = _undo.get("new_row_ids", []) if isinstance(_undo, dict) else []
+                                _previous = _undo.get("previous_rows", []) if isinstance(_undo, dict) else []
+                                _touched = _undo.get("touched_keys", []) if isinstance(_undo, dict) else []
+                                if not _new_ids and not _previous and not _touched:
+                                    st.error("This upload has no rollback snapshot — data cannot be removed safely.")
+                                    continue
+                                if _tenant_id:
+                                    _restored, _attempted, _verified = _restore_uph_snapshot(
+                                        _tenant_id,
+                                        _new_ids,
+                                        _previous,
+                                        _touched,
+                                    )
+                                else:
+                                    st.error("Missing tenant context. Please refresh and try again.")
+                                    continue
 
-                            if not isinstance(_meta, dict):
-                                _meta = {}
-                            _meta["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
-                            _meta["undo_result"] = {
-                                "restored_rows": int(_restored),
-                                "attempted_deletes": int(_attempted),
-                                "verified_deleted": int(_verified),
-                            }
-                            _deactivate_upload(_uid, _meta)
+                                if not isinstance(_meta, dict):
+                                    _meta = {}
+                                _meta["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
+                                _meta["undo_result"] = {
+                                    "restored_rows": int(_restored),
+                                    "attempted_deletes": int(_attempted),
+                                    "verified_deleted": int(_verified),
+                                }
+                                _deactivate_upload(_uid, _meta)
 
-                            _bust_cache()
-                            _build_archived_productivity(force=True)
-                            if _verified == _attempted:
-                                st.success(
-                                    f"✅ Rollback confirmed. Deleted {_verified}/{_attempted} row(s) from history. "
-                                    f"Restored {_restored} previous row(s)."
-                                )
-                            else:
-                                st.warning(
-                                    f"Rollback partial: deleted {_verified}/{_attempted} row(s) "
-                                    f"({_attempted - _verified} already missing). Restored {_restored} previous row(s)."
-                                )
-                            st.rerun()
-                        except Exception as _rm_err:
-                            st.error(f"Could not remove upload: {_rm_err}")
-                            _log_app_error("import", f"Remove upload failed: {_rm_err}", detail=traceback.format_exc(), severity="error")
-                elif _is_active and _ins == 0:
-                    st.caption("No rollback needed: this upload inserted 0 new rows (all duplicates).")
-                st.divider()
+                                _bust_cache()
+                                _build_archived_productivity(force=True)
+                                if _verified == _attempted:
+                                    st.success(
+                                        f"✅ Rollback confirmed. Deleted {_verified}/{_attempted} row(s) from history. "
+                                        f"Restored {_restored} previous row(s)."
+                                    )
+                                else:
+                                    st.warning(
+                                        f"Rollback partial: deleted {_verified}/{_attempted} row(s) "
+                                        f"({_attempted - _verified} already missing). Restored {_restored} previous row(s)."
+                                    )
+                                st.rerun()
+                            except Exception as _rm_err:
+                                st.error(f"Could not remove upload: {_rm_err}")
+                                _log_app_error("import", f"Remove upload failed: {_rm_err}", detail=traceback.format_exc(), severity="error")
+                    elif _is_active and _ins == 0:
+                        st.caption("No rollback needed: this upload inserted 0 new rows (all duplicates).")
 
     mode = st.radio(
         "Choose a starting point",
@@ -700,10 +735,16 @@ def _import_step3():
             _undo_data = _payload.get("undo", {}) if isinstance(_payload, dict) else {}
             _new_ids = _undo_data.get("new_row_ids", []) or []
             _previous = _undo_data.get("previous_rows", []) or []
-            if not _new_ids and not _previous:
+            _touched = _undo_data.get("touched_keys", []) or []
+            if not _new_ids and not _previous and not _touched:
                 st.error("No rollback snapshot found for this import — nothing was changed.")
                 return False
-            _restored, _attempted, _verified = _restore_uph_snapshot(_tenant_id, _new_ids, _previous)
+            _restored, _attempted, _verified = _restore_uph_snapshot(
+                _tenant_id,
+                _new_ids,
+                _previous,
+                _touched,
+            )
 
             if _upload_id:
                 if not isinstance(_payload, dict):
@@ -1477,6 +1518,7 @@ def _import_step3():
                         "undo": {
                             "tenant_id": _bg_tid,
                             "new_row_ids": _new_row_ids,
+                            "touched_keys": _undo_touched_keys,
                             "previous_rows": _undo_previous_rows,
                         },
                         "created_at": datetime.now().isoformat(timespec="seconds"),
