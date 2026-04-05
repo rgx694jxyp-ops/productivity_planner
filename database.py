@@ -571,7 +571,7 @@ def store_uph_history(emp_id: str, work_date: str, uph: float,
 def batch_store_uph_history(records: list[dict]):
     """
     Insert UPH history records in bulk (500 per chunk).
-    Silently skips if a chunk fails (e.g. duplicates already stored).
+    Fails loudly if any row cannot resolve emp_id to employees.id.
     """
     if not records:
         return
@@ -601,6 +601,7 @@ def batch_store_uph_history(records: list[dict]):
 
     _normalized_records = []
     _skipped_unresolved = 0
+    _unresolved_examples = []
     for _r in records:
         _raw_emp = _r.get("emp_id")
         _emp_fk = None
@@ -613,6 +614,12 @@ def batch_store_uph_history(records: list[dict]):
         if _emp_fk is None:
             if _resolver_available:
                 _skipped_unresolved += 1
+                if len(_unresolved_examples) < 10:
+                    _unresolved_examples.append({
+                        "emp_id": str(_raw_emp or "").strip(),
+                        "work_date": str(_r.get("work_date", "") or ""),
+                        "department": str(_r.get("department", "") or ""),
+                    })
                 continue
             # Fallback for non-queryable/mocked environments: preserve original value.
             _normalized_records.append(_r)
@@ -620,10 +627,21 @@ def batch_store_uph_history(records: list[dict]):
         _normalized_records.append({**_r, "emp_id": _emp_fk})
 
     if _skipped_unresolved:
+        _examples_str = ", ".join([
+            f"{_x['emp_id']}@{_x['work_date']}"
+            for _x in _unresolved_examples
+            if _x.get("emp_id") or _x.get("work_date")
+        ])
         log_error(
             "uph_history",
-            f"Skipped {_skipped_unresolved} UPH row(s) with unresolved employee IDs",
-            severity="warning",
+            f"Blocked import: {_skipped_unresolved} UPH row(s) have unresolved employee IDs",
+            detail=f"examples={_unresolved_examples}",
+            severity="error",
+        )
+        raise ValueError(
+            "UPH history write blocked: "
+            f"{_skipped_unresolved} row(s) have unresolved employee IDs. "
+            f"Example(s): {_examples_str or 'see error log for details'}."
         )
 
     records = _normalized_records

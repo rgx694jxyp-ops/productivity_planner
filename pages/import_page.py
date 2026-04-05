@@ -1663,9 +1663,14 @@ def _import_step3():
                             f"{_new_count} row(s) uploaded."
                         )
             except Exception as _uph_err:
-                st.warning(f"UPH history storage warning: {_uph_err}")
+                st.error(f"UPH history storage failed: {_uph_err}")
+                st.info(
+                    "Import stopped. Fix unresolved employee IDs (or missing employee records) "
+                    "and run the import again so all history rows are written."
+                )
                 _log_app_error("pipeline", f"UPH history storage failed: {_uph_err}",
-                               detail=traceback.format_exc(), severity="warning")
+                               detail=traceback.format_exc(), severity="error")
+                return
 
             _bust_cache()
 
