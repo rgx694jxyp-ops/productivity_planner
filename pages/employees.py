@@ -140,25 +140,27 @@ def _emp_history():
 
     # Query uph_history within date range
     try:
-        _sb_h = _get_db_client()
-        _r_h  = _sb_h.table("uph_history").select("*") \
+        from database import get_client as _gc_h, _tq as _tq_h
+        _sb_h = _gc_h()
+        _r_h  = _tq_h(_sb_h.table("uph_history").select("*") \
                       .eq("emp_id", _uph_emp_id) \
                       .gte("work_date", from_iso) \
-                      .lte("work_date", to_iso) \
+                      .lte("work_date", to_iso)) \
                       .order("work_date").execute()
         history = _r_h.data or []
-    except Exception:
+    except Exception as _eh:
         history = []
 
     # Fallback: derive from unit_submissions if uph_history empty
     if not history:
         try:
             from collections import defaultdict as _dh
-            _sb3 = _get_db_client()
-            _r3  = _sb3.table("unit_submissions").select("*") \
+            from database import get_client as _gc_s, _tq as _tq_s
+            _sb3 = _gc_s()
+            _r3  = _tq_s(_sb3.table("unit_submissions").select("*") \
                         .eq("emp_id", emp_id) \
                         .gte("work_date", from_iso) \
-                        .lte("work_date", to_iso) \
+                        .lte("work_date", to_iso)) \
                         .order("work_date").execute()
             _day = _dh(lambda: {"units": 0.0, "hours": 0.0})
             for _s in (_r3.data or []):
