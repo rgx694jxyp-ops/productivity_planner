@@ -1699,7 +1699,7 @@ def _import_step3():
         st.session_state.import_step = 2
         st.rerun()
 
-    if st.session_state.pipeline_done and st.session_state.alloc_rows:
+    if st.session_state.get("pipeline_done") and st.session_state.get("alloc_rows"):
         _uc = len({r["emp_id"] for r in st.session_state.alloc_rows})
         _gs = st.session_state.get("goal_status", []) or []
         _below = len([r for r in _gs if r.get("goal_status") == "below_goal"])
