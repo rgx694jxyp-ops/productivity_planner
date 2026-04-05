@@ -1029,7 +1029,7 @@ def _login_page():
                 ]):
                     st.error("Supabase connection failed. Check SUPABASE_URL and SUPABASE_KEY in .streamlit/secrets.toml.")
                 elif "user not found" in _msg_l or "signup disabled" in _msg_l:
-                    st.error("This email does not exist in Supabase Auth yet. Create the user first in Supabase: Authentication -> Users -> Add user.")
+                    st.error("This email does not exist in Supabase Auth yet. Use the 'New here? Create account' section below.")
                 else:
                     st.error(f"Login failed: {_msg or 'Unknown Supabase auth error'}")
                 _log_app_error("login", f"Failed login for {email.strip()}: {_le}")
@@ -1038,6 +1038,67 @@ def _login_page():
     if st.button("Forgot password?", type="secondary", use_container_width=True, key="forgot_pw_btn"):
         st.session_state["_show_reset_pw"] = True
         st.rerun()
+
+    st.markdown("---")
+    with st.expander("New here? Create account"):
+        st.caption("Create your account here instead of adding users manually in Supabase.")
+        _signup_email = st.text_input(
+            "Email",
+            placeholder="you@company.com",
+            key="signup_email",
+        )
+        _signup_pw = st.text_input(
+            "Password",
+            placeholder="At least 6 characters",
+            type="password",
+            key="signup_password",
+        )
+        _signup_pw2 = st.text_input(
+            "Confirm password",
+            placeholder="Re-enter password",
+            type="password",
+            key="signup_password_confirm",
+        )
+        if st.button("Create account", key="create_account_btn", use_container_width=True):
+            if not _signup_email.strip() or not _signup_pw.strip() or not _signup_pw2.strip():
+                st.warning("Enter email, password, and confirmation.")
+            elif _signup_pw != _signup_pw2:
+                st.warning("Passwords do not match.")
+            elif len(_signup_pw) < 6:
+                st.warning("Password must be at least 6 characters.")
+            else:
+                try:
+                    from database import get_supabase_credentials
+                    from supabase import create_client as _sc
+                    SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
+                    _sb = _sc(SUPABASE_URL, SUPABASE_KEY)
+                    _redirect = st.context.headers.get("Origin", "http://localhost:8501")
+                    _signup_resp = _sb.auth.sign_up({
+                        "email": _signup_email.strip(),
+                        "password": _signup_pw,
+                        "options": {"email_redirect_to": _redirect},
+                    })
+                    _signup_user = getattr(_signup_resp, "user", None)
+                    _signup_session = getattr(_signup_resp, "session", None)
+                    if _signup_user and _signup_session:
+                        st.success("Account created. You can now sign in.")
+                        st.session_state["_login_attempts"] = 0
+                        st.session_state["_login_lockout_until"] = 0
+                        st.session_state["login_email"] = _signup_email.strip()
+                    elif _signup_user:
+                        st.success("Account created. Check your email to verify, then sign in.")
+                        st.info("If you do not see the message, check your spam folder.")
+                    else:
+                        st.warning("Sign-up request sent. Check your email for next steps.")
+                except Exception as _se:
+                    _se_msg = str(_se).strip().lower()
+                    if "already registered" in _se_msg or "already exists" in _se_msg or "user already" in _se_msg:
+                        st.warning("That email already has an account. Try signing in or resetting password.")
+                    elif "signup is disabled" in _se_msg:
+                        st.error("Supabase sign-up is disabled. Enable Email sign-up in Supabase Auth settings.")
+                    else:
+                        st.error(f"Could not create account: {str(_se).strip() or 'Unknown sign-up error'}")
+                    _log_app_error("signup", f"Failed signup for {_signup_email.strip()}: {_se}")
 
     # ── Join existing team via invite code ──────────────────────────────────
     _pending_inv = st.session_state.get("_pending_invite", "")
