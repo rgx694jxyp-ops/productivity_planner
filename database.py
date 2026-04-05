@@ -133,10 +133,32 @@ def get_user_id() -> str:
 
 
 def get_tenant_id() -> str:
-    """Return the current tenant id from session state."""
+    """Return the current tenant id.
+
+    Primary source is session_state. If missing, recover from user_profiles using
+    the authenticated user id and cache it back into session_state.
+    """
     try:
         import streamlit as st
-        return st.session_state.get("tenant_id", "")
+        tid = st.session_state.get("tenant_id", "")
+        if tid:
+            return tid
+
+        uid = st.session_state.get("user_id", "")
+        if not uid:
+            return ""
+
+        try:
+            sb = get_client()
+            resp = sb.table("user_profiles").select("tenant_id").eq("id", uid).limit(1).execute()
+            if resp.data:
+                tid = (resp.data[0].get("tenant_id") or "").strip()
+                if tid:
+                    st.session_state["tenant_id"] = tid
+                    return tid
+        except Exception:
+            return ""
+        return ""
     except Exception:
         return ""
 
@@ -311,6 +333,11 @@ def batch_upsert_employees(employees: list[dict]):
         return
     sb = get_client()
     _tf  = _tenant_fields()
+    if not _tf.get("tenant_id"):
+        raise RuntimeError(
+            "No tenant context found for employee sync. "
+            "Please sign out and sign back in, then retry the import."
+        )
     rows = [{
         "emp_id":     e["emp_id"],
         "name":       e.get("name",""),

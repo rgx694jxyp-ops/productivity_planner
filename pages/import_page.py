@@ -238,6 +238,37 @@ def _record_upload_event(filename: str, row_count: int, payload: dict):
         return None
 
 
+def _estimate_new_employees_for_sessions(sessions: list[dict]) -> tuple[list[str], dict[str, str]]:
+    """Return (new_employee_ids, id_to_name) inferred from uploaded sessions."""
+    _existing_ids = {
+        str(e.get("emp_id", "")).strip()
+        for e in (_cached_employees() or [])
+        if str(e.get("emp_id", "")).strip()
+    }
+    _new_ids = set()
+    _name_map = {}
+
+    for _s in (sessions or []):
+        _rows = _s.get("rows") or []
+        _headers = _s.get("headers") or []
+        _mapping = _s.get("mapping") or {}
+        _auto = _auto_detect(_headers) if _headers else {}
+
+        _id_col = _mapping.get("EmployeeID") or _auto.get("EmployeeID") or "EmployeeID"
+        _name_col = _mapping.get("EmployeeName") or _auto.get("EmployeeName") or "EmployeeName"
+
+        for _r in _rows:
+            _eid = str(_r.get(_id_col, "") or "").strip()
+            if not _eid or _eid in _existing_ids:
+                continue
+            _new_ids.add(_eid)
+            _nm = str(_r.get(_name_col, "") or "").strip()
+            if _nm and _eid not in _name_map:
+                _name_map[_eid] = _nm
+
+    return sorted(_new_ids), _name_map
+
+
 def _deactivate_upload(upload_id, payload: dict | None = None) -> None:
     try:
         from database import get_client as _db_get_client, _tq as _db_tq
@@ -378,7 +409,8 @@ def page_import():
                 "uploaded_sessions", "import_step", "alloc_rows",
                 "pipeline_done", "top_performers", "goal_status", "dept_report",
                 "dept_trends", "weekly_summary", "history", "mapping",
-                "_archived_loaded",
+                "_archived_loaded", "confirm_import_preview",
+                "_import_complete_summary", "submission_plan", "split_overrides",
             ]
             for k in keys_to_clear:
                 st.session_state.pop(k, None)
@@ -386,6 +418,10 @@ def page_import():
             for k in list(st.session_state.keys()):
                 if k.startswith(("au_", "ao_", "snap_", "alloc_sel_")):
                     del st.session_state[k]
+            # Force a fresh uploader instance so previously selected files disappear.
+            st.session_state["import_uploader_nonce"] = int(
+                st.session_state.get("import_uploader_nonce", 0) or 0
+            ) + 1
             st.session_state.import_step = 1
             _bust_cache()
             st.rerun()
@@ -539,11 +575,12 @@ def _import_step1():
         _render_recent_uploads_panel()
         return
 
+    _uploader_key = f"import_uploader_{int(st.session_state.get('import_uploader_nonce', 0) or 0)}"
     files = st.file_uploader(
         "Drop your export here or click Browse",
         type=["csv", "xlsx", "xls"],
         accept_multiple_files=True,
-        key="import_uploader",
+        key=_uploader_key,
     )
 
     if not files:
@@ -637,6 +674,32 @@ def _import_step1():
                     }
                 else:
                     all_auto = False
+
+            # Early employee-limit check right after file selection.
+            try:
+                from database import get_employee_count, get_employee_limit
+                _limit = get_employee_limit()
+                if _limit not in (-1, 0):
+                    _existing = get_employee_count()
+                    _new_ids, _name_map = _estimate_new_employees_for_sessions(sessions)
+                    if _existing + len(_new_ids) > _limit:
+                        _slots_left = max(0, _limit - _existing)
+                        _overflow_ids = _new_ids[_slots_left:]
+                        _overflow_names = [
+                            f"{_name_map.get(_eid, _eid)} ({_eid})"
+                            for _eid in _overflow_ids[:25]
+                        ]
+                        st.error(
+                            f"Employee limit reached before import. Plan limit: {_limit}, "
+                            f"current employees: {_existing}, new employees in file: {len(_new_ids)}."
+                        )
+                        if _overflow_names:
+                            st.caption("Employees over your limit:")
+                            st.code("\n".join(_overflow_names))
+                        st.info("Upgrade your plan in Settings → Billing or reduce the file employee list.")
+                        return
+            except Exception:
+                pass
 
             st.session_state.uploaded_sessions = sessions
             st.session_state.submission_plan  = None
@@ -1258,23 +1321,6 @@ def _import_step3():
                         f"(upload id: {_matching_upload.get('id')}, "
                         f"created: {str(_matching_upload.get('created_at', ''))[:19].replace('T', ' ')})."
                     )
-            elif _preview_mismatch_rows:
-                _reason_counts = (
-                    pd.DataFrame(_preview_mismatch_rows)["Reason"]
-                    .value_counts()
-                    .rename_axis("Reason")
-                    .reset_index(name="Count")
-                )
-                with st.expander("Why these rows are considered new", expanded=False):
-                    st.caption(
-                        "These derived history rows did not match existing history using the current duplicate rules."
-                    )
-                    st.dataframe(_reason_counts, use_container_width=True, hide_index=True)
-                    st.dataframe(
-                        pd.DataFrame(_preview_mismatch_rows[:100]),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
         if _preview_rows:
             st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
         else:
@@ -1337,12 +1383,22 @@ def _import_step3():
                     _new_unique = len(_new_ids)
                     if _existing + _new_unique > _el and _el > 0:
                         _plan = _get_current_plan()
+                        _slots_left = max(0, _el - _existing)
+                        _sorted_new_ids = sorted(_new_ids)
+                        _overflow_ids = _sorted_new_ids[_slots_left:]
+                        _overflow_names = [
+                            f"{seen_emps.get(_eid, {}).get('name', _eid)} ({_eid})"
+                            for _eid in _overflow_ids[:25]
+                        ]
                         st.error(
                             f"Employee limit reached. Your **{_plan.capitalize()}** plan allows "
                             f"**{_el}** employees and you have **{_existing}**. "
                             f"This import adds **{_new_unique}** new employee(s). "
                             f"Upgrade your plan in Settings → Subscription."
                         )
+                        if _overflow_names:
+                            st.caption("Employees over your plan limit:")
+                            st.code("\n".join(_overflow_names))
                         return
             except Exception:
                 pass  # don't block import if limit check fails
@@ -1350,8 +1406,13 @@ def _import_step3():
                 from database import batch_upsert_employees as _batch_upsert_employees
                 _batch_upsert_employees(list(seen_emps.values()))
             except Exception as _e:
-                st.warning(f"Employee sync warning: {_e} — allocation will continue.")
+                st.error(
+                    "Employee sync failed, so the import cannot continue safely. "
+                    "Please sign out/in and try again.\n\n"
+                    f"Technical details: {_e}"
+                )
                 _log_app_error("pipeline", f"Employee sync error: {_e}", detail=traceback.format_exc(), severity="warning")
+                return
             _bust_cache()
 
         bar.progress(25, text="Processing rows…")
