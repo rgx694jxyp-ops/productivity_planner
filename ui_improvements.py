@@ -411,39 +411,72 @@ def detect_department_patterns(gs: list[dict]) -> list[dict]:
         if dept not in by_dept:
             by_dept[dept] = {
                 "department": dept,
+                "total": 0,
                 "below_goal": 0,
                 "trending_down": 0,
+                "affected_names": [],
                 "employees": [],
             }
+        by_dept[dept]["total"] += 1
+        name = row.get("Employee Name", row.get("Employee", "Unknown"))
+        by_dept[dept]["employees"].append(name)
+        if row.get("goal_status") == "below_goal" or row.get("trend") == "down":
+            if name not in by_dept[dept]["affected_names"]:
+                by_dept[dept]["affected_names"].append(name)
         if row.get("goal_status") == "below_goal":
             by_dept[dept]["below_goal"] += 1
         if row.get("trend") == "down":
             by_dept[dept]["trending_down"] += 1
-        by_dept[dept]["employees"].append(
-            row.get("Employee Name", row.get("Employee", "Unknown"))
-        )
 
     patterns = []
     for dept, info in by_dept.items():
         affected = info["below_goal"] + info["trending_down"]
-        if info["below_goal"] >= 3 or affected >= 4:
+        total = info["total"] or 1
+        dept_pct = round((info["below_goal"] / total) * 100)
+        if info["below_goal"] >= 3 or affected >= 4 or dept_pct >= 50:
             patterns.append({
                 "department": dept,
                 "severity": "high",
                 "type": "system",
-                "summary": f"{max(info['below_goal'], info['trending_down'])} employees in {dept} need attention",
-                "likely_cause": "Process or workload issue likely — not isolated to one person.",
+                "below_goal": info["below_goal"],
+                "trending_down": info["trending_down"],
+                "total": total,
+                "dept_pct": dept_pct,
+                "affected_names": info["affected_names"][:6],
+                "summary": f"{info['below_goal']} of {total} employees in {dept} are below target",
+                "likely_cause": "Multiple employees affected — likely a process, equipment, or workload issue rather than individual performance.",
+                "check_list": ["Equipment / station availability", "Workload balance or scheduling gap", "Recent process or standard change", "New hires pulling down averages"],
+            })
+        elif info["below_goal"] == 2 and total >= 4:
+            patterns.append({
+                "department": dept,
+                "severity": "medium",
+                "type": "mixed",
+                "below_goal": info["below_goal"],
+                "trending_down": info["trending_down"],
+                "total": total,
+                "dept_pct": dept_pct,
+                "affected_names": info["affected_names"][:6],
+                "summary": f"2 employees below target in {dept} — worth watching",
+                "likely_cause": "May be more than one individual issue — watch for a shared root cause.",
+                "check_list": ["Check if the two employees share a station or shift", "Look for any common supervisor or process change"],
             })
         elif info["below_goal"] == 1 and info["trending_down"] <= 1:
             patterns.append({
                 "department": dept,
                 "severity": "low",
                 "type": "individual",
+                "below_goal": info["below_goal"],
+                "trending_down": info["trending_down"],
+                "total": total,
+                "dept_pct": dept_pct,
+                "affected_names": info["affected_names"][:6],
                 "summary": f"Issue looks isolated in {dept}",
-                "likely_cause": "More likely an individual coaching issue than a department-wide problem.",
+                "likely_cause": "Likely an individual coaching opportunity — not a department-wide problem.",
+                "check_list": [],
             })
 
-    priority = {"high": 0, "low": 1}
+    priority = {"high": 0, "medium": 1, "low": 2}
     patterns.sort(key=lambda item: priority.get(item["severity"], 99))
     return patterns
 
@@ -519,17 +552,81 @@ def show_operation_status_header(status: dict):
 
 
 def show_pattern_detection_panel(patterns: list[dict]):
-    """Show whether issues look systemic or isolated."""
+    """Show whether issues look systemic or isolated — with visual prominence."""
+    high = [p for p in patterns if p["severity"] == "high"]
+    medium = [p for p in patterns if p["severity"] == "medium"]
+    low = [p for p in patterns if p["severity"] == "low"]
+
+    st.markdown(
+        "<div style='font-size:13px;font-weight:700;letter-spacing:.06em;"
+        "text-transform:uppercase;color:#5A6472;margin:0 0 8px;'>🧩 Is This a System Issue?</div>",
+        unsafe_allow_html=True,
+    )
+
     if not patterns:
-        st.success("No clear department-wide patterns detected. Current issues look mostly isolated.")
+        st.markdown(
+            "<div style='background:linear-gradient(90deg,#ECFFF4,#D8F5E5);border-left:4px solid #4CAF50;"
+            "border-radius:8px;padding:12px 16px;'>"
+            "<strong style='color:#1B5E20;'>✅ No system-wide patterns detected</strong>"
+            "<div style='color:#2E7D32;font-size:13px;margin-top:4px;'>Current issues look individual — coach one-on-one.</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
         return
 
-    st.subheader("🧩 Pattern Detection")
-    for pattern in patterns[:4]:
-        label = "⚠ System pattern" if pattern["type"] == "system" else "👤 Isolated issue"
-        st.markdown(f"**{label}: {pattern['department']}**")
-        st.caption(pattern["summary"])
-        st.caption(f"Likely cause: {pattern['likely_cause']}")
+    for pattern in high:
+        _names = ", ".join(pattern.get("affected_names", []))
+        _checks = "".join(
+            f"<li style='margin:2px 0;'>{c}</li>" for c in pattern.get("check_list", [])
+        )
+        st.markdown(
+            f"<div style='background:linear-gradient(90deg,#FFF1EC,#FFD7D0);border-left:5px solid #E63946;"
+            f"border-radius:8px;padding:14px 16px;margin-bottom:10px;'>"
+            f"<div style='font-size:15px;font-weight:800;color:#7B1F1F;'>🚨 Likely System Issue — {pattern['department']}</div>"
+            f"<div style='font-size:13px;color:#4A1515;margin:6px 0;'>{pattern['summary']} ({pattern['dept_pct']}% of team)</div>"
+            f"<div style='font-size:12px;color:#7B2D2D;margin-bottom:6px;'>{pattern['likely_cause']}</div>"
+            f"{'<div style=\"font-size:12px;font-weight:700;color:#7B1F1F;margin-bottom:4px;\">Before coaching individuals, investigate:</div><ul style=\"margin:0;padding-left:20px;color:#4A1515;font-size:12px;\">' + _checks + '</ul>' if _checks else ''}"
+            f"{'<div style=\"font-size:12px;color:#7B2D2D;margin-top:8px;\">Affected: ' + _names + '</div>' if _names else ''}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    for pattern in medium:
+        _names = ", ".join(pattern.get("affected_names", []))
+        _checks = "".join(
+            f"<li style='margin:2px 0;'>{c}</li>" for c in pattern.get("check_list", [])
+        )
+        st.markdown(
+            f"<div style='background:linear-gradient(90deg,#FFF8E6,#FFF0C0);border-left:4px solid #F4A223;"
+            f"border-radius:8px;padding:12px 16px;margin-bottom:10px;'>"
+            f"<div style='font-size:14px;font-weight:700;color:#7A4500;'>⚠ Worth Watching — {pattern['department']}</div>"
+            f"<div style='font-size:13px;color:#5A3300;margin:4px 0;'>{pattern['summary']}</div>"
+            f"<div style='font-size:12px;color:#7A5A00;'>{pattern['likely_cause']}</div>"
+            f"{'<ul style=\"margin:6px 0 0;padding-left:20px;color:#5A3300;font-size:12px;\">' + _checks + '</ul>' if _checks else ''}"
+            f"{'<div style=\"font-size:12px;color:#7A4500;margin-top:6px;\">Affected: ' + _names + '</div>' if _names else ''}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    if low and not high and not medium:
+        for pattern in low[:3]:
+            _names = ", ".join(pattern.get("affected_names", []))
+            st.markdown(
+                f"<div style='background:#F7F9FC;border-left:3px solid #5A7A9C;"
+                f"border-radius:6px;padding:10px 14px;margin-bottom:6px;'>"
+                f"<div style='font-size:13px;font-weight:700;color:#1A2D42;'>👤 Individual Issue — {pattern['department']}</div>"
+                f"<div style='font-size:12px;color:#5A7A9C;margin-top:4px;'>{pattern['likely_cause']}</div>"
+                f"{'<div style=\"font-size:12px;color:#5A7A9C;\">Affected: ' + _names + '</div>' if _names else ''}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+    elif low:
+        # Collapse individual isolateds when system alerts visible
+        with st.expander(f"👤 {len(low)} isolated individual issue(s)", expanded=False):
+            for pattern in low:
+                _names = ", ".join(pattern.get("affected_names", []))
+                st.caption(f"**{pattern['department']}**: {pattern['likely_cause']}")
+                if _names: st.caption(f"Affected: {_names}")
 
 
 def summarize_coaching_activity(notes_by_emp: dict[str, list[dict]], history: list[dict]) -> dict:

@@ -128,6 +128,13 @@ def page_supervisor():
     # ────────────────────────────────────────────────────────────────────────────
     
     st.subheader("📊 Team Health Snapshot")
+
+    # System issue detection — shown first so it's not buried
+    _high_patterns = [p for p in _patterns if p["severity"] == "high"]
+    if _high_patterns:
+        show_pattern_detection_panel(_patterns)
+        st.divider()
+
     depts = sorted(set(r.get("Department", "") for r in gs if r.get("Department")))
     
     dept_summary = {}
@@ -185,9 +192,12 @@ def page_supervisor():
                 label_visibility="visible"
             )
     
-    st.divider()
-
-    show_pattern_detection_panel(_patterns)
+    # Show non-high patterns (medium/individual) after the dept snapshot
+    _non_high_patterns = [p for p in _patterns if p["severity"] != "high"]
+    if _non_high_patterns:
+        show_pattern_detection_panel(_non_high_patterns)
+    elif not _high_patterns:
+        show_pattern_detection_panel([])  # shows the "no system patterns" success card
 
     st.divider()
     
