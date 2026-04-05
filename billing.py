@@ -206,11 +206,15 @@ def verify_checkout_and_activate():
     if _sub_row:
         _debug.append(f"DB confirmed active: plan={_sub_row.get('plan')}")
         st.session_state["_current_plan"] = _sub_row.get("plan", plan)
+        st.session_state["_sub_check_result"] = True
+        st.session_state["_sub_check_ts"] = _time.time()
         st.session_state["_verify_debug"] = _debug
         return True
 
     _debug.append("DB row not yet active after polling — Stripe subscription is active, granting access")
     st.session_state["_current_plan"] = plan
+    st.session_state["_sub_check_result"] = True
+    st.session_state["_sub_check_ts"] = _time.time()
     st.session_state["_verify_debug"] = _debug
     return True
 
