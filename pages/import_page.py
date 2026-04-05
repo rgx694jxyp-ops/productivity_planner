@@ -1041,16 +1041,14 @@ def _import_step3():
                 for _rid in _emp_ids
                 if str(_rid).lstrip("-").isdigit()
             })
-            # 3-tuple duplicate check: (emp_rowid, work_date, department_norm)
-            # Match by resolved employee row IDs to avoid reverse-map misses.
-            _existing_3key = set()
-            def _norm_dept(_v):
-                return _normalize_label_text(_v, max_len=40).strip().lower()
+            # Import history is stored as one row per employee per day for this
+            # pipeline, so duplicate detection should follow the same shape.
+            _existing_2key = set()
             def _norm_date(_v):
                 return str(_v or "").strip()[:10]
             if _dmin and _dmax and _emp_ids_int:
                 _sb = _db_get_client()
-                _q = _sb.table("uph_history").select("emp_id, work_date, department")
+                _q = _sb.table("uph_history").select("emp_id, work_date")
                 if _tenant_id:
                     _q = _q.eq("tenant_id", _tenant_id)
                 _q = _q.gte("work_date", _dmin).lte("work_date", _dmax).in_("emp_id", _emp_ids_int)
@@ -1058,17 +1056,15 @@ def _import_step3():
                 for _er in (_res.data or []):
                     _er_emp = str(_er.get("emp_id", "") or "").strip()
                     if _er_emp:
-                        _existing_3key.add((
+                        _existing_2key.add((
                             _er_emp,
                             _norm_date(_er.get("work_date", "")),
-                            _norm_dept(_er.get("department", "") or ""),
                         ))
 
             for _r in _candidate_preview_rows:
                 _k_date = _norm_date(_r.get("work_date", ""))
-                _k_dept = _norm_dept(_r.get("department", "") or "")
                 _rowids = _candidate_rowids(_r.get("emp_id", ""))
-                _is_dup = any((str(_rid), _k_date, _k_dept) in _existing_3key for _rid in _rowids)
+                _is_dup = any((str(_rid), _k_date) in _existing_2key for _rid in _rowids)
                 if _is_dup:
                     _preview_dup_count += 1
 
@@ -1479,17 +1475,15 @@ def _import_step3():
                     for _rid in _emp_ids
                     if str(_rid).lstrip("-").isdigit()
                 })
-                # 3-tuple duplicate check: (emp_rowid, date, dept_norm)
-                # Match by resolved employee row IDs to avoid reverse-map misses.
-                _existing_3key = set()
-                def _norm_dept(_v):
-                    return _normalize_label_text(_v, max_len=40).strip().lower()
+                # Duplicate detection follows the import pipeline shape: one row
+                # per employee per day, regardless of department text drift.
+                _existing_2key = set()
                 def _norm_date(_v):
                     return str(_v or "").strip()[:10]
                 if _date_min and _date_max and _emp_ids_int:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
-                    _q = _sb.table("uph_history").select("emp_id, work_date, department")
+                    _q = _sb.table("uph_history").select("emp_id, work_date")
                     if _tenant_id:
                         _q = _q.eq("tenant_id", _tenant_id)
                     _q = _q.gte("work_date", _date_min).lte("work_date", _date_max).in_("emp_id", _emp_ids_int)
@@ -1497,10 +1491,9 @@ def _import_step3():
                     for _er in (_res.data or []):
                         _er_emp = str(_er.get("emp_id", "") or "").strip()
                         if _er_emp:
-                            _existing_3key.add((
+                            _existing_2key.add((
                                 _er_emp,
                                 _norm_date(_er.get("work_date", "")),
-                                _norm_dept(_er.get("department", "") or ""),
                             ))
 
                 _filtered_batch = []
@@ -1508,9 +1501,9 @@ def _import_step3():
                 for _r in uph_batch:
                     _key_emp = str(_db_emp_key(_r.get("emp_id", "")))
                     _key_date = _norm_date(_r.get("work_date", ""))
-                    _key_dept = _norm_dept(_r.get("department", "") or "")
+                    _key_dept = str(_r.get("department", "") or "")
                     _rowids = _candidate_rowids(_r.get("emp_id", ""))
-                    _is_dup = any((str(_rid), _key_date, _key_dept) in _existing_3key for _rid in _rowids)
+                    _is_dup = any((str(_rid), _key_date) in _existing_2key for _rid in _rowids)
                     if _is_dup:
                         _dup_skipped += 1
                         continue
