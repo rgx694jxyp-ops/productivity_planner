@@ -13,3 +13,5 @@ venv/
 legacy_app.py
 mv app.py
 scripts/*.local
+supabase/.temp/
+package-lock.json
