@@ -200,6 +200,18 @@ def _get_upload_by_id(upload_id):
 def page_import():
     st.title("📁 Import Data")
 
+    # Keep expander headings readable on themed backgrounds.
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stExpander"] summary p {
+            color: #ffffff !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if not require_db(): return
 
     step = st.session_state.import_step
@@ -284,12 +296,20 @@ def _import_step1():
                             _tenant_id = st.session_state.get("tenant_id", "")
                             _restored = 0
                             _deleted = 0
-                            if _tenant_id and _undo.get("touched_keys") is not None:
+                            _touched = _undo.get("touched_keys", []) if isinstance(_undo, dict) else []
+                            _previous = _undo.get("previous_rows", []) if isinstance(_undo, dict) else []
+                            if not _touched:
+                                st.error("This upload has no rollback snapshot, so data cannot be removed safely.")
+                                continue
+                            if _tenant_id:
                                 _restored, _deleted = _restore_uph_snapshot(
                                     _tenant_id,
-                                    _undo.get("touched_keys", []),
-                                    _undo.get("previous_rows", []),
+                                    _touched,
+                                    _previous,
                                 )
+                            else:
+                                st.error("Missing tenant context. Please refresh and try again.")
+                                continue
 
                             if not isinstance(_meta, dict):
                                 _meta = {}
@@ -302,7 +322,9 @@ def _import_step1():
 
                             _bust_cache()
                             _build_archived_productivity(force=True)
-                            st.success("Upload removed and productivity data refreshed.")
+                            st.success(
+                                f"Upload removed. Restored {_restored} previous row(s), removed {_deleted} inserted row(s)."
+                            )
                             st.rerun()
                         except Exception as _rm_err:
                             st.error(f"Could not remove upload: {_rm_err}")
@@ -652,23 +674,30 @@ def _import_step3():
                 _payload = _decode_jsonish(_undo.get("upload_payload") or {})
 
             _undo_data = _payload.get("undo", {}) if isinstance(_payload, dict) else {}
-            _restore_uph_snapshot(
-                _tenant_id,
-                _undo_data.get("touched_keys", []) or _undo.get("touched_keys", []) or [],
-                _undo_data.get("previous_rows", []) or _undo.get("previous_rows", []) or [],
-            )
+            _touched = _undo_data.get("touched_keys", []) or _undo.get("touched_keys", []) or []
+            _previous = _undo_data.get("previous_rows", []) or _undo.get("previous_rows", []) or []
+            if not _touched:
+                st.error("Undo snapshot not found for this import. Nothing was changed.")
+                return False
+            _restored, _deleted = _restore_uph_snapshot(_tenant_id, _touched, _previous)
 
             if _upload_id:
                 if not isinstance(_payload, dict):
                     _payload = {}
                 _payload["undo_applied_at"] = datetime.now().isoformat(timespec="seconds")
-                _payload["undo_result"] = {"source": "last_import_button"}
+                _payload["undo_result"] = {
+                    "source": "last_import_button",
+                    "restored_rows": int(_restored),
+                    "deleted_rows": int(_deleted),
+                }
                 _deactivate_upload(_upload_id, _payload)
 
             _bust_cache()
             _build_archived_productivity(force=True)
             st.session_state.pop("_last_import_undo", None)
-            st.success("Last import was rolled back. UPH history and productivity views were restored.")
+            st.success(
+                f"Last import rolled back. Restored {_restored} previous row(s), removed {_deleted} inserted row(s)."
+            )
             return True
         except Exception as _undo_err:
             st.error(f"Undo failed: {_undo_err}")
@@ -1377,6 +1406,7 @@ def _import_step3():
                     _upload_log_id = _record_upload_event(_upload_filename, _candidate_count, _upload_payload)
                     st.session_state["_last_import_undo"] = {
                         "tenant_id": _bg_tid,
+                        "touched_keys": _undo_touched_keys,
                         "row_count": len(uph_batch),
                         "created_at": time.time(),
                         "upload_id": _upload_log_id,
