@@ -289,7 +289,13 @@ def page_settings():
                 _app_origin = st.context.headers.get("Origin", "")
                 _inv_link = f"{_app_origin}/?invite={_inv_code}" if _app_origin else f"Invite code: {_inv_code}"
                 st.markdown("**Invite link — share this with anyone you want to add to your team:**")
-                st.code(_inv_link, language=None)
+                _safe_link = _inv_link.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                st.markdown(
+                    f'<div style="background:#1e1e2e;border-radius:6px;padding:10px 14px;'
+                    f'font-family:monospace;font-size:13px;color:#ffffff;word-break:break-all;">'
+                    f'{_safe_link}</div>',
+                    unsafe_allow_html=True,
+                )
                 st.caption("Anyone who signs up with this link (or enters the code manually) joins your team automatically.")
                 if _is_admin:
                     if st.button("🔄 Rotate invite code", key="rotate_invite", type="secondary"):

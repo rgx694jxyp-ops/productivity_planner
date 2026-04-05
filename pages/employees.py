@@ -133,11 +133,16 @@ def _emp_history():
     from_iso = from_date_h.isoformat()
     to_iso   = to_date_h.isoformat()
 
+    # uph_history stores the numeric employees.id (bigint FK) in emp_id, not the text code.
+    # Resolve the text emp_id to the numeric id before querying.
+    _this_emp_rec = next((e for e in filtered_emps if e["emp_id"] == emp_id), None)
+    _uph_emp_id = int(_this_emp_rec["id"]) if (_this_emp_rec and _this_emp_rec.get("id") is not None) else emp_id
+
     # Query uph_history within date range
     try:
         _sb_h = _get_db_client()
         _r_h  = _sb_h.table("uph_history").select("*") \
-                      .eq("emp_id", emp_id) \
+                      .eq("emp_id", _uph_emp_id) \
                       .gte("work_date", from_iso) \
                       .lte("work_date", to_iso) \
                       .order("work_date").execute()
@@ -369,8 +374,7 @@ def _emp_coaching():
             selected_emp = filtered_emps[sel_rows[0]]
             st.session_state["cn_selected_emp"] = selected_emp["emp_id"]
         else:
-            _persisted_id = st.session_state.get("cn_selected_emp")
-            selected_emp = next((e for e in filtered_emps if e["emp_id"] == _persisted_id), None)
+            selected_emp = None
 
     with col_detail:
         if not selected_emp:
