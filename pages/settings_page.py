@@ -31,7 +31,6 @@ def page_settings():
             from database import (
                 get_subscription, get_employee_count, get_employee_limit,
                 create_billing_portal_url, get_live_stripe_subscription_status,
-                refund_latest_subscription_payment,
                 _get_config,
             )
             _tid_local = st.session_state.get("tenant_id", "")
@@ -136,34 +135,15 @@ def page_settings():
                         else:
                             st.info("No pending Stripe plan change detected right now.")
 
-                with st.expander("Refund most recent subscription payment"):
-                    st.caption("Issues a full refund for the latest successful subscription charge in Stripe.")
-                    _refund_ok = st.checkbox(
-                        "I understand this refunds the latest subscription payment.",
-                        key="refund_confirm_latest",
-                    )
-                    if st.button(
-                        "Issue refund",
-                        key="issue_latest_refund",
-                        type="secondary",
-                        use_container_width=True,
-                        disabled=not _refund_ok,
-                    ):
-                        _ok, _msg = refund_latest_subscription_payment(_tid_local)
-                        if _ok:
-                            st.success(f"Refund issued successfully ({_msg}).")
-                        else:
-                            st.error(_msg)
-
                 # ── Plan comparison ───────────────────────────────────
                 st.markdown("---")
                 st.markdown("##### Compare Plans")
 
                 _PORD  = ["starter", "pro", "business"]
                 _PINFO = {
-                    "starter":  {"label": "Starter",  "price": "$49/mo",  "emp": "Up to 25",  "clr": "#6b7280"},
-                    "pro":      {"label": "Pro",       "price": "$149/mo", "emp": "Up to 100", "clr": "#2563eb"},
-                    "business": {"label": "Business",  "price": "$299/mo", "emp": "Unlimited", "clr": "#7c3aed"},
+                    "starter":  {"label": "Starter",  "price": "$30/mo", "emp": "Up to 25",  "clr": "#6b7280"},
+                    "pro":      {"label": "Pro",      "price": "$59/mo", "emp": "Up to 100", "clr": "#2563eb"},
+                    "business": {"label": "Business", "price": "$99/mo", "emp": "Unlimited", "clr": "#7c3aed"},
                 }
                 _FEATS = {
                     "starter":  ["CSV upload & auto-detection", "Dashboard & rankings",
@@ -172,9 +152,7 @@ def page_settings():
                                  "Employee trend analysis", "Underperformer flagging & alerts",
                                  "Custom date range reports",
                                  "Coaching notes per employee"],
-                    "business": ["Everything in Pro", "Order & client tracking",
-                                 "Submission plans & progress", "Client trend recording",
-                                 "Multi-department management", "Priority email support"],
+                    "business": ["Everything in Pro", "Unlimited employees"],
                 }
                 # What you GAIN when moving from key[0] → key[1]
                 _GAINS = {
@@ -182,26 +160,18 @@ def page_settings():
                                               "Employee trend analysis", "Underperformer alerts",
                                               "Custom date ranges",
                                               "Coaching notes per employee"],
-                    ("pro", "business"):     ["Unlimited employees (100 → ∞)", "Order & client tracking",
-                                              "Submission plans & progress", "Client trend recording",
-                                              "Multi-department management", "Priority email support"],
+                    ("pro", "business"):     ["Unlimited employees (100 → ∞)"],
                     ("starter", "business"): ["Unlimited employees", "Goal setting & UPH targets",
                                               "Employee trend analysis", "Underperformer alerts",
-                                              "Custom date ranges",
-                                              "Coaching notes", "Order & client tracking",
-                                              "Submission plans", "Priority email support"],
+                                              "Custom date ranges", "Coaching notes per employee"],
                     ("pro", "starter"):      ["75 employee slots (100 → 25)", "Goal setting & UPH targets",
                                               "Employee trend analysis", "Underperformer alerts",
                                               "Custom date ranges",
                                               "Coaching notes per employee"],
-                    ("business", "pro"):     ["Unlimited employees (capped at 100)", "Order & client tracking",
-                                              "Submission plans & progress", "Client trend recording",
-                                              "Multi-department management", "Priority email support"],
+                    ("business", "pro"):     ["Unlimited employees (capped at 100)"],
                     ("business", "starter"): ["Unlimited employees", "Goal setting & UPH targets",
                                               "Employee trend analysis", "Underperformer alerts",
-                                              "Coaching notes",
-                                              "Order & client tracking", "Submission plans",
-                                              "Priority email support"],
+                                              "Custom date ranges", "Coaching notes per employee"],
                 }
 
                 _cur_idx = _PORD.index(_plan_raw) if _plan_raw in _PORD else -1
@@ -382,9 +352,6 @@ def page_settings():
         if st.button("Save wage settings", key="save_wage"):
             _tzs.set("avg_hourly_wage", float(_wage_input))
             st.success(f"✓ Average hourly wage set to ${_wage_input:.2f}")
-
-        st.divider()
-        st.info("Shift comparison and attendance tracking — coming in a future release.")
 
         st.divider()
         st.subheader("📋 Audit log")
