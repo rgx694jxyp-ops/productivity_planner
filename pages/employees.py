@@ -607,9 +607,21 @@ def _build_archived_productivity(force: bool = False):
     from collections import defaultdict
     from datetime import datetime as _dt
 
-    emps     = {e["emp_id"]: e for e in (_cached_employees() or [])}
-    emp_dept = {eid: e.get("department","") for eid, e in emps.items()}
-    emp_name = {eid: e.get("name", eid)    for eid, e in emps.items()}
+    _emp_rows = _cached_employees() or []
+    _id_to_emp_code = {}
+    emp_dept = {}
+    emp_name = {}
+    for _e in _emp_rows:
+        _emp_code = str(_e.get("emp_id", "")).strip()
+        _row_id = _e.get("id")
+        _row_id_key = str(_row_id).strip() if _row_id is not None else ""
+        if not _emp_code:
+            continue
+        emp_dept[_emp_code] = _e.get("department", "")
+        emp_name[_emp_code] = _e.get("name", _emp_code)
+        _id_to_emp_code[_emp_code] = _emp_code
+        if _row_id_key:
+            _id_to_emp_code[_row_id_key] = _emp_code
 
     # Don't bail if employees table is empty — UPH history has dept/emp info
     try:
@@ -643,7 +655,8 @@ def _build_archived_productivity(force: bool = False):
             _last_err = repr(_pe)
             break
         for row in batch:
-            eid   = row.get("emp_id","")
+            _raw_eid = str(row.get("emp_id", "")).strip()
+            eid   = _id_to_emp_code.get(_raw_eid, _raw_eid)
             uph   = float(row.get("uph") or 0)
             units = float(row.get("units") or 0)
             dept  = emp_dept.get(eid) or row.get("department") or "Unknown"
@@ -691,7 +704,8 @@ def _build_archived_productivity(force: bool = False):
             except Exception:
                 break
             for row in batch:
-                eid   = row.get("emp_id","")
+                _raw_eid = str(row.get("emp_id", "")).strip()
+                eid   = _id_to_emp_code.get(_raw_eid, _raw_eid)
                 units = float(row.get("units") or 0)
                 hours = float(row.get("hours_worked") or 0)
                 uph   = round(units / hours, 2) if hours > 0 else 0
