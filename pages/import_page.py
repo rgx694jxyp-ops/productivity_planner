@@ -1041,10 +1041,11 @@ def _import_step3():
                 for _rid in _emp_ids
                 if str(_rid).lstrip("-").isdigit()
             })
-            # 3-tuple duplicate check: (emp_code, work_date, department)
-            # Numeric value comparison fails when stored values differ by tiny
-            # floating point amounts after multiple upsert cycles.
+            # 3-tuple duplicate check: (emp_rowid, work_date, department_norm)
+            # Match by resolved employee row IDs to avoid reverse-map misses.
             _existing_3key = set()
+            def _norm_dept(_v):
+                return _normalize_label_text(_v, max_len=40).strip().lower()
             if _dmin and _dmax and _emp_ids_int:
                 _sb = _db_get_client()
                 _q = _sb.table("uph_history").select("emp_id, work_date, department")
@@ -1053,21 +1054,20 @@ def _import_step3():
                 _q = _q.gte("work_date", _dmin).lte("work_date", _dmax).in_("emp_id", _emp_ids_int)
                 _res = _db_tq(_q).execute()
                 for _er in (_res.data or []):
-                    _er_code = _rowid_to_code.get(str(_er.get("emp_id", "")), None)
-                    if _er_code:
+                    _er_emp = str(_er.get("emp_id", "") or "").strip()
+                    if _er_emp:
                         _existing_3key.add((
-                            _er_code,
+                            _er_emp,
                             str(_er.get("work_date", "")),
-                            str(_er.get("department", "") or ""),
+                            _norm_dept(_er.get("department", "") or ""),
                         ))
 
             for _r in _candidate_preview_rows:
-                _k3 = (
-                    _emp_code(_r.get("emp_id", "")),
-                    str(_r.get("work_date", "")),
-                    str(_r.get("department", "") or ""),
-                )
-                if _k3 in _existing_3key:
+                _k_date = str(_r.get("work_date", ""))
+                _k_dept = _norm_dept(_r.get("department", "") or "")
+                _rowids = _candidate_rowids(_r.get("emp_id", ""))
+                _is_dup = any((str(_rid), _k_date, _k_dept) in _existing_3key for _rid in _rowids)
+                if _is_dup:
                     _preview_dup_count += 1
 
             _preview_exact_duplicate_import = (
@@ -1477,10 +1477,11 @@ def _import_step3():
                     for _rid in _emp_ids
                     if str(_rid).lstrip("-").isdigit()
                 })
-                # 3-tuple duplicate check: skip row if (emp_code, date, dept) already
-                # exists in DB regardless of stored values. Avoids false "new" rows
-                # caused by floating point drift after multiple upsert cycles.
+                # 3-tuple duplicate check: (emp_rowid, date, dept_norm)
+                # Match by resolved employee row IDs to avoid reverse-map misses.
                 _existing_3key = set()
+                def _norm_dept(_v):
+                    return _normalize_label_text(_v, max_len=40).strip().lower()
                 if _date_min and _date_max and _emp_ids_int:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
@@ -1490,12 +1491,12 @@ def _import_step3():
                     _q = _q.gte("work_date", _date_min).lte("work_date", _date_max).in_("emp_id", _emp_ids_int)
                     _res = _db_tq(_q).execute()
                     for _er in (_res.data or []):
-                        _er_code = _rowid_to_code.get(str(_er.get("emp_id", "")), None)
-                        if _er_code:
+                        _er_emp = str(_er.get("emp_id", "") or "").strip()
+                        if _er_emp:
                             _existing_3key.add((
-                                _er_code,
+                                _er_emp,
                                 str(_er.get("work_date", "")),
-                                str(_er.get("department", "") or ""),
+                                _norm_dept(_er.get("department", "") or ""),
                             ))
 
                 _filtered_batch = []
@@ -1503,13 +1504,10 @@ def _import_step3():
                 for _r in uph_batch:
                     _key_emp = str(_db_emp_key(_r.get("emp_id", "")))
                     _key_date = str(_r.get("work_date", ""))
-                    _key_dept = str(_r.get("department", "") or "")
-                    _k3 = (
-                        _cmp_emp_code(_r.get("emp_id", "")),
-                        _key_date,
-                        _key_dept,
-                    )
-                    if _k3 in _existing_3key:
+                    _key_dept = _norm_dept(_r.get("department", "") or "")
+                    _rowids = _candidate_rowids(_r.get("emp_id", ""))
+                    _is_dup = any((str(_rid), _key_date, _key_dept) in _existing_3key for _rid in _rowids)
+                    if _is_dup:
                         _dup_skipped += 1
                         continue
                     _filtered_batch.append(_r)
