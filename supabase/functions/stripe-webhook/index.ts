@@ -113,6 +113,34 @@ function getPeriodEnd(sub: any): string | null {
   return new Date(Number(ts) * 1000).toISOString();
 }
 
+function getPeriodStart(sub: any): string | null {
+  const ts =
+    sub.current_period_start ||
+    sub.items?.data?.[0]?.current_period_start ||
+    null;
+  if (!ts || !Number.isFinite(Number(ts))) return null;
+  return new Date(Number(ts) * 1000).toISOString();
+}
+
+// Log a Stripe event to subscription_events for debugging.
+// Wrapped in try/catch so a missing table never breaks the main webhook flow.
+async function logSubscriptionEvent(
+  supabase: any,
+  tenantId: string | null,
+  eventType: string,
+  rawObj: any
+): Promise<void> {
+  try {
+    await supabase.from("subscription_events").insert({
+      tenant_id: tenantId || null,
+      event_type: eventType,
+      raw_json: rawObj ?? null,
+    });
+  } catch (_) {
+    // Non-fatal — never block webhook response
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
@@ -175,6 +203,7 @@ Deno.serve(async (req) => {
           plan: plan,
           status: "active",
           employee_limit: limit,
+          current_period_start: getPeriodStart(sub),
           current_period_end: getPeriodEnd(sub),
           cancel_at_period_end: sub.cancel_at_period_end || false,
           updated_at: new Date().toISOString(),
@@ -193,6 +222,7 @@ Deno.serve(async (req) => {
           .update({ stripe_customer_id: customerId })
           .eq("id", tenantId);
 
+        await logSubscriptionEvent(supabase, tenantId, event.type, event.data.object);
         console.log(`Subscription activated for tenant ${tenantId}, plan: ${plan}`);
         break;
       }
@@ -241,6 +271,7 @@ Deno.serve(async (req) => {
             plan: plan,
             status: sub.status, // active, past_due, canceled, etc.
             employee_limit: limit,
+            current_period_start: getPeriodStart(sub),
             current_period_end: getPeriodEnd(sub),
             cancel_at_period_end: sub.cancel_at_period_end || false,
             stripe_subscription_id: sub.id,
@@ -248,6 +279,7 @@ Deno.serve(async (req) => {
           })
           .eq("tenant_id", tenantId);
 
+        await logSubscriptionEvent(supabase, tenantId, event.type, event.data.object);
         console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${plan}, pending=${hasPendingUpdate}`);
         break;
       }
@@ -271,6 +303,7 @@ Deno.serve(async (req) => {
             })
             .eq("tenant_id", tenants[0].id);
 
+          await logSubscriptionEvent(supabase, tenants[0].id, event.type, event.data.object);
           console.log(`Subscription canceled for tenant ${tenants[0].id}`);
         }
         break;
@@ -295,6 +328,7 @@ Deno.serve(async (req) => {
             })
             .eq("tenant_id", tenants[0].id);
 
+          await logSubscriptionEvent(supabase, tenants[0].id, event.type, event.data.object);
           console.log(`Payment failed for tenant ${tenants[0].id}`);
         }
         break;
@@ -324,12 +358,14 @@ Deno.serve(async (req) => {
               status: "active",
               plan: plan,
               employee_limit: limit,
+              current_period_start: getPeriodStart(renewedSub),
               current_period_end: getPeriodEnd(renewedSub),
               cancel_at_period_end: renewedSub.cancel_at_period_end || false,
               updated_at: new Date().toISOString(),
             })
             .eq("tenant_id", tenants[0].id);
 
+          await logSubscriptionEvent(supabase, tenants[0].id, event.type, event.data.object);
           console.log(`Renewal synced for tenant ${tenants[0].id}, plan: ${plan}`);
         }
         break;

@@ -570,6 +570,120 @@ def _plan_gate(min_plan: str, feature_name: str) -> bool:
     return False
 
 
+def _render_subscription_banner():
+    """Render a compact subscription status bar at the top of main content.
+
+    Shows: Plan name | Renews/Cancels date | x/y employees
+    Special states: payment past due (red), cancel scheduled (orange).
+    Skipped for admin users and when no subscription exists.
+    """
+    _email = st.session_state.get("user_email", "").lower()
+    try:
+        _admins = [
+            e.strip().lower()
+            for e in st.secrets.get("ADMIN_EMAILS", "").split(",")
+            if e.strip()
+        ]
+        if _email and _email in _admins:
+            return
+    except Exception:
+        pass
+
+    # Read subscription from cache (refreshes on the same 5-min TTL as plan cache)
+    _cached_sub = st.session_state.get("_banner_sub")
+    _cached_ts = float(st.session_state.get("_banner_sub_ts", 0) or 0)
+    if _cached_sub is None or (time.time() - _cached_ts) > 300:
+        try:
+            from database import get_subscription, get_employee_count, get_employee_limit
+            _tid = st.session_state.get("tenant_id", "")
+            _cached_sub = get_subscription(_tid) or {}
+            st.session_state["_banner_sub"] = _cached_sub
+            st.session_state["_banner_sub_ts"] = time.time()
+            st.session_state["_banner_emp_count"] = get_employee_count(_tid)
+            st.session_state["_banner_emp_limit"] = get_employee_limit(_tid)
+        except Exception:
+            return
+
+    if not _cached_sub:
+        return
+
+    _plan = _cached_sub.get("plan", "").lower()
+    _status = _cached_sub.get("status", "")
+    _period_end = _cached_sub.get("current_period_end", "")
+    _cancel_at = _cached_sub.get("cancel_at_period_end", False)
+    _emp_count = st.session_state.get("_banner_emp_count", 0)
+    _emp_limit = st.session_state.get("_banner_emp_limit", 0)
+
+    if not _plan or _status not in ("active", "trialing", "past_due"):
+        return
+
+    # Format renewal/cancellation date
+    _date_str = ""
+    if _period_end:
+        try:
+            _pe = datetime.fromisoformat(_period_end.replace("Z", "+00:00"))
+            _date_str = _pe.strftime("%b %-d")
+        except Exception:
+            pass
+
+    _plan_colors = {
+        "starter": "#6b7280",
+        "pro": "#2563eb",
+        "business": "#7c3aed",
+    }
+    _pc = _plan_colors.get(_plan, "#6b7280")
+    _emp_str = (
+        f"{_emp_count} / Unlimited"
+        if _emp_limit == -1
+        else f"{_emp_count} / {_emp_limit}"
+    )
+
+    if _status == "past_due":
+        _bg = "#fef2f2"
+        _border = "#dc2626"
+        _date_label = f"Payment past due — update card in Settings"
+        _date_style = "color:#dc2626;font-weight:700;"
+    elif _cancel_at and _date_str:
+        _bg = "#fffbeb"
+        _border = "#d97706"
+        _date_label = f"⚠ Cancels {_date_str}"
+        _date_style = "color:#d97706;font-weight:600;"
+    elif _date_str:
+        _bg = "#f8fafc"
+        _border = "#e2e8f0"
+        _date_label = f"Renews {_date_str}"
+        _date_style = "color:#6b7280;"
+    else:
+        _bg = "#f8fafc"
+        _border = "#e2e8f0"
+        _date_label = ""
+        _date_style = ""
+
+    _plan_part = (
+        f'<span style="font-weight:700;color:{_pc};font-size:13px;">'
+        f'Plan: {_plan.capitalize()}</span>'
+    )
+    _date_part = (
+        f'<span style="{_date_style};font-size:13px;">{_date_label}</span>'
+        if _date_label
+        else ""
+    )
+    _emp_part = (
+        f'<span style="color:#374151;font-size:13px;">{_emp_str} employees</span>'
+    )
+    _parts = [p for p in [_plan_part, _date_part, _emp_part] if p]
+    _separator = '<span style="color:#d1d5db;">  ·  </span>'
+
+    st.markdown(
+        f'<div style="background:{_bg};border:1px solid {_border};'
+        f'border-radius:6px;padding:7px 16px;margin-bottom:14px;'
+        f'display:flex;align-items:center;flex-wrap:wrap;gap:4px;">'
+        + _separator.join(_parts)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_sidebar() -> str:
     _plan = _get_current_plan()
 
@@ -1240,6 +1354,7 @@ def main():
 
 
 if __name__ == "__main__":
+    _render_subscription_banner()
     try:
         main()
     except Exception as _fatal_err:

@@ -358,6 +358,33 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                         st.rerun()
                     else:
                         st.error(f"Checkout failed: {err}")
+            _price_id = _prices.get(_pk, "")
+            if _is_prev and _portal_url:
+                _reactivate_url = create_billing_portal_url(
+                    return_url=_app_url + "/?portal=return",
+                    target_price_id=_price_map.get(_pk, ""),
+                    flow="subscription_update",
+                ) or _portal_url
+                st.link_button(f"Reactivate {_pi['label']} →", _reactivate_url, use_container_width=True, type="primary")
+            elif _price_id:
+                _btn_label = f"Get {_pi['label']}"
+                _btn_type = "primary" if _is_pop else "secondary"
+                if st.button(_btn_label, use_container_width=True, type=_btn_type, key=f"btn_{_pk}"):
+                    with st.spinner("Connecting to Stripe..."):
+                        url, err = create_stripe_checkout_url(_price_id, _success, _cancel)
+                    if url:
+                        st.session_state["_checkout_url"] = url
+                        st.session_state["_checkout_plan"] = _pi["label"]
+                        st.rerun()
+                    elif err == "active_subscription":
+                        # Already subscribed — route to portal for plan management
+                        if _portal_url:
+                            st.info("You already have an active subscription. Use the billing portal to change plans.")
+                            st.link_button("Manage Subscription →", _portal_url, use_container_width=True, type="primary")
+                        else:
+                            st.info("You already have an active subscription. Go to Settings → Billing to manage it.")
+                    else:
+                        st.error(f"Checkout failed: {err}")
 
     if not (_price_starter or _price_pro or _price_business):
         st.info("Payment system is being configured. Check back soon.")

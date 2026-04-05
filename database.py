@@ -1139,7 +1139,22 @@ def has_active_subscription(tenant_id: str = "") -> bool:
     sub = get_subscription(tenant_id)
     if not sub:
         return False
-    return sub.get("status") == "active"
+    status = sub.get("status")
+    if status not in ("active", "trialing"):
+        return False
+    # Safety net: if the DB still says active but the period ended >48 h ago,
+    # treat as expired. The webhook should have updated status already, but
+    # this prevents stale access if webhook delivery fails.
+    period_end = sub.get("current_period_end")
+    if period_end:
+        try:
+            from datetime import timezone, timedelta
+            pe = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) > (pe + timedelta(hours=48)):
+                return False
+        except Exception:
+            pass
+    return True
 
 
 def get_employee_limit(tenant_id: str = "") -> int:
@@ -1192,6 +1207,12 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
         user_id = st.session_state.get("user_id", "") or ""
     except Exception:
         user_id = ""
+
+    # Guard: block double-subscription. If already active/trialing, caller
+    # should redirect to the billing portal instead of creating a new checkout.
+    existing_sub = get_subscription(tid)
+    if existing_sub and existing_sub.get("status") in ("active", "trialing"):
+        return None, "active_subscription"
 
     # Get or create Stripe customer
     sb = get_client()
@@ -1247,6 +1268,86 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
     if checkout_resp.status_code == 200:
         return checkout_resp.json().get("url"), None
     return None, f"Checkout creation failed: {checkout_resp.status_code} {checkout_resp.text[:200]}"
+
+
+def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
+    """Upgrade or downgrade an active subscription via Stripe API.
+
+    Upgrades get immediate access with prorated charge.
+    Downgrades take effect at end of current period (no proration).
+    Returns (success: bool, error_msg: str | None).
+    """
+    import requests
+    stripe_key = _get_config("STRIPE_SECRET_KEY")
+    if not stripe_key:
+        return False, "Stripe not configured"
+
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return False, "No tenant_id"
+    if not new_price_id:
+        return False, "No price_id provided"
+
+    sb = get_client()
+    try:
+        sub_resp = (
+            sb.table("subscriptions")
+            .select("stripe_subscription_id")
+            .eq("tenant_id", tid)
+            .execute()
+        )
+        stripe_sub_id = sub_resp.data[0].get("stripe_subscription_id") if sub_resp.data else None
+    except Exception as e:
+        return False, f"Could not read subscription: {e}"
+
+    if not stripe_sub_id:
+        return False, "No active subscription found"
+
+    # Fetch current subscription to get item ID and current price
+    sub_get = requests.get(
+        f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
+        auth=(stripe_key, ""),
+        timeout=10,
+    )
+    if sub_get.status_code != 200:
+        return False, f"Stripe error fetching subscription: {sub_get.text[:200]}"
+
+    sub_obj = sub_get.json()
+    items = (sub_obj.get("items") or {}).get("data") or []
+    if not items:
+        return False, "No subscription items found"
+
+    sub_item_id = items[0].get("id", "")
+    current_price_id = items[0].get("price", {}).get("id", "")
+
+    if current_price_id == new_price_id:
+        return False, "Already on this plan"
+
+    # Determine if this is an upgrade or downgrade for proration strategy
+    _plan_order = {"starter": 1, "pro": 2, "business": 3}
+    _starter = _get_config("STRIPE_PRICE_STARTER") or ""
+    _pro = _get_config("STRIPE_PRICE_PRO") or ""
+    _business = _get_config("STRIPE_PRICE_BUSINESS") or ""
+    _price_to_plan = {_starter: "starter", _pro: "pro", _business: "business"}
+    _cur_rank = _plan_order.get(_price_to_plan.get(current_price_id, ""), 1)
+    _new_rank = _plan_order.get(_price_to_plan.get(new_price_id, ""), 1)
+    is_upgrade = _new_rank > _cur_rank
+
+    modify_resp = requests.post(
+        f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
+        auth=(stripe_key, ""),
+        data={
+            "items[0][id]": sub_item_id,
+            "items[0][price]": new_price_id,
+            # Upgrades: prorate immediately so user pays the diff now.
+            # Downgrades: no proration, keep current price until period ends.
+            "proration_behavior": "create_prorations" if is_upgrade else "none",
+        },
+        timeout=15,
+    )
+    if modify_resp.status_code == 200:
+        return True, None
+    return False, f"Stripe modify failed ({modify_resp.status_code}): {modify_resp.text[:200]}"
 
 
 def create_billing_portal_url(
