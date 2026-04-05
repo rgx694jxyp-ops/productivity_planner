@@ -1117,17 +1117,17 @@ def get_subscription(tenant_id: str = "") -> Optional[dict]:
 
 
 def has_active_subscription(tenant_id: str = "") -> bool:
-    """Check if the current tenant has an active (or trialing/past_due) subscription."""
+    """Check if the current tenant has an active paid subscription."""
     sub = get_subscription(tenant_id)
     if not sub:
         return False
-    return sub.get("status") in ("active", "past_due", "trialing")
+    return sub.get("status") == "active"
 
 
 def get_employee_limit(tenant_id: str = "") -> int:
     """Return the employee limit for the current plan. 0 if no sub, -1 if unlimited."""
     sub = get_subscription(tenant_id)
-    if not sub or sub.get("status") not in ("active", "past_due", "trialing"):
+    if not sub or sub.get("status") != "active":
         return 0
     return sub.get("employee_limit", 0)
 
