@@ -60,6 +60,23 @@ def _decode_jsonish(raw_val):
     return {}
 
 
+def _build_emp_code_to_rowid_map() -> dict:
+    """Return {employee_code: db_row_id_as_str} using a fresh DB read."""
+    try:
+        from database import get_employees as _db_get_employees
+
+        _rows = _db_get_employees() or []
+        _out = {}
+        for _e in _rows:
+            _code = str(_e.get("emp_id", "") or "").strip()
+            _rid = _e.get("id")
+            if _code and _rid is not None:
+                _out[_code] = str(_rid)
+        return _out
+    except Exception:
+        return {}
+
+
 def _restore_uph_snapshot(tenant_id: str, touched_keys: list, previous_rows: list) -> tuple[int, int]:
     """Restore uph_history rows to a previous snapshot for a set of touched keys."""
     from database import get_client as _db_get_client, _tq as _db_tq
@@ -885,12 +902,7 @@ def _import_step3():
         _tenant_id = st.session_state.get("tenant_id", "")
         if _tenant_id and _candidate_preview_rows:
             from database import get_client as _db_get_client, _tq as _db_tq
-            _emp_rows = _cached_employees() or []
-            _emp_code_to_rowid = {
-                str(_e.get("emp_id", "")).strip(): str(_e.get("id"))
-                for _e in _emp_rows
-                if _e.get("id") is not None and str(_e.get("emp_id", "")).strip()
-            }
+            _emp_code_to_rowid = _build_emp_code_to_rowid_map()
 
             def _db_emp(_eid):
                 _s = str(_eid or "").strip()
@@ -1303,12 +1315,7 @@ def _import_step3():
                 _dates = sorted({r.get("work_date") for r in uph_batch if r.get("work_date")})
                 _date_min = _dates[0] if _dates else ""
                 _date_max = _dates[-1] if _dates else ""
-                _emp_rows = _cached_employees() or []
-                _emp_code_to_rowid = {
-                    str(_e.get("emp_id", "")).strip(): str(_e.get("id"))
-                    for _e in _emp_rows
-                    if _e.get("id") is not None and str(_e.get("emp_id", "")).strip()
-                }
+                _emp_code_to_rowid = _build_emp_code_to_rowid_map()
 
                 def _db_emp_key(_eid):
                     _s = str(_eid or "").strip()
@@ -1325,6 +1332,7 @@ def _import_step3():
                 }
                 _undo_touched_keys = [list(_k) for _k in sorted(_touched)]
                 _existing_keys = set()
+                _existing_rows_by_key3 = {}
                 if _tenant_id and _date_min and _date_max and _emp_ids:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
@@ -1342,15 +1350,15 @@ def _import_step3():
                             str(_er.get("work_date", "")),
                             str(_er.get("department", "") or ""),
                         )
-                        if _key3 in _touched:
-                            _undo_previous_rows.append({
+                        if _key3 in _touched and _key3 not in _existing_rows_by_key3:
+                            _existing_rows_by_key3[_key3] = {
                                 "emp_id": _er.get("emp_id"),
                                 "work_date": _er.get("work_date"),
                                 "uph": _er.get("uph"),
                                 "units": _er.get("units"),
                                 "hours_worked": _er.get("hours_worked"),
                                 "department": _er.get("department", ""),
-                            })
+                            }
                         _existing_keys.add((
                             str(_er.get("emp_id", "")),
                             str(_er.get("work_date", "")),
@@ -1361,11 +1369,15 @@ def _import_step3():
                         ))
 
                 _filtered_batch = []
+                _undo_prev_seen = set()
                 for _r in uph_batch:
+                    _key_emp = str(_db_emp_key(_r.get("emp_id", "")))
+                    _key_date = str(_r.get("work_date", ""))
+                    _key_dept = str(_r.get("department", "") or "")
                     _key = (
-                        str(_db_emp_key(_r.get("emp_id", ""))),
-                        str(_r.get("work_date", "")),
-                        str(_r.get("department", "") or ""),
+                        _key_emp,
+                        _key_date,
+                        _key_dept,
                         round(float(_r.get("uph") or 0), 4),
                         round(float(_r.get("units") or 0), 4),
                         round(float(_r.get("hours_worked") or 0), 4),
@@ -1373,6 +1385,10 @@ def _import_step3():
                     if _key in _existing_keys:
                         _dup_skipped += 1
                         continue
+                    _k3 = (_key_emp, _key_date, _key_dept)
+                    if _k3 in _existing_rows_by_key3 and _k3 not in _undo_prev_seen:
+                        _undo_previous_rows.append(_existing_rows_by_key3[_k3])
+                        _undo_prev_seen.add(_k3)
                     _filtered_batch.append(_r)
                 uph_batch = _filtered_batch
                 _exact_duplicate_import = (_candidate_count > 0 and _dup_skipped == _candidate_count)
