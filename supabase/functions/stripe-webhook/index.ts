@@ -6,8 +6,7 @@
 //   supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_xxx
 //   supabase secrets set STRIPE_SECRET_KEY=sk_xxx
 
-import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 
 const STRIPE_WEBHOOK_SECRET = Deno.env.get("STRIPE_WEBHOOK_SECRET")!;
 const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
@@ -103,7 +102,7 @@ async function getSubscriptionDetails(subscriptionId: string) {
   return resp.json();
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
   }
@@ -360,3 +359,4 @@ serve(async (req) => {
     headers: { "Content-Type": "application/json" },
   });
 });
+

@@ -37,6 +37,15 @@ if ! grep -q "SERVICE_ROLE_KEY" <<<"$SECRETS_OUT" && ! grep -q "SUPABASE_SERVICE
 fi
 
 echo "Deploying stripe-webhook with JWT verification disabled for Stripe callbacks..."
+# The Supabase CLI resolves its workdir by walking up from cwd to find supabase/config.toml.
+# We created supabase/config.toml in this project directory (zcreqyglrrvlbiduvbto).
+# If the CLI still resolves to the home-dir supabase project, sync the function file there too.
+SUPABASE_HOME_FUNC="${HOME}/supabase/functions/stripe-webhook"
+PROJECT_FUNC="supabase/functions/stripe-webhook"
+if [[ -d "$SUPABASE_HOME_FUNC" ]]; then
+  cp "${PROJECT_FUNC}/index.ts" "${SUPABASE_HOME_FUNC}/index.ts"
+  cp "${PROJECT_FUNC}/deno.json" "${SUPABASE_HOME_FUNC}/deno.json"
+fi
 supabase functions deploy stripe-webhook --no-verify-jwt
 
 echo "Success: stripe-webhook deployed with --no-verify-jwt"
