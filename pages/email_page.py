@@ -5,6 +5,7 @@ from app import (
     st,
 )
 from pages.employees import _build_archived_productivity
+from pages.productivity import _build_period_report
 
 def page_email():
     st.title("📧 Email Setup")
