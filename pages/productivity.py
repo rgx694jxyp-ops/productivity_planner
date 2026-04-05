@@ -540,14 +540,25 @@ def page_productivity():
 
         # Select rolling period
         roll_period = st.selectbox("Rolling Period", ["7-Day", "14-Day"], key="roll_period")
+        display_days = st.slider("Show most recent days", min_value=14, max_value=180, value=45, step=1, key="roll_display_days")
 
         # Chart
         try:
             col_name = "7DayRollingAvg" if roll_period == "7-Day" else "14DayRollingAvg"
-            df_r_clean = df_r.dropna(subset=[col_name])
+            df_r["Date"] = pd.to_datetime(df_r["Date"], errors="coerce")
+            df_r_clean = df_r.dropna(subset=["Date", col_name]).copy()
             if not df_r_clean.empty:
-                st.line_chart(df_r_clean.pivot(index="Date", columns="Employee", values=col_name),
+                max_date = df_r_clean["Date"].max()
+                cutoff = max_date - pd.Timedelta(days=int(display_days) - 1)
+                df_r_clean = df_r_clean[df_r_clean["Date"] >= cutoff]
+                df_r_clean = df_r_clean.sort_values(["Date", "Employee"])
+                df_r_plot = df_r_clean.copy()
+                df_r_plot["Date"] = df_r_plot["Date"].dt.strftime("%Y-%m-%d")
+                st.line_chart(df_r_plot.pivot(index="Date", columns="Employee", values=col_name),
                               use_container_width=True)
+            if not df_r_clean.empty:
+                df_r = df_r_clean.sort_values(["Date", "Employee"]).copy()
+                df_r["Date"] = df_r["Date"].dt.strftime("%Y-%m-%d")
         except Exception: pass
         st.dataframe(df_r, use_container_width=True, hide_index=True)
         _r_buf = io.BytesIO()

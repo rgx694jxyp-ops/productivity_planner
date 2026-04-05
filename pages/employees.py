@@ -737,6 +737,8 @@ def _build_archived_productivity(force: bool = False):
             offset += page_size
 
     # Calculate employee rolling averages
+    # One datapoint per employee per date keeps charts readable and avoids
+    # duplicate same-day rows from inflating rolling windows.
     employee_rolling_avg = []
     for eid, dates_uph in emp_daily.items():
         if not dates_uph:
@@ -744,10 +746,13 @@ def _build_archived_productivity(force: bool = False):
         df = pd.DataFrame(dates_uph, columns=['Date', 'UPH'])
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date'])
+        if df.empty:
+            continue
+        df = df.groupby('Date', as_index=False)['UPH'].mean()
         df = df.sort_values('Date')
         df = df.set_index('Date')
-        df['7DayRollingAvg'] = df['UPH'].rolling('7D', min_periods=1).mean()
-        df['14DayRollingAvg'] = df['UPH'].rolling('14D', min_periods=1).mean()
+        df['7DayRollingAvg'] = df['UPH'].rolling('7D', min_periods=7).mean()
+        df['14DayRollingAvg'] = df['UPH'].rolling('14D', min_periods=14).mean()
         df = df.reset_index()
         for _, row in df.iterrows():
             employee_rolling_avg.append({
