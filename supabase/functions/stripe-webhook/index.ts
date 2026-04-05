@@ -49,13 +49,22 @@ async function verifyStripeSignature(
   body: string,
   signature: string
 ): Promise<any> {
-  // Simple Stripe signature verification using Web Crypto API
+  // Stripe signature verification using Web Crypto API.
+  // Supports multiple v1 signatures and a safer timestamp tolerance.
   const encoder = new TextEncoder();
-  const parts = signature.split(",");
+  const parts = signature
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
   const timestamp = parts.find((p) => p.startsWith("t="))?.split("=")[1];
-  const sig = parts.find((p) => p.startsWith("v1="))?.split("=")[1];
+  const v1Sigs = parts
+    .filter((p) => p.startsWith("v1="))
+    .map((p) => p.split("=")[1])
+    .filter(Boolean) as string[];
 
-  if (!timestamp || !sig) throw new Error("Invalid signature format");
+  if (!timestamp || v1Sigs.length === 0) {
+    throw new Error("Invalid signature format");
+  }
 
   const payload = `${timestamp}.${body}`;
   const key = await crypto.subtle.importKey(
@@ -70,11 +79,16 @@ async function verifyStripeSignature(
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-  if (expectedHex !== sig) throw new Error("Signature mismatch");
+  const sigMatch = v1Sigs.some((candidate) => candidate === expectedHex);
+  if (!sigMatch) throw new Error("Signature mismatch");
 
-  // Check timestamp (reject events older than 5 minutes)
+  // Check timestamp tolerance. Keep strict, but allow mild clock skew.
+  // Stripe default tolerance is 5 minutes; 10 minutes is more resilient in
+  // edge environments with occasional clock/network drift.
   const now = Math.floor(Date.now() / 1000);
-  if (now - parseInt(timestamp) > 300) throw new Error("Timestamp too old");
+  const ts = parseInt(timestamp, 10);
+  if (!Number.isFinite(ts)) throw new Error("Invalid signature timestamp");
+  if (Math.abs(now - ts) > 600) throw new Error("Timestamp outside tolerance");
 
   return JSON.parse(body);
 }
