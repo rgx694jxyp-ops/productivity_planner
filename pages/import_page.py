@@ -427,6 +427,72 @@ def _import_step2():
 
 def _import_step3():
     """Step 3 — run the pipeline. Registers employees, calculates UPH, stores history."""
+    def _undo_last_import() -> bool:
+        _undo = st.session_state.get("_last_import_undo") or {}
+        if not _undo:
+            st.warning("No import snapshot available to undo.")
+            return False
+
+        try:
+            from database import get_client as _db_get_client, _tq as _db_tq
+
+            _sb = _db_get_client()
+            _tenant_id = str(_undo.get("tenant_id", "") or "")
+            _prev_rows = _undo.get("previous_rows", []) or []
+            _touched_keys = _undo.get("touched_keys", []) or []
+
+            _prev_map = {}
+            for _r in _prev_rows:
+                _k = (
+                    str(_r.get("emp_id", "") or ""),
+                    str(_r.get("work_date", "") or ""),
+                    str(_r.get("department", "") or ""),
+                )
+                _prev_map[_k] = {
+                    "emp_id": _r.get("emp_id"),
+                    "work_date": _r.get("work_date"),
+                    "uph": float(_r.get("uph") or 0),
+                    "units": float(_r.get("units") or 0),
+                    "hours_worked": float(_r.get("hours_worked") or 0),
+                    "department": _r.get("department", ""),
+                    "tenant_id": _tenant_id,
+                }
+
+            if _prev_map:
+                _sb.table("uph_history").upsert(
+                    list(_prev_map.values()),
+                    on_conflict="tenant_id,emp_id,work_date,department",
+                ).execute()
+
+            _delete_keys = []
+            for _k in _touched_keys:
+                if isinstance(_k, (list, tuple)) and len(_k) == 3:
+                    _tk = (str(_k[0]), str(_k[1]), str(_k[2]))
+                    if _tk not in _prev_map:
+                        _delete_keys.append(_tk)
+
+            for _emp_id, _work_date, _dept in _delete_keys:
+                _q = _db_tq(
+                    _sb.table("uph_history")
+                    .delete()
+                    .eq("emp_id", _emp_id)
+                    .eq("work_date", _work_date)
+                    .eq("department", _dept)
+                )
+                if _tenant_id:
+                    _q = _q.eq("tenant_id", _tenant_id)
+                _q.execute()
+
+            _bust_cache()
+            _build_archived_productivity(force=True)
+            st.session_state.pop("_last_import_undo", None)
+            st.success("Last import was rolled back. UPH history and productivity views were restored.")
+            return True
+        except Exception as _undo_err:
+            st.error(f"Undo failed: {_undo_err}")
+            _log_app_error("pipeline", f"Undo import failed: {_undo_err}", detail=traceback.format_exc(), severity="error")
+            return False
+
     # ── Post-import confidence summary (shown once after pipeline completes) ──
     if st.session_state.get("_import_complete_summary"):
         _sm = st.session_state["_import_complete_summary"]
@@ -462,6 +528,11 @@ def _import_step3():
             st.session_state.import_step = 1
             st.session_state.uploaded_sessions = []
             st.rerun()
+        if st.session_state.get("_last_import_undo"):
+            if st.button("↩ Undo last import", type="secondary", use_container_width=True, key="ic_undo_last_import"):
+                if _undo_last_import():
+                    st.session_state.pop("_import_complete_summary", None)
+                    st.rerun()
         return
 
     sessions = st.session_state.uploaded_sessions
@@ -520,7 +591,56 @@ def _import_step3():
         st.caption("Your CSV has no Date column mapped — all rows will be recorded under this date.")
         work_date = st.date_input("Work date", value=date.today(), label_visibility="collapsed")
 
-    if st.button("▶  Run pipeline now", type="primary", use_container_width=True):
+    # Preview sample rows with selected mapping before writing to DB.
+    _preview_rows = []
+    _preview_emp_ids = set()
+    _preview_dates = set()
+    for _s in sessions:
+        _m = _s.get("mapping", {})
+        _id_col = _m.get("EmployeeID", "")
+        _name_col = _m.get("EmployeeName", "")
+        _dept_col = _m.get("Department", "")
+        _date_col = _m.get("Date", "")
+        _u_col = _m.get("Units", "")
+        _h_col = _m.get("HoursWorked", "")
+        _uph_col = _m.get("UPH", "")
+        for _r in (_s.get("rows") or []):
+            _eid = str(_r.get(_id_col, "") if _id_col else "").strip()
+            _enm = str(_r.get(_name_col, "") if _name_col else "").strip()
+            _dep = str(_r.get(_dept_col, "") if _dept_col else "").strip()
+            _d = str(_r.get(_date_col, "") if _date_col else "").strip()
+            if _eid:
+                _preview_emp_ids.add(_eid)
+            if _d:
+                _preview_dates.add(_d[:10])
+            if len(_preview_rows) < 25:
+                _preview_rows.append({
+                    "Date": _d[:10] if _d else work_date.isoformat(),
+                    "Employee ID": _eid,
+                    "Employee Name": _enm,
+                    "Department": _dep,
+                    "Units": str(_r.get(_u_col, "") if _u_col else "").strip(),
+                    "Hours": str(_r.get(_h_col, "") if _h_col else "").strip(),
+                    "UPH": str(_r.get(_uph_col, "") if _uph_col else "").strip(),
+                })
+
+    with st.expander("👀 Preview parsed data before import", expanded=True):
+        _preview_days = len(_preview_dates) if _preview_dates else 1
+        st.caption(
+            f"Sample preview of parsed rows. About {_preview_days} day(s) and "
+            f"{len(_preview_emp_ids)} unique employee ID(s) detected."
+        )
+        if _preview_rows:
+            st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No preview rows available from mapped data.")
+
+    _confirm_preview = st.checkbox(
+        "I reviewed the preview and want to write this data to history",
+        key="confirm_import_preview",
+    )
+
+    if st.button("▶  Run pipeline now", type="primary", use_container_width=True, disabled=not _confirm_preview):
         all_rows    = []
         all_mapping = {}
         for s in sessions:
@@ -810,25 +930,61 @@ def _import_step3():
                 })
             # Avoid inserting exact duplicates when users import the same file again.
             _dup_skipped = 0
+            _undo_previous_rows = []
+            _undo_touched_keys = []
             try:
                 _tenant_id = st.session_state.get("tenant_id", "")
                 _dates = sorted({r.get("work_date") for r in uph_batch if r.get("work_date")})
                 _date_min = _dates[0] if _dates else ""
                 _date_max = _dates[-1] if _dates else ""
-                _emp_ids = sorted({r.get("emp_id") for r in uph_batch if r.get("emp_id")})
+                _emp_rows = _cached_employees() or []
+                _emp_code_to_rowid = {
+                    str(_e.get("emp_id", "")).strip(): str(_e.get("id"))
+                    for _e in _emp_rows
+                    if _e.get("id") is not None and str(_e.get("emp_id", "")).strip()
+                }
+
+                def _db_emp_key(_eid):
+                    _s = str(_eid or "").strip()
+                    return _emp_code_to_rowid.get(_s, _s)
+
+                _emp_ids = sorted({_db_emp_key(r.get("emp_id")) for r in uph_batch if r.get("emp_id")})
+                _touched = {
+                    (
+                        _db_emp_key(_r.get("emp_id")),
+                        str(_r.get("work_date", "")),
+                        str(_r.get("department", "") or ""),
+                    )
+                    for _r in uph_batch
+                }
+                _undo_touched_keys = [list(_k) for _k in sorted(_touched)]
                 _existing_keys = set()
                 if _tenant_id and _date_min and _date_max and _emp_ids:
-                    _sb = _get_db_client()
-                    _res = (
+                    from database import get_client as _db_get_client, _tq as _db_tq
+                    _sb = _db_get_client()
+                    _res = _db_tq(
                         _sb.table("uph_history")
-                        .select("emp_id, work_date, uph, units, hours_worked")
+                        .select("emp_id, work_date, uph, units, hours_worked, department")
                         .eq("tenant_id", _tenant_id)
                         .gte("work_date", _date_min)
                         .lte("work_date", _date_max)
                         .in_("emp_id", _emp_ids)
-                        .execute()
-                    )
+                    ).execute()
                     for _er in (_res.data or []):
+                        _key3 = (
+                            str(_er.get("emp_id", "")),
+                            str(_er.get("work_date", "")),
+                            str(_er.get("department", "") or ""),
+                        )
+                        if _key3 in _touched:
+                            _undo_previous_rows.append({
+                                "emp_id": _er.get("emp_id"),
+                                "work_date": _er.get("work_date"),
+                                "uph": _er.get("uph"),
+                                "units": _er.get("units"),
+                                "hours_worked": _er.get("hours_worked"),
+                                "department": _er.get("department", ""),
+                            })
                         _existing_keys.add((
                             str(_er.get("emp_id", "")),
                             str(_er.get("work_date", "")),
@@ -840,7 +996,7 @@ def _import_step3():
                 _filtered_batch = []
                 for _r in uph_batch:
                     _key = (
-                        str(_r.get("emp_id", "")),
+                        str(_db_emp_key(_r.get("emp_id", ""))),
                         str(_r.get("work_date", "")),
                         round(float(_r.get("uph") or 0), 4),
                         round(float(_r.get("units") or 0), 4),
@@ -861,6 +1017,14 @@ def _import_step3():
                     uph_batch = [{**r, "tenant_id": _bg_tid} for r in uph_batch]
                 from database import batch_store_uph_history as _batch_store_uph_history
                 _batch_store_uph_history(uph_batch)
+                if _bg_tid and _undo_touched_keys:
+                    st.session_state["_last_import_undo"] = {
+                        "tenant_id": _bg_tid,
+                        "touched_keys": _undo_touched_keys,
+                        "previous_rows": _undo_previous_rows,
+                        "row_count": len(uph_batch),
+                        "created_at": time.time(),
+                    }
                 if _dup_skipped:
                     st.info(f"Skipped {_dup_skipped} duplicate UPH row(s) already in history.")
             except Exception as _uph_err:
