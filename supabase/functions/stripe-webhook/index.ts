@@ -44,6 +44,25 @@ function resolvePlan(sub: any): string {
   return "starter";
 }
 
+function resolvePendingPlan(sub: any): string {
+  const pendingItem = sub.pending_update?.subscription_items?.[0];
+  const pendingPrice = pendingItem?.price;
+  const pendingPriceMetaPlan =
+    typeof pendingPrice === "object"
+      ? pendingPrice?.metadata?.plan?.toLowerCase?.()
+      : "";
+  if (pendingPriceMetaPlan && PLAN_LIMITS[pendingPriceMetaPlan] !== undefined) {
+    return pendingPriceMetaPlan;
+  }
+
+  const pendingPriceId =
+    typeof pendingPrice === "string" ? pendingPrice : pendingPrice?.id;
+  if (pendingPriceId && PRICE_PLAN_MAP[pendingPriceId]) {
+    return PRICE_PLAN_MAP[pendingPriceId];
+  }
+  return "";
+}
+
 async function verifyStripeSignature(
   body: string,
   signature: string
@@ -206,6 +225,8 @@ Deno.serve(async (req) => {
           current_period_start: getPeriodStart(sub),
           current_period_end: getPeriodEnd(sub),
           cancel_at_period_end: sub.cancel_at_period_end || false,
+          pending_plan: null,
+          pending_change_at: null,
           updated_at: new Date().toISOString(),
         };
 
@@ -266,17 +287,58 @@ Deno.serve(async (req) => {
         // If Stripe has a pending update (common for end-of-period downgrades),
         // keep current access until the cycle actually flips.
         const hasPendingUpdate = !!sub.pending_update;
+        const pendingPlanFromStripe = resolvePendingPlan(sub);
+        let pendingPlan: string | null = hasPendingUpdate ? (pendingPlanFromStripe || null) : null;
+        let pendingChangeAt: string | null = hasPendingUpdate ? new Date().toISOString() : null;
+
+        const nextPeriodStart = getPeriodStart(sub);
         if (hasPendingUpdate) {
           const { data: curRows } = await supabase
             .from("subscriptions")
-            .select("plan, employee_limit")
+            .select("plan, employee_limit, pending_plan, pending_change_at, current_period_start")
             .eq("tenant_id", tenantId)
             .limit(1);
           if (curRows?.length) {
             const currentPlan = curRows[0].plan;
             const currentLimit = curRows[0].employee_limit;
+            const currentPendingPlan = curRows[0].pending_plan;
+            const currentPendingChangeAt = curRows[0].pending_change_at;
             if (currentPlan) plan = currentPlan;
             if (typeof currentLimit === "number") limit = currentLimit;
+            if (!pendingPlan && currentPendingPlan) pendingPlan = currentPendingPlan;
+            if (!pendingChangeAt && currentPendingChangeAt) pendingChangeAt = currentPendingChangeAt;
+          }
+        } else {
+          // App can intentionally defer downgrade access until renewal while Stripe already
+          // has the lower price configured. Preserve current DB plan until period rollover.
+          const { data: curRows } = await supabase
+            .from("subscriptions")
+            .select("plan, employee_limit, pending_plan, pending_change_at, current_period_start")
+            .eq("tenant_id", tenantId)
+            .limit(1);
+          if (curRows?.length) {
+            const currentPlan = curRows[0].plan;
+            const currentLimit = curRows[0].employee_limit;
+            const currentPendingPlan = curRows[0].pending_plan;
+            const currentPendingChangeAt = curRows[0].pending_change_at;
+            const currentPeriodStart = curRows[0].current_period_start;
+
+            let hasRolledPeriod = false;
+            if (currentPeriodStart && nextPeriodStart) {
+              const prevTs = Date.parse(currentPeriodStart);
+              const nextTs = Date.parse(nextPeriodStart);
+              hasRolledPeriod = Number.isFinite(prevTs) && Number.isFinite(nextTs) && nextTs > prevTs;
+            }
+
+            if (currentPendingPlan && !hasRolledPeriod) {
+              if (currentPlan) plan = currentPlan;
+              if (typeof currentLimit === "number") limit = currentLimit;
+              pendingPlan = currentPendingPlan;
+              pendingChangeAt = currentPendingChangeAt || new Date().toISOString();
+            } else {
+              pendingPlan = null;
+              pendingChangeAt = null;
+            }
           }
         }
 
@@ -290,6 +352,8 @@ Deno.serve(async (req) => {
           current_period_start: getPeriodStart(sub),
           current_period_end: getPeriodEnd(sub),
           cancel_at_period_end: sub.cancel_at_period_end || false,
+          pending_plan: pendingPlan,
+          pending_change_at: pendingChangeAt,
           updated_at: new Date().toISOString(),
         };
 
@@ -301,7 +365,7 @@ Deno.serve(async (req) => {
         }
 
         await logSubscriptionEvent(supabase, tenantId, event.type, event.data.object);
-        console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${plan}, pending=${hasPendingUpdate}`);
+        console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${plan}, pending=${pendingPlan || "none"}`);
         break;
       }
 
@@ -320,6 +384,8 @@ Deno.serve(async (req) => {
             .from("subscriptions")
             .update({
               status: "canceled",
+              pending_plan: null,
+              pending_change_at: null,
               updated_at: new Date().toISOString(),
             })
             .eq("tenant_id", tenants[0].id);
@@ -382,6 +448,8 @@ Deno.serve(async (req) => {
               current_period_start: getPeriodStart(renewedSub),
               current_period_end: getPeriodEnd(renewedSub),
               cancel_at_period_end: renewedSub.cancel_at_period_end || false,
+              pending_plan: null,
+              pending_change_at: null,
               updated_at: new Date().toISOString(),
             })
             .eq("tenant_id", tenants[0].id);

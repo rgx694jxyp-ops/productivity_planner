@@ -137,7 +137,15 @@ def page_settings():
                 # ── Plan comparison ───────────────────────────────────
                 st.markdown("---")
                 st.markdown("##### Change Plan")
-                st.caption("Upgrade options are shown below. Downgrades/cancel are handled in Billing Portal.")
+                st.caption("Upgrade or downgrade your plan. Upgrades apply immediately; downgrades apply at the end of your billing period.")
+
+                _pending_plan = (sub.get("pending_plan") or "").strip().lower()
+                if _pending_plan:
+                    _pending_date = _renew_str or "period end"
+                    st.warning(
+                        f"A pending downgrade to {_pending_plan.capitalize()} is already scheduled for {_pending_date}. "
+                        "You keep current access until then, and additional changes are temporarily locked."
+                    )
 
                 _PORD  = ["starter", "pro", "business"]
                 _PINFO = {
@@ -176,29 +184,33 @@ def page_settings():
 
                 _rank = {"starter": 1, "pro": 2, "business": 3}
                 _cur_rank = _rank.get(_plan_raw, 1)
-                _alternatives = [p for p in _PORD if _rank.get(p, 1) > _cur_rank]
+                _alternatives = [p for p in _PORD if p != _plan_raw]
                 if not _alternatives:
-                    st.info("You are already on the highest tier. Use Billing Portal for billing, invoices, or cancellation.")
+                    st.info("No plan alternatives are available right now.")
                 _pcols = st.columns(len(_alternatives)) if _alternatives else []
                 for _ci, _pk in enumerate(_alternatives):
                     _pi    = _PINFO[_pk]
                     with _pcols[_ci]:
-                        _is_up = True
-                        _badge_html = "<div style='color:#16a34a;font-size:11px;font-weight:700;text-transform:uppercase;'>↑ Upgrade</div>"
+                        _is_up = _rank.get(_pk, 1) > _cur_rank
+                        _badge_html = (
+                            "<div style='color:#16a34a;font-size:11px;font-weight:700;text-transform:uppercase;'>↑ Upgrade (Immediate)</div>"
+                            if _is_up
+                            else "<div style='color:#b45309;font-size:11px;font-weight:700;text-transform:uppercase;'>↓ Downgrade (End of Period)</div>"
+                        )
                         st.markdown(_badge_html, unsafe_allow_html=True)
                         st.markdown(f"**{_pi['label']}** &nbsp; {_pi['price']}")
                         st.caption(_pi['emp'] + " employees")
 
                         _delta = _GAINS.get((_plan_raw, _pk), [])
                         if _delta:
-                            _label = "You'd gain:"
-                            _clr = "#16a34a"
+                            _label = "You'd gain:" if _is_up else "You'd lose at period end:"
+                            _clr = "#16a34a" if _is_up else "#b45309"
                             st.markdown(
                                 f"<div style='font-size:12px;font-weight:600;margin-top:4px;'>{_label}</div>",
                                 unsafe_allow_html=True,
                             )
                             for _x in _delta:
-                                _prefix = "+"
+                                _prefix = "+" if _is_up else "-"
                                 st.markdown(
                                     f"<div style='font-size:12px;color:{_clr};line-height:1.8;'>{_prefix} {_x}</div>",
                                     unsafe_allow_html=True,
@@ -206,15 +218,31 @@ def page_settings():
 
                         st.markdown("")
                         _target_price = _price_map.get(_pk, "")
-                        _btn_label = f"Upgrade to {_pi['label']}"
-                        if st.button(_btn_label, key=f"switch_plan_{_pk}", use_container_width=True, type="primary"):
+                        _btn_label = (
+                            f"Upgrade to {_pi['label']}"
+                            if _is_up
+                            else f"Schedule downgrade to {_pi['label']}"
+                        )
+                        _btn_disabled = bool(_pending_plan)
+                        _btn_type = "primary" if _is_up else "secondary"
+                        if st.button(
+                            _btn_label,
+                            key=f"switch_plan_{_pk}",
+                            use_container_width=True,
+                            type=_btn_type,
+                            disabled=_btn_disabled,
+                        ):
                             if not _target_price:
                                 st.error(f"Price for {_pi['label']} is not configured.")
                             else:
                                 with st.spinner("Requesting plan change in Stripe…"):
                                     _ok, _msg = modify_subscription(_target_price, _tid_local)
                                 if _ok:
-                                    st.success("Plan change submitted. Status will refresh shortly.")
+                                    if _is_up:
+                                        st.success("Upgrade submitted. Access and billing should refresh shortly.")
+                                    else:
+                                        _when = _renew_str or "the end of your current period"
+                                        st.success(f"Downgrade scheduled. Your plan will switch on {_when}.")
                                     st.session_state.pop("_sub_check_result", None)
                                     st.session_state.pop("_sub_check_ts", None)
                                     st.session_state.pop("_current_plan", None)

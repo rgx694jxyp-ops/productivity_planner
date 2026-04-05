@@ -1459,15 +1459,21 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
 
 
 def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
-    """Upgrade an active subscription via Stripe API.
+    """Change an active subscription via Stripe API.
 
-    Upgrades get immediate access with prorated charge.
-    Downgrades are intentionally blocked in-app to avoid rapid plan flipping;
-    users should handle downgrades/cancel via Stripe Billing Portal.
+    Upgrade behavior:
+        - Immediate plan change
+        - Prorated charge applied immediately
+
+    Downgrade behavior:
+        - Stripe subscription is updated with no proration
+        - Access remains on current plan until period end
+        - Pending downgrade is stored in DB (pending_plan/pending_change_at)
+
+    A tenant cannot submit another plan change while a pending downgrade exists.
     Returns (success: bool, error_msg: str | None).
     """
     import requests
-    import time as _time
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     if not stripe_key:
         return False, "Stripe not configured"
@@ -1482,16 +1488,20 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
     try:
         sub_resp = (
             sb.table("subscriptions")
-            .select("stripe_subscription_id")
+            .select("stripe_subscription_id, plan, pending_plan, pending_change_at")
             .eq("tenant_id", tid)
             .execute()
         )
-        stripe_sub_id = sub_resp.data[0].get("stripe_subscription_id") if sub_resp.data else None
+        sub_row = (sub_resp.data or [{}])[0]
+        stripe_sub_id = sub_row.get("stripe_subscription_id")
     except Exception as e:
         return False, f"Could not read subscription: {e}"
 
     if not stripe_sub_id:
         return False, "No active subscription found"
+
+    if (sub_row.get("pending_plan") or "").strip():
+        return False, "A plan change is already pending for period end. Wait until it takes effect before changing again."
 
     # Fetch current subscription to get item ID and current price
     sub_get = requests.get(
@@ -1513,48 +1523,64 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
     if current_price_id == new_price_id:
         return False, "Already on this plan"
 
-    # Determine if this is an upgrade or downgrade for proration strategy
+    # Determine direction to control billing behavior
     _plan_order = {"starter": 1, "pro": 2, "business": 3}
     _starter = _get_config("STRIPE_PRICE_STARTER") or ""
     _pro = _get_config("STRIPE_PRICE_PRO") or ""
     _business = _get_config("STRIPE_PRICE_BUSINESS") or ""
     _price_to_plan = {_starter: "starter", _pro: "pro", _business: "business"}
-    _cur_rank = _plan_order.get(_price_to_plan.get(current_price_id, ""), 1)
-    _new_rank = _plan_order.get(_price_to_plan.get(new_price_id, ""), 1)
+    _current_plan = (_price_to_plan.get(current_price_id, "") or sub_row.get("plan") or "starter").lower()
+    _target_plan = (_price_to_plan.get(new_price_id, "") or "").lower()
+    if not _target_plan:
+        return False, "Target plan is not configured in Stripe price mapping"
+
+    _cur_rank = _plan_order.get(_current_plan, 1)
+    _new_rank = _plan_order.get(_target_plan, 1)
     is_upgrade = _new_rank > _cur_rank
 
-    if not is_upgrade:
-        return False, (
-            "In-app plan changes only allow upgrades. "
-            "Use Billing Portal for downgrades/cancel so changes apply safely."
-        )
-
-    # Cooldown guard to prevent rapid repeated plan switches.
-    _last_change_raw = str((sub_obj.get("metadata") or {}).get("last_plan_change_at") or "").strip()
-    _last_change = 0
-    try:
-        _last_change = int(_last_change_raw)
-    except (TypeError, ValueError):
-        _last_change = 0
-    _cooldown_secs = 3600  # 1 hour
-    if _last_change and (_time.time() - _last_change) < _cooldown_secs:
-        _mins_left = int((_cooldown_secs - (_time.time() - _last_change)) // 60) + 1
-        return False, f"Please wait about {_mins_left} minute(s) before changing plan again."
+    _request_data = {
+        "items[0][id]": sub_item_id,
+        "items[0][price]": new_price_id,
+    }
+    if is_upgrade:
+        # Immediate prorated charge for upgrades.
+        _request_data["proration_behavior"] = "create_prorations"
+    else:
+        # Downgrade billing changes now, but app access is deferred via pending_plan.
+        _request_data["proration_behavior"] = "none"
+        _request_data["billing_cycle_anchor"] = "unchanged"
+        _request_data["metadata[pending_plan]"] = _target_plan
 
     modify_resp = requests.post(
         f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
         auth=(stripe_key, ""),
-        data={
-            "items[0][id]": sub_item_id,
-            "items[0][price]": new_price_id,
-            # Stripe calculates and charges prorated difference immediately.
-            "proration_behavior": "create_prorations",
-            "metadata[last_plan_change_at]": str(int(_time.time())),
-        },
+        data=_request_data,
         timeout=15,
     )
+
     if modify_resp.status_code == 200:
+        try:
+            if is_upgrade:
+                sb.table("subscriptions").update(
+                    {
+                        "pending_plan": None,
+                        "pending_change_at": None,
+                        "updated_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                ).eq("tenant_id", tid).execute()
+            else:
+                sb.table("subscriptions").update(
+                    {
+                        "pending_plan": _target_plan,
+                        "pending_change_at": datetime.utcnow().isoformat() + "Z",
+                        "updated_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                ).eq("tenant_id", tid).execute()
+        except Exception:
+            # Non-fatal: webhook reconciliation is the source of truth.
+            pass
         return True, None
+
     return False, f"Stripe modify failed ({modify_resp.status_code}): {modify_resp.text[:200]}"
 
 
@@ -1704,7 +1730,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
     try:
         resp = (
             sb.table("subscriptions")
-            .select("stripe_customer_id, stripe_subscription_id, plan, status, employee_limit, current_period_end")
+            .select("stripe_customer_id, stripe_subscription_id, plan, status, employee_limit, current_period_end, pending_plan, pending_change_at")
             .eq("tenant_id", tid)
             .limit(1)
             .execute()
@@ -1784,6 +1810,8 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
         "db_status": row.get("status") or "",
         "db_employee_limit": row.get("employee_limit"),
         "db_current_period_end": row.get("current_period_end") or "",
+        "db_pending_plan": row.get("pending_plan") or "",
+        "db_pending_change_at": row.get("pending_change_at") or "",
         "has_pending_update": bool(pending_update),
         "pending_plan": pending_plan,
         "pending_price_id": pending_price_id,
