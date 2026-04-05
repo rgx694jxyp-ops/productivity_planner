@@ -137,7 +137,7 @@ def page_settings():
                 # ── Plan comparison ───────────────────────────────────
                 st.markdown("---")
                 st.markdown("##### Change Plan")
-                st.caption("Pick a different tier below. Your current tier is hidden.")
+                st.caption("Upgrade options are shown below. Downgrades/cancel are handled in Billing Portal.")
 
                 _PORD  = ["starter", "pro", "business"]
                 _PINFO = {
@@ -174,33 +174,31 @@ def page_settings():
                                               "Custom date ranges", "Coaching notes per employee"],
                 }
 
-                _alternatives = [p for p in _PORD if p != _plan_raw]
+                _rank = {"starter": 1, "pro": 2, "business": 3}
+                _cur_rank = _rank.get(_plan_raw, 1)
+                _alternatives = [p for p in _PORD if _rank.get(p, 1) > _cur_rank]
+                if not _alternatives:
+                    st.info("You are already on the highest tier. Use Billing Portal for billing, invoices, or cancellation.")
                 _pcols = st.columns(len(_alternatives)) if _alternatives else []
                 for _ci, _pk in enumerate(_alternatives):
                     _pi    = _PINFO[_pk]
                     with _pcols[_ci]:
-                        _cur_rank = {"starter": 1, "pro": 2, "business": 3}.get(_plan_raw, 1)
-                        _new_rank = {"starter": 1, "pro": 2, "business": 3}.get(_pk, 1)
-                        _is_up = _new_rank > _cur_rank
-                        _badge_html = (
-                            "<div style='color:#16a34a;font-size:11px;font-weight:700;text-transform:uppercase;'>↑ Upgrade</div>"
-                            if _is_up else
-                            "<div style='color:#dc2626;font-size:11px;font-weight:700;text-transform:uppercase;'>↓ Downgrade</div>"
-                        )
+                        _is_up = True
+                        _badge_html = "<div style='color:#16a34a;font-size:11px;font-weight:700;text-transform:uppercase;'>↑ Upgrade</div>"
                         st.markdown(_badge_html, unsafe_allow_html=True)
                         st.markdown(f"**{_pi['label']}** &nbsp; {_pi['price']}")
                         st.caption(_pi['emp'] + " employees")
 
                         _delta = _GAINS.get((_plan_raw, _pk), [])
                         if _delta:
-                            _label = "You'd gain:" if _is_up else "Change impact:"
-                            _clr = "#16a34a" if _is_up else "#dc2626"
+                            _label = "You'd gain:"
+                            _clr = "#16a34a"
                             st.markdown(
                                 f"<div style='font-size:12px;font-weight:600;margin-top:4px;'>{_label}</div>",
                                 unsafe_allow_html=True,
                             )
                             for _x in _delta:
-                                _prefix = "+" if _is_up else "•"
+                                _prefix = "+"
                                 st.markdown(
                                     f"<div style='font-size:12px;color:{_clr};line-height:1.8;'>{_prefix} {_x}</div>",
                                     unsafe_allow_html=True,
@@ -208,8 +206,8 @@ def page_settings():
 
                         st.markdown("")
                         _target_price = _price_map.get(_pk, "")
-                        _btn_label = f"Switch to {_pi['label']}"
-                        if st.button(_btn_label, key=f"switch_plan_{_pk}", use_container_width=True, type="primary" if _is_up else "secondary"):
+                        _btn_label = f"Upgrade to {_pi['label']}"
+                        if st.button(_btn_label, key=f"switch_plan_{_pk}", use_container_width=True, type="primary"):
                             if not _target_price:
                                 st.error(f"Price for {_pi['label']} is not configured.")
                             else:

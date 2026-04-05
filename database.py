@@ -1459,13 +1459,15 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
 
 
 def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
-    """Upgrade or downgrade an active subscription via Stripe API.
+    """Upgrade an active subscription via Stripe API.
 
     Upgrades get immediate access with prorated charge.
-    Downgrades take effect at end of current period (no proration).
+    Downgrades are intentionally blocked in-app to avoid rapid plan flipping;
+    users should handle downgrades/cancel via Stripe Billing Portal.
     Returns (success: bool, error_msg: str | None).
     """
     import requests
+    import time as _time
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     if not stripe_key:
         return False, "Stripe not configured"
@@ -1521,15 +1523,33 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
     _new_rank = _plan_order.get(_price_to_plan.get(new_price_id, ""), 1)
     is_upgrade = _new_rank > _cur_rank
 
+    if not is_upgrade:
+        return False, (
+            "In-app plan changes only allow upgrades. "
+            "Use Billing Portal for downgrades/cancel so changes apply safely."
+        )
+
+    # Cooldown guard to prevent rapid repeated plan switches.
+    _last_change_raw = str((sub_obj.get("metadata") or {}).get("last_plan_change_at") or "").strip()
+    _last_change = 0
+    try:
+        _last_change = int(_last_change_raw)
+    except (TypeError, ValueError):
+        _last_change = 0
+    _cooldown_secs = 3600  # 1 hour
+    if _last_change and (_time.time() - _last_change) < _cooldown_secs:
+        _mins_left = int((_cooldown_secs - (_time.time() - _last_change)) // 60) + 1
+        return False, f"Please wait about {_mins_left} minute(s) before changing plan again."
+
     modify_resp = requests.post(
         f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
         auth=(stripe_key, ""),
         data={
             "items[0][id]": sub_item_id,
             "items[0][price]": new_price_id,
-            # Upgrades: prorate immediately so user pays the diff now.
-            # Downgrades: no proration, keep current price until period ends.
-            "proration_behavior": "create_prorations" if is_upgrade else "none",
+            # Stripe calculates and charges prorated difference immediately.
+            "proration_behavior": "create_prorations",
+            "metadata[last_plan_change_at]": str(int(_time.time())),
         },
         timeout=15,
     )
