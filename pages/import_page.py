@@ -436,17 +436,17 @@ def _import_step3():
         _ic_risks = _sm.get("risks", 0)
         _ic_rank  = _sm.get("ranked", 0)
         _ic_below_line = (
-            f'<div class="dpd-import-row"><span class="dpd-import-warn">⚠</span>&nbsp;'
+            f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-warn" style="color:#8a5a00;">⚠</span>&nbsp;'
             f'<strong>{_ic_below}</strong> employees below goal &nbsp;·&nbsp; {_ic_risks} high-priority risks</div>'
             if _ic_below > 0 else
-            f'<div class="dpd-import-row"><span class="dpd-import-ok">✔</span>&nbsp;All employees on target</div>'
+            f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-ok" style="color:#1f6f2a;">✔</span>&nbsp;All employees on target</div>'
         )
         st.markdown(
-            f'<div class="dpd-import-done">'
-            f'<div class="dpd-import-done-title">✔ Import complete — you\'re ready</div>'
-            f'<div class="dpd-import-row"><span class="dpd-import-ok">✔</span>&nbsp;'
+            f'<div class="dpd-import-done" style="background:#ffffff;border:1px solid #d9e2ef;border-radius:10px;padding:14px 16px;">'
+            f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">✔ Import complete — you\'re ready</div>'
+            f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-ok" style="color:#1f6f2a;">✔</span>&nbsp;'
             f'<strong>{_ic_emp}</strong> employees loaded &nbsp;·&nbsp; {_ic_rank} ranked</div>'
-            f'<div class="dpd-import-row"><span class="dpd-import-ok">✔</span>&nbsp;'
+            f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-ok" style="color:#1f6f2a;">✔</span>&nbsp;'
             f'<strong>{_ic_days}</strong> {"day" if _ic_days == 1 else "days"} of data</div>'
             f'{_ic_below_line}'
             f'</div>',
@@ -580,7 +580,8 @@ def _import_step3():
             except Exception:
                 pass  # don't block import if limit check fails
             try:
-                batch_upsert_employees(list(seen_emps.values()))
+                from database import batch_upsert_employees as _batch_upsert_employees
+                _batch_upsert_employees(list(seen_emps.values()))
             except Exception as _e:
                 st.warning(f"Employee sync warning: {_e} — allocation will continue.")
                 _log_app_error("pipeline", f"Employee sync error: {_e}", detail=traceback.format_exc(), severity="warning")
@@ -858,7 +859,8 @@ def _import_step3():
                 _bg_tid = st.session_state.get("tenant_id", "")
                 if _bg_tid:
                     uph_batch = [{**r, "tenant_id": _bg_tid} for r in uph_batch]
-                batch_store_uph_history(uph_batch)
+                from database import batch_store_uph_history as _batch_store_uph_history
+                _batch_store_uph_history(uph_batch)
                 if _dup_skipped:
                     st.info(f"Skipped {_dup_skipped} duplicate UPH row(s) already in history.")
             except Exception as _uph_err:
