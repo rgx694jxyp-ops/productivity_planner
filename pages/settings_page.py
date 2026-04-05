@@ -77,6 +77,10 @@ def page_settings():
                 _app_url    = st.context.headers.get("Origin", "http://localhost:8501")
                 _return_url = _app_url + "/?portal=return"
                 _portal_url = create_billing_portal_url(return_url=_return_url)
+                _manage_plan_url = create_billing_portal_url(
+                    return_url=_return_url,
+                    flow="subscription_update",
+                ) or _portal_url
 
                 # Plan-targeted deep links so Stripe opens the intended update flow.
                 _price_map = {
@@ -95,9 +99,9 @@ def page_settings():
                         )
                         _plan_portal_urls[_plan_key] = _target_url or _portal_url
 
-                if _portal_url:
-                    st.link_button("Manage Subscription (billing, cancel, update card)",
-                                   _portal_url, use_container_width=True, type="primary")
+                if _manage_plan_url:
+                    st.link_button("Manage Subscription (change plan tier)",
+                                   _manage_plan_url, use_container_width=True, type="primary")
                 else:
                     st.info("Billing portal not available. Contact support.")
 

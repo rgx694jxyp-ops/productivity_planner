@@ -447,8 +447,12 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                     elif err == "active_subscription":
                         # Already subscribed — route to portal for plan management
                         if _portal_url:
+                            _manage_url = create_billing_portal_url(
+                                return_url=_app_url + "/?portal=return",
+                                flow="subscription_update",
+                            ) or _portal_url
                             st.info("You already have an active subscription. Use the billing portal to change plans.")
-                            st.link_button("Manage Subscription →", _portal_url, use_container_width=True, type="primary")
+                            st.link_button("Manage Subscription →", _manage_url, use_container_width=True, type="primary")
                         else:
                             st.info("You already have an active subscription. Go to Settings → Billing to manage it.")
                     else:
