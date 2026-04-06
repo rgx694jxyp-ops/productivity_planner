@@ -1915,6 +1915,34 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
     schedule_pending_plan = ""
     schedule_change_at_ts = None
     try:
+        # If schedule wasn't expanded into an object, fetch it explicitly.
+        if isinstance(schedule_obj, str) and schedule_obj:
+            sched_resp = requests.get(
+                f"https://api.stripe.com/v1/subscription_schedules/{schedule_obj}",
+                auth=(stripe_key, ""),
+                params={"expand[]": ["phases.items.price"]},
+                timeout=10,
+            )
+            if sched_resp.status_code == 200:
+                schedule_obj = sched_resp.json()
+
+        # If subscription has no schedule reference, look up schedules by customer
+        # and locate the one bound to this subscription.
+        if (not schedule_obj or not isinstance(schedule_obj, dict)) and stripe_cid:
+            sched_list = requests.get(
+                "https://api.stripe.com/v1/subscription_schedules",
+                auth=(stripe_key, ""),
+                params={"customer": stripe_cid, "limit": 20, "expand[]": ["data.phases.items.price"]},
+                timeout=10,
+            )
+            if sched_list.status_code == 200:
+                for _s in (sched_list.json().get("data") or []):
+                    _sub_ref = _s.get("subscription")
+                    _sub_id = _sub_ref.get("id") if isinstance(_sub_ref, dict) else _sub_ref
+                    if str(_sub_id or "") == stripe_sub_id:
+                        schedule_obj = _s
+                        break
+
         if isinstance(schedule_obj, dict):
             phases = schedule_obj.get("phases") or []
             if phases:

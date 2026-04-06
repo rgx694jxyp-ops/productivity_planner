@@ -138,6 +138,13 @@ def page_settings():
                         if _stripe_period:
                             st.write(f"Current billing period ends: {_stripe_period}")
 
+                        st.caption(
+                            "Live pending debug: "
+                            f"source={_live.get('pending_change_source','') or 'none'} · "
+                            f"has_pending={bool(_live.get('has_pending_update'))} · "
+                            f"pending_plan={_live.get('pending_plan','') or 'none'}"
+                        )
+
                         if _pending_plan:
                             st.success(
                                 f"Pending downgrade is recorded in app state. Access should remain on {_plan_label} until {_pending_date}."
