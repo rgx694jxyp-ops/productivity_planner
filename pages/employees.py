@@ -550,7 +550,6 @@ def _emp_coaching():
             # ── Add entry ────────────────────────────────────────────────────
             if "cn_note_val" not in st.session_state: st.session_state.cn_note_val = ""
             if "cn_by_val"   not in st.session_state: st.session_state.cn_by_val   = ""
-            if "cn_common_issues" not in st.session_state: st.session_state.cn_common_issues = []
             
             note_text  = st.text_area("Add a coaching note", height=120, key="cn_note",
                                        value=st.session_state.cn_note_val,
@@ -567,7 +566,7 @@ def _emp_coaching():
             selected_issues = st.multiselect(
                 "Common issues observed",
                 _issue_options,
-                default=st.session_state.cn_common_issues,
+                default=[],
                 key="cn_common_issues",
                 help="Tag the likely cause so we can track patterns over time.",
             )
