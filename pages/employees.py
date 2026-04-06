@@ -567,7 +567,7 @@ def _emp_coaching():
             selected_issues = st.multiselect(
                 "Common issues observed",
                 _issue_options,
-                value=st.session_state.cn_common_issues,
+                default=st.session_state.cn_common_issues,
                 key="cn_common_issues",
                 help="Tag the likely cause so we can track patterns over time.",
             )
