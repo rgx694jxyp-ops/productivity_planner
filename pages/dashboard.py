@@ -1,15 +1,13 @@
-from app import (
-    _get_all_risk_levels,
+from core.runtime import date, pd, st
+from domain.risk import _get_all_risk_levels
+from pages.common import load_goal_status_history
+from ui_improvements import (
     _render_breadcrumb,
     _render_confidence_ux,
     _render_priority_strip,
     _render_session_context_bar,
     _render_session_progress,
-    date,
-    pd,
-    st,
 )
-from pages.common import load_goal_status_history
 
 def page_dashboard():
     """Dashboard: At-a-glance risk view of all employees."""

@@ -1,24 +1,19 @@
-from app import (
+from core.dependencies import (
     _cached_active_flags,
     _cached_all_coaching_notes,
     _cached_coaching_notes_for,
     _cached_employees,
     _cached_targets,
-    _get_current_plan,
-    _html_mod,
     _log_app_error,
+    require_db,
+)
+from core.navigation import _get_current_plan
+from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback
+from ui_improvements import (
     _render_breadcrumb,
     _render_session_context_bar,
-    date,
-    datetime,
     find_coaching_impact,
-    io,
-    pd,
-    require_db,
     show_coaching_impact,
-    st,
-    time,
-    traceback,
     translate_to_floor_language,
 )
 try:

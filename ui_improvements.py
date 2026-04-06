@@ -13,6 +13,8 @@ from datetime import datetime, date, timedelta
 import pandas as pd
 import time
 
+from domain.risk import _get_all_risk_levels
+
 
 def _safe_float(value, default=0.0):
     """Parse numeric-like values safely; return default for invalid inputs."""
@@ -782,8 +784,6 @@ def risk_to_human_language(risk_level: str, context: dict | None = None) -> str:
 
 def _compute_priority_summary(gs: list[dict], history: list[dict]) -> dict:
     """Return lightweight action-oriented summary counts for header strips."""
-    from app import _get_all_risk_levels
-
     below = [r for r in gs if r.get("goal_status") == "below_goal"]
     risk_cache = _get_all_risk_levels(gs, history)
     critical = 0
@@ -832,8 +832,6 @@ def _render_priority_strip(gs: list[dict], history: list[dict]):
 
 def _get_primary_recommendation(gs: list[dict], history: list[dict]) -> dict | None:
     """Pick one highest-impact coaching action with a rich 'why this person' justification."""
-    from app import _get_all_risk_levels
-
     below = [r for r in gs if r.get("goal_status") == "below_goal"]
     if not below:
         return None
@@ -1189,12 +1187,14 @@ def _render_soft_action_buttons(emp_id: str, emp_name: str, risk_level: str, con
                 context_tags.append(ctx_opt)
 
             try:
-                from goals import get_active_flags, save_goals
+                from goals import get_active_flags, load_goals, save_goals
 
                 flags = get_active_flags()
                 if emp_id in flags:
-                    flags[emp_id]["context_tags"] = context_tags
-                    save_goals(flags)
+                    goals_data = load_goals()
+                    if emp_id in goals_data.get("flagged_employees", {}):
+                        goals_data["flagged_employees"][emp_id]["context_tags"] = context_tags
+                        save_goals(goals_data)
             except Exception:
                 pass
             st.rerun()

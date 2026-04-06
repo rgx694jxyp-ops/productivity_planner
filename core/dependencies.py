@@ -1,0 +1,138 @@
+from core.runtime import datetime, st, time
+
+try:
+    from database import get_client as get_db_client
+    DB_AVAILABLE = True
+    DB_ERROR = ""
+except RuntimeError as error:
+    DB_AVAILABLE = False
+    DB_ERROR = str(error)
+except ImportError as error:
+    DB_AVAILABLE = False
+    message = str(error)
+    if "supabase" in message.lower():
+        DB_ERROR = "supabase library not installed. Run: pip3 install supabase"
+    else:
+        DB_ERROR = f"Import error: {message}"
+except Exception as error:
+    DB_AVAILABLE = False
+    DB_ERROR = f"Unexpected error loading database module: {type(error).__name__}: {error}"
+
+from auth import (
+    check_session_timeout,
+    clear_auth_cookies,
+    full_sign_out as _auth_full_sign_out,
+    login_page,
+    render_sign_out_button,
+    restore_session_from_cookies,
+    set_auth_cookies,
+)
+from billing import subscription_page as billing_subscription_page
+from billing import verify_checkout_and_activate
+from cache import (
+    bust_cache,
+    cached_active_flags,
+    cached_all_coaching_notes,
+    cached_coaching_notes_for,
+    cached_employees,
+    cached_targets,
+    cached_uph_history,
+)
+
+
+def require_db() -> bool:
+    if not DB_AVAILABLE:
+        st.error(f"Database not available: {DB_ERROR}")
+        st.info("Run `pip3 install supabase` in your terminal then restart the app.")
+        return False
+    return True
+
+
+def full_sign_out() -> None:
+    _auth_full_sign_out(bust_cache)
+
+
+def show_subscription_page() -> None:
+    billing_subscription_page(render_sign_out_button, full_sign_out)
+
+
+def success_then_rerun(msg: str, delay: float = 0) -> None:
+    st.toast(msg, icon="✅")
+    st.rerun()
+
+
+def tenant_log_path(base_name: str) -> str:
+    import os
+
+    directory = os.path.dirname(__file__)
+    tid = st.session_state.get("tenant_id", "")
+    if tid:
+        return os.path.join(os.path.dirname(directory), f"{base_name}_{tid}.log")
+    return os.path.join(os.path.dirname(directory), f"{base_name}.log")
+
+
+def get_audit_timestamp() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        from settings import Settings
+
+        tenant_id = st.session_state.get("tenant_id", "")
+        settings = Settings(tenant_id)
+        tz_str = settings.get("timezone", "").strip()
+        if tz_str:
+            try:
+                tz = ZoneInfo(tz_str)
+                now = datetime.now(tz)
+                return now.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def audit(action: str, detail: str = "") -> None:
+    try:
+        entry = f"{get_audit_timestamp()} | {action} | {detail}\n"
+        with open(tenant_log_path("dpd_audit"), "a", encoding="utf-8") as handle:
+            handle.write(entry)
+    except Exception:
+        pass
+
+
+def log_app_error(category: str, message: str, detail: str = "", severity: str = "error") -> None:
+    try:
+        from database import log_error
+
+        user_email = st.session_state.get("user_email", "")
+        log_error(
+            category=category,
+            message=message,
+            detail=detail,
+            user_email=user_email,
+            severity=severity,
+        )
+    except Exception:
+        print(f"[APP_ERROR] [{severity}] [{category}] {message}")
+
+
+def _get_db_client():
+    if not DB_AVAILABLE:
+        raise RuntimeError(DB_ERROR)
+    return get_db_client()
+
+
+_audit = audit
+_bust_cache = bust_cache
+_cached_active_flags = cached_active_flags
+_cached_all_coaching_notes = cached_all_coaching_notes
+_cached_coaching_notes_for = cached_coaching_notes_for
+_cached_employees = cached_employees
+_cached_targets = cached_targets
+_cached_uph_history = cached_uph_history
+_full_sign_out = full_sign_out
+_log_app_error = log_app_error
+_render_sign_out_button = render_sign_out_button
+_set_auth_cookies = set_auth_cookies
+_success_then_rerun = success_then_rerun
+_tenant_log_path = tenant_log_path

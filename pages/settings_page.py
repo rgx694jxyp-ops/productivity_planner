@@ -1,18 +1,13 @@
-from app import (
+from core.dependencies import (
     _bust_cache,
     _full_sign_out,
-    _get_current_plan,
     _log_app_error,
     _render_sign_out_button,
     _set_auth_cookies,
     _tenant_log_path,
-    datetime,
-    json,
-    re,
-    st,
-    time,
-    traceback,
 )
+from core.navigation import _get_current_plan
+from core.runtime import datetime, json, re, st, time, traceback
 
 def page_settings():
     st.title("⚙️ Settings")

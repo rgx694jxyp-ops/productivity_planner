@@ -14,11 +14,8 @@ from datetime import date, timedelta
 
 import streamlit as st
 
-from app import (
-    _html_mod,
-    require_db,
-    st,
-)
+from core.dependencies import require_db
+from core.runtime import _html_mod
 
 # ── Tag taxonomy ──────────────────────────────────────────────────────────────
 ISSUE_TYPES    = ["", "speed", "accuracy", "process", "attendance", "training"]
@@ -321,7 +318,7 @@ def page_coaching_intel():
             _gs = st.session_state.get("goal_status", [])
             _history = st.session_state.get("history", [])
             if _gs and _history:
-                from app import find_coaching_impact
+                from ui_improvements import find_coaching_impact
                 _wins = []
                 for row in _gs:
                     _eid = str(row.get("EmployeeID", row.get("Employee Name", "")))

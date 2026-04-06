@@ -1,6 +1,6 @@
 import streamlit as st
 from datetime import datetime
-from app import require_db
+from core.dependencies import require_db
 
 
 def get_user_timezone_now():

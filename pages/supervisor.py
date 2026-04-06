@@ -1,9 +1,11 @@
-from app import (
+from core.dependencies import (
     _cached_all_coaching_notes,
     _cached_coaching_notes_for,
-    _cached_employees,
-    _get_all_risk_levels,
-    _html_mod,
+)
+from core.runtime import _html_mod, date, st
+from domain.risk import _get_all_risk_levels
+from pages.common import load_goal_status_history
+from ui_improvements import (
     _render_adaptive_action_suggestion,
     _render_breadcrumb,
     _render_confidence_ux,
@@ -12,7 +14,6 @@ from app import (
     _render_session_context_bar,
     _render_session_progress,
     build_operation_status,
-    date,
     detect_department_patterns,
     is_simple_mode,
     show_coaching_activity_summary,
@@ -22,10 +23,8 @@ from app import (
     show_shift_complete_state,
     show_start_shift_card,
     simplified_supervisor_view,
-    st,
     summarize_coaching_activity,
 )
-from pages.common import load_goal_status_history
 
 def page_supervisor():
     """One-screen supervisor view: risks, trends, context, actions. Daily-use focused."""

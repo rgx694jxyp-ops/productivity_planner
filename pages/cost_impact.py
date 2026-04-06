@@ -14,11 +14,8 @@ from datetime import datetime, date, timedelta
 
 import streamlit as st
 
-from app import (
-    _html_mod,
-    require_db,
-    st,
-)
+from core.dependencies import require_db
+from core.runtime import _html_mod
 
 _WEEKS_IN_YEAR = 52
 _DEFAULT_WAGE  = 18.0   # fallback if not set in Settings

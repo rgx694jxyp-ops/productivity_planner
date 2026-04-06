@@ -3,11 +3,9 @@ goals.py
 --------
 Department UPH goals, trend analysis, and employee flagging.
 
-Storage: Supabase tenant_goals table (DB-backed), with local JSON file as fallback.
+Storage: Supabase tenant_goals table only.
 """
 
-import json
-import os
 from datetime import datetime, date
 from collections import defaultdict
 
@@ -15,9 +13,6 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:
     ZoneInfo = None
-
-
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _get_user_timezone_now() -> datetime:
@@ -36,7 +31,6 @@ def _get_user_timezone_now() -> datetime:
     except Exception:
         pass
     
-    now = None
     if tz_str and ZoneInfo:
         try:
             tz = ZoneInfo(tz_str)
@@ -47,57 +41,47 @@ def _get_user_timezone_now() -> datetime:
         return datetime.now()
 
 
-def _goals_file() -> str:
-    """Return a tenant-specific goals file path, falling back to the shared file."""
-    try:
-        import streamlit as st
-        tid = st.session_state.get("tenant_id", "")
-        if tid:
-            return os.path.join(_BASE_DIR, f"dpd_goals_{tid}.json")
-    except Exception:
-        pass
-    return os.path.join(_BASE_DIR, "dpd_goals.json")
+def _empty_goals() -> dict:
+    return {"dept_targets": {}, "flagged_employees": {}}
 
 
-# ── Goal store (DB-first, file fallback) ──���──────────────────────────────────
+def _normalize_goals_payload(data: dict | None) -> dict:
+    data = data or {}
+    dept_targets = data.get("dept_targets") or {}
+    flagged_employees = data.get("flagged_employees") or {}
+    if not isinstance(dept_targets, dict):
+        dept_targets = {}
+    if not isinstance(flagged_employees, dict):
+        flagged_employees = {}
+    return {
+        "dept_targets": dict(dept_targets),
+        "flagged_employees": dict(flagged_employees),
+    }
+
+
+# ── Goal store (DB only) ─────────────────────────────────────────────────────
 
 def load_goals(tenant_id: str = "") -> dict:
-    """Load goals from DB, falling back to local JSON file."""
-    # Try database first
+    """Load goals from tenant_goals only."""
     try:
         from database import load_goals_db
-        data = load_goals_db(tenant_id)
-        if data.get("dept_targets") or data.get("flagged_employees"):
-            return data
+        return _normalize_goals_payload(load_goals_db(tenant_id))
     except Exception:
-        pass
-    # Fallback to file
-    gf = _goals_file()
-    if not os.path.exists(gf):
-        return {"dept_targets": {}, "flagged_employees": {}}
-    try:
-        with open(gf, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        data.setdefault("dept_targets", {})
-        data.setdefault("flagged_employees", {})
-        return data
-    except (json.JSONDecodeError, IOError):
-        return {"dept_targets": {}, "flagged_employees": {}}
+        return _empty_goals()
 
 
 def save_goals(data: dict, tenant_id: str = ""):
-    """Save goals to DB and local file."""
-    # Save to database
+    """Save goals to tenant_goals only."""
+    payload = _normalize_goals_payload(data)
     try:
         from database import save_goals_db
-        save_goals_db(data, tenant_id)
+        save_goals_db(payload, tenant_id)
     except Exception:
         pass
-    # Also save to file as backup
     try:
-        with open(_goals_file(), "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except IOError:
+        from cache import bust_cache as _bust_cache
+        _bust_cache()
+    except Exception:
         pass
 
 

@@ -14,7 +14,30 @@ def apply_global_styles():
   [data-testid="stDecoration"], [data-testid="stStatusWidget"] { visibility: hidden !important; display: none !important; }
   header[data-testid="stHeader"] { background: transparent !important; }
 
-  /* When sidebar is hidden, make the expand arrow dark and visible. */
+  /* When sidebar is hidden, keep the expand control visible and high-contrast. */
+  [data-testid="stSidebarCollapsedControl"] {
+    opacity: 1 !important;
+    visibility: visible !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: #ffffff !important;
+    border: 1px solid #C5D4E8 !important;
+    border-radius: 999px !important;
+    box-shadow: 0 2px 8px rgba(15, 45, 82, 0.16) !important;
+    padding: 4px !important;
+    z-index: 10000 !important;
+  }
+  [data-testid="stSidebarCollapsedControl"]:hover {
+    background: #ffffff !important;
+    border-color: #AFC3DA !important;
+    box-shadow: 0 2px 8px rgba(15, 45, 82, 0.16) !important;
+  }
+  [data-testid="stSidebarCollapsedControl"] button,
+  [data-testid="stSidebarCollapsedControl"] div {
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
   [data-testid="stSidebarCollapsedControl"] [data-testid="stIconMaterial"],
   [data-testid="stSidebarCollapsedControl"] span,
   [data-testid="stSidebarCollapsedControl"] svg,

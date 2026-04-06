@@ -1,25 +1,14 @@
-from app import (
+from core.dependencies import (
     _bust_cache,
     _cached_employees,
     _cached_targets,
-    _get_current_plan,
-    _html_mod,
     _log_app_error,
-    date,
-    datetime,
-    diagnose_upload,
-    io,
-    math,
-    pd,
     require_db,
-    show_diagnosis,
-    show_manual_entry_form,
-    st,
-    tempfile,
-    time,
-    traceback,
 )
+from core.navigation import _get_current_plan
+from core.runtime import _html_mod, date, datetime, io, math, pd, st, tempfile, time, traceback
 from pages.common import get_user_timezone_now
+from ui_improvements import diagnose_upload, show_diagnosis, show_manual_entry_form
 import hashlib
 import json
 import re

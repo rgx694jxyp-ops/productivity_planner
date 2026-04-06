@@ -1,3 +1,4 @@
+import os
 import time
 
 import streamlit as st
@@ -7,6 +8,34 @@ LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 900
 SESSION_TIMEOUT_SECONDS = 28800
 MAX_SESSION_LIFETIME_SECONDS = 43200
+
+
+def _auth_redirect_url() -> str:
+    """Return a stable, browser-reachable redirect URL for auth emails.
+
+    Priority:
+    1) AUTH_REDIRECT_URL / APP_BASE_URL / PUBLIC_APP_URL env or secrets
+    2) Request Origin header
+    3) localhost fallback
+    """
+    for key in ("AUTH_REDIRECT_URL", "APP_BASE_URL", "PUBLIC_APP_URL", "RENDER_EXTERNAL_URL"):
+        v = str(os.environ.get(key, "") or "").strip()
+        if not v:
+            try:
+                v = str(st.secrets.get(key, "") or "").strip()
+            except Exception:
+                v = ""
+        if v.startswith("http://") or v.startswith("https://"):
+            return v.rstrip("/")
+
+    try:
+        origin = str(st.context.headers.get("Origin", "") or "").strip()
+        if origin.startswith("http://") or origin.startswith("https://"):
+            return origin.rstrip("/")
+    except Exception:
+        pass
+
+    return "http://localhost:8501"
 
 
 def render_sign_out_button(key_prefix: str, *, type: str = "secondary", use_container_width: bool = False) -> bool:
@@ -325,7 +354,7 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                     from supabase import create_client as _sc
                     SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
                     _sb = _sc(SUPABASE_URL, SUPABASE_KEY)
-                    _redirect = st.context.headers.get("Origin", "http://localhost:8501")
+                    _redirect = _auth_redirect_url()
                     _sb.auth.reset_password_email(reset_email.strip(), {"redirect_to": _redirect})
                 except Exception as _re:
                     log_app_error_cb("password_reset", f"Reset request for {reset_email.strip()}: {_re}")
@@ -476,6 +505,10 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
 
     with _tab_signup:
         st.caption("Create your account — no admin setup needed.")
+        st.info(
+            "After you confirm your email, sign in with the same email and password. "
+            "If your account needs billing activation, the app will take you to the purchase page automatically."
+        )
         _signup_email = st.text_input(
             "Email", placeholder="you@company.com", key="signup_email"
         )
@@ -498,7 +531,7 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                     from supabase import create_client as _sc
                     SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
                     _sb = _sc(SUPABASE_URL, SUPABASE_KEY)
-                    _redirect = st.context.headers.get("Origin", "http://localhost:8501")
+                    _redirect = _auth_redirect_url()
                     _signup_resp = _sb.auth.sign_up({
                         "email": _signup_email.strip(),
                         "password": _signup_pw,
@@ -508,14 +541,26 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                     _signup_session = getattr(_signup_resp, "session", None)
                     if _signup_user and _signup_session:
                         st.success("Account created! You can now sign in.")
+                        st.info(
+                            "Sign in with the same email and password. "
+                            "If billing is required, you will be taken to the purchase page automatically."
+                        )
                         st.session_state["_login_attempts"] = 0
                         st.session_state["_login_lockout_until"] = 0
                         st.session_state["login_email"] = _signup_email.strip()
                     elif _signup_user:
                         st.success("Account created! Check your email to verify, then sign in.")
-                        st.info("No email? Check your spam folder.")
+                        st.info(
+                            "After you verify your email, return here and sign in with the same email and password. "
+                            "If billing is required, the app will take you to the purchase page automatically."
+                        )
+                        st.caption("No email? Check your spam folder.")
                     else:
                         st.warning("Sign-up sent. Check your email for next steps.")
+                        st.caption(
+                            "After email verification, sign in here with the same credentials. "
+                            "If needed, you will be redirected to the purchase page."
+                        )
                 except Exception as _se:
                     _se_msg = str(_se).strip().lower()
                     if any(s in _se_msg for s in ["already registered", "already exists", "user already"]):

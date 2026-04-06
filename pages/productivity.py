@@ -1,29 +1,14 @@
-from app import (
-    _apply_mode_styling,
+from core.dependencies import (
     _audit,
     _cached_active_flags,
     _cached_employees,
     _cached_targets,
-    _calc_risk_level,
-    _get_current_plan,
     _get_db_client,
-    _html_mod,
     _log_app_error,
-    _plan_gate,
-    _render_breadcrumb,
-    _render_confidence_ux,
-    _render_primary_action_rail,
-    _render_session_context_bar,
-    _render_soft_action_buttons,
-    date,
-    datetime,
-    io,
-    pd,
-    st,
-    tempfile,
-    time,
-    traceback,
 )
+from core.navigation import _get_current_plan, _plan_gate
+from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback
+from domain.risk import _calc_risk_level
 try:
     from pages.common import _normalize_label_text
 except Exception:
@@ -36,6 +21,14 @@ except Exception:
             s = s[: max_len - 3].rstrip() + "..."
         return s or "Unknown"
 from pages.employees import _build_archived_productivity
+from ui_improvements import (
+    _apply_mode_styling,
+    _render_breadcrumb,
+    _render_confidence_ux,
+    _render_primary_action_rail,
+    _render_session_context_bar,
+    _render_soft_action_buttons,
+)
 
 def page_productivity():
     st.title("📈 Productivity")

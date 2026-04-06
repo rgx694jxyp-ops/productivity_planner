@@ -11,7 +11,19 @@
 ```
 dpd_web/
 │
-├── app.py                   # Entry point, router, shared helpers (1,411 lines — NEEDS SPLIT)
+├── app.py                   # Entrypoint only: init, auth gate, subscription gate, nav, route dispatch
+├── core/
+│   ├── runtime.py           # Runtime imports + Streamlit bootstrap/styles
+│   ├── navigation.py        # Sidebar, plan helpers, subscription banner
+│   ├── session.py           # Session defaults, day-rollover helpers
+│   └── dependencies.py      # Shared wrappers for auth/cache/db/logging
+├── domain/
+│   └── risk.py              # Shared risk scoring and cached risk map helpers
+├── services/
+│   └── email_service.py     # Background email scheduling service
+├── ui/
+│   └── landing.py           # Public landing page UI and CTA tracking
+├── utils/
 ├── auth.py                  # All Supabase auth: login, logout, JWT refresh, cookies
 ├── database.py              # Single source of truth for all DB operations (2,156 lines)
 ├── billing.py               # Stripe checkout + subscription verification
@@ -22,7 +34,7 @@ dpd_web/
 ├── ui_improvements.py       # UI components, risk math, coaching helpers (1,298 lines — NEEDS SPLIT)
 ├── email_engine.py          # SMTP sending, schedule mgmt, config encryption
 ├── error_log.py             # Row-level error logging (for import pipeline)
-├── goals.py                 # UPH targets + employee flagging (DB-first, JSON fallback)
+├── goals.py                 # UPH targets + employee flagging (Supabase tenant_goals only)
 ├── settings.py              # Tenant config reader (DB-backed, JSON fallback)
 ├── export_manager.py        # Excel/PDF export helpers
 ├── history_manager.py       # Archived data management
@@ -53,6 +65,8 @@ dpd_web/
 │
 ├── supabase/
 │   └── functions/stripe-webhook/index.ts  # Deno Edge Function for Stripe events
+├── scripts/
+│   └── migrate_goals_json_to_db.py        # One-time import for legacy dpd_goals*.json files
 │
 └── docs/
     └── architecture_overview.md  # This file
@@ -66,7 +80,14 @@ dpd_web/
 
 | Module | Owns | Does NOT own |
 |---|---|---|
-| `app.py` | Startup, auth gate, nav, route dispatch, shared state helpers | Page logic (should not) |
+| `app.py` | App initialization, auth gate, subscription gate, route dispatch | Shared utilities |
+| `core/runtime.py` | Shared imports, `st.set_page_config`, global style bootstrap | Page logic |
+| `core/navigation.py` | Sidebar nav, plan lookup, plan gating, subscription banner | Business workflows |
+| `core/session.py` | Session defaults, session clearing, daily rollover counters | UI rendering |
+| `core/dependencies.py` | Shared wrappers for auth/cache/db/logging/billing | Page-specific workflows |
+| `domain/risk.py` | Shared risk scoring and session-cached risk map | UI rendering |
+| `services/email_service.py` | Background email scheduling and page-render schedule checks | UI rendering |
+| `ui/landing.py` | Public landing page and CTA tracking | Auth/session state |
 | `auth.py` | Login UI, JWT, cookies, session restore, token refresh, lockout | Database writes other than auth |
 | `database.py` | All Supabase SDK calls, multi-tenant query helpers | Business logic |
 | `billing.py` | Stripe checkout verification, subscription sync | UI (calls into Streamlit minimally) |
@@ -79,7 +100,7 @@ dpd_web/
 | `goals.py` | UPH targets, employee flagging, trend analysis | UI rendering |
 | `settings.py` | Tenant settings read/write (DB-backed) | Auth |
 | `styles.py` | Global CSS string injection | Logic |
-| `pages/common.py` | `require_db()`, `_normalize_label_text()` — shared by all pages | Page-specific logic |
+| `pages/common.py` | Goal-status bootstrap, timezone helper, label normalization | App routing |
 
 ---
 
@@ -293,11 +314,13 @@ def bust_cache():
 
 | Issue | Location |
 |---|---|
-| JSON file fallback for goals | `goals.py` — `load_goals()` / `save_goals()` |
 | JSON file fallback for email config | `email_engine.py` |
 | JSON file fallback for settings | `settings.py` |
 
-These are safe to retire once all tenants are confirmed DB-migrated (run all migrations first).
+Goals storage has been cut over to `tenant_goals` only. Use `scripts/migrate_goals_json_to_db.py`
+once to import any leftover `dpd_goals*.json` files before removing them.
+
+The remaining JSON fallbacks are safe to retire once all tenants are confirmed DB-migrated.
 
 ### P4 — Oversized files (split candidates)
 
@@ -307,7 +330,7 @@ These are safe to retire once all tenants are confirmed DB-migrated (run all mig
 | `pages/import_page.py` | 2,041 | Step functions are already isolated; extract to `services/import_service.py` |
 | `pages/productivity.py` | 1,793 | Report builder + trend analysis could move to `services/` |
 | `ui_improvements.py` | 1,298 | See split plan below |
-| `app.py` | 1,411 | Once helpers extracted, app.py target: <200 lines |
+| `app.py` | slimmed entrypoint | Keep limited to init/auth/nav/route orchestration |
 
 **Recommended `ui_improvements.py` split:**
 ```
@@ -324,10 +347,10 @@ utils/translations.py   — translate_to_floor_language, risk_to_human_language
 
 1. ✅ **Branch:** `stabilization-architecture-pass`
 2. ✅ **Kill dead code** — done (settings_page.py cleaned, -464 lines)
-3. ⬜ **Extract shared helpers from app.py** — move to `core/`, `domain/`, `utils/`
+3. ✅ **Extract shared helpers from app.py** — moved to `core/`, `domain/`, `services/`, `ui/`
 4. ⬜ **Split `ui_improvements.py`** — per §9 table above
 5. ⬜ **Build service layer** — `services/import_service.py`, `services/employee_service.py`, etc.
 6. ⬜ **Move email scheduler** — to Supabase pg_cron or external cron
 7. ⬜ **Add tests** — ranking engine, import pipeline, plan enforcement, tenant scoping, billing
-8. ⬜ **Kill JSON fallback storage** — after verifying all tenants on DB
+8. ⬜ **Kill remaining JSON fallback storage** — settings/email after verifying all tenants on DB
 9. ⬜ **Reduce oversized files** — `database.py`, `import_page.py`, `productivity.py`

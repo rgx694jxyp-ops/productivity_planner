@@ -1,9 +1,5 @@
-from app import (
-    _cached_targets,
-    _success_then_rerun,
-    date,
-    st,
-)
+from core.dependencies import _cached_targets, _success_then_rerun
+from core.runtime import date, st
 from pages.employees import _build_archived_productivity
 from pages.productivity import _build_period_report
 
