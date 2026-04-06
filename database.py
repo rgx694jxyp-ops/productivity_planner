@@ -1966,7 +1966,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
 
     # Stripe may represent end-of-period plan changes via subscription schedule
     # instead of pending_update depending on portal/account configuration.
-    schedule_obj = sub_obj.get("schedule") or {}
+    schedule_obj = sub_obj.get("schedule")
     schedule_pending_plan = ""
     schedule_change_at_ts = None
     try:
@@ -1983,7 +1983,8 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
 
         # If subscription has no schedule reference, look up schedules by customer
         # and locate the one bound to this subscription.
-        if (not schedule_obj or not isinstance(schedule_obj, dict)) and stripe_cid:
+        _has_schedule_phases = bool(isinstance(schedule_obj, dict) and (schedule_obj.get("phases") or []))
+        if (not _has_schedule_phases) and stripe_cid:
             sched_list = requests.get(
                 "https://api.stripe.com/v1/subscription_schedules",
                 auth=(stripe_key, ""),
@@ -2009,7 +2010,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
                         )
                         if _has_future:
                             _fallback_sched = _s
-                if (not schedule_obj or not isinstance(schedule_obj, dict)) and _fallback_sched is not None:
+                if (not isinstance(schedule_obj, dict) or not (schedule_obj.get("phases") or [])) and _fallback_sched is not None:
                     schedule_obj = _fallback_sched
 
         if isinstance(schedule_obj, dict):
