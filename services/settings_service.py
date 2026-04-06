@@ -89,8 +89,12 @@ def summarize_error_counts(errors: list[dict]) -> tuple[int, int, int]:
     return err_count, warn_count, info_count
 
 
-def format_error_timestamp(raw_ts: str, tz_offset_min: int = 0) -> str:
-    """Convert UTC ISO timestamp to browser-local string using JS offset minutes."""
+def format_error_timestamp(raw_ts: str, tz_offset_min: int | None = None) -> str:
+    """Convert UTC ISO timestamp to local time.
+
+    If a browser offset (minutes) is provided, use it; otherwise fall back to
+    the Python process local timezone.
+    """
     try:
         raw = str(raw_ts or "").replace("Z", "+00:00")
         if not raw:
@@ -98,7 +102,10 @@ def format_error_timestamp(raw_ts: str, tz_offset_min: int = 0) -> str:
         utc_dt = datetime.fromisoformat(raw)
         if utc_dt.tzinfo is None:
             utc_dt = utc_dt.replace(tzinfo=timezone.utc)
-        local_dt = utc_dt.astimezone(timezone(offset=timedelta(minutes=-int(tz_offset_min))))
+        if tz_offset_min is None:
+            local_dt = utc_dt.astimezone()
+        else:
+            local_dt = utc_dt.astimezone(timezone(offset=timedelta(minutes=-int(tz_offset_min))))
         return local_dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return str(raw_ts or "")[:19].replace("T", " ")

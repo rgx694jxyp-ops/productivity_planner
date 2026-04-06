@@ -97,7 +97,7 @@ def page_settings():
 
                 if _portal_url:
                     st.link_button("Open Billing Portal (card, invoices, cancel)",
-                                   _portal_url, use_container_width=True)
+                                   _portal_url, use_container_width=True, type="primary")
 
                 with st.expander("Live Stripe verification", expanded=False):
                     _live_cache_key = f"_live_stripe_status_{_tid_local}"
@@ -555,15 +555,13 @@ def page_settings():
                         st.session_state["_tz_offset_min"] = int(_tz_qp)
                     except Exception:
                         pass
-                if "_tz_offset_min" not in st.session_state:
-                    st.session_state["_tz_offset_min"] = 0
 
                 for err in errors:
                     sev = err.get("severity", "error")
                     icon = _SEV_ICON.get(sev, "⚪")
                     cat = err.get("category", "unknown")
                     msg = err.get("message", "")
-                    ts = format_error_timestamp(err.get("created_at", ""), st.session_state.get("_tz_offset_min", 0))
+                    ts = format_error_timestamp(err.get("created_at", ""), st.session_state.get("_tz_offset_min"))
                     user = err.get("user_email", "")
 
                     with st.expander(f"{icon} **[{cat}]** {msg[:120]}{'…' if len(msg) > 120 else ''} — {ts}"):
