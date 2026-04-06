@@ -2022,6 +2022,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
     schedule_obj = sub_obj.get("schedule")
     schedule_pending_plan = ""
     schedule_change_at_ts = None
+    schedule_debug_rows = []
     try:
         # If schedule wasn't expanded into an object, fetch it explicitly.
         if isinstance(schedule_obj, str) and schedule_obj:
@@ -2046,7 +2047,19 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
             )
             if sched_list.status_code == 200:
                 _fallback_sched = None
-                for _s in (sched_list.json().get("data") or []):
+                _sched_rows = (sched_list.json().get("data") or [])
+                schedule_debug_rows = [
+                    {
+                        "id": _s.get("id") or "",
+                        "status": _s.get("status") or "",
+                        "subscription": (_s.get("subscription", {}) if isinstance(_s.get("subscription"), dict) else _s.get("subscription")) or "",
+                        "current_phase_start": (_s.get("current_phase") or {}).get("start_date"),
+                        "current_phase_end": (_s.get("current_phase") or {}).get("end_date"),
+                        "phase_count": len(_s.get("phases") or []),
+                    }
+                    for _s in _sched_rows[:20]
+                ]
+                for _s in _sched_rows:
                     _sub_ref = _s.get("subscription")
                     _sub_id = _sub_ref.get("id") if isinstance(_sub_ref, dict) else _sub_ref
                     if str(_sub_id or "") == stripe_sub_id:
@@ -2065,6 +2078,32 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
                             _fallback_sched = _s
                 if (not isinstance(schedule_obj, dict) or not (schedule_obj.get("phases") or [])) and _fallback_sched is not None:
                     schedule_obj = _fallback_sched
+
+        # Additional fallback: query schedules by subscription id directly.
+        if (not isinstance(schedule_obj, dict) or not (schedule_obj.get("phases") or [])) and stripe_sub_id:
+            sched_by_sub = requests.get(
+                "https://api.stripe.com/v1/subscription_schedules",
+                auth=(stripe_key, ""),
+                params={"subscription": stripe_sub_id, "limit": 20, "expand[]": ["data.phases.items.price"]},
+                timeout=10,
+            )
+            if sched_by_sub.status_code == 200:
+                _sub_rows = (sched_by_sub.json().get("data") or [])
+                if _sub_rows:
+                    if not schedule_debug_rows:
+                        schedule_debug_rows = [
+                            {
+                                "id": _s.get("id") or "",
+                                "status": _s.get("status") or "",
+                                "subscription": (_s.get("subscription", {}) if isinstance(_s.get("subscription"), dict) else _s.get("subscription")) or "",
+                                "current_phase_start": (_s.get("current_phase") or {}).get("start_date"),
+                                "current_phase_end": (_s.get("current_phase") or {}).get("end_date"),
+                                "phase_count": len(_s.get("phases") or []),
+                            }
+                            for _s in _sub_rows[:20]
+                        ]
+                    if not isinstance(schedule_obj, dict) or not (schedule_obj.get("phases") or []):
+                        schedule_obj = _sub_rows[0]
 
         if isinstance(schedule_obj, dict):
             phases = schedule_obj.get("phases") or []
@@ -2130,6 +2169,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
         "pending_price_id": pending_price_id,
         "schedule_pending_plan": schedule_pending_plan,
         "schedule_pending_change_at_ts": schedule_change_at_ts,
+        "debug_schedule_rows": schedule_debug_rows,
         "pending_change_at_ts": schedule_change_at_ts,
         "pending_change_source": "pending_update" if pending_update else ("schedule" if schedule_pending_plan else ""),
         "latest_invoice_id": latest_invoice.get("id") or "",

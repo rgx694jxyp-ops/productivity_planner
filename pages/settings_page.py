@@ -160,6 +160,18 @@ def page_settings():
                             f"pending_price={_live.get('pending_price_id','') or 'none'} · "
                             f"schedule_pending_plan={_live.get('schedule_pending_plan','') or 'none'}"
                         )
+                        _sched_rows = _live.get("debug_schedule_rows") or []
+                        if _sched_rows:
+                            st.caption("Stripe schedules (id/status/subscription/phase_count):")
+                            st.code(
+                                "\n".join(
+                                    f"{r.get('id','')} | {r.get('status','')} | sub={r.get('subscription','')} | phases={r.get('phase_count')}"
+                                    for r in _sched_rows
+                                ),
+                                language=None,
+                            )
+                        else:
+                            st.caption("Stripe schedules: none returned for this customer/subscription query.")
                         st.caption(
                             "Live sub debug: "
                             f"chosen={_live.get('stripe_subscription_id','') or 'none'} · "
