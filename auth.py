@@ -523,6 +523,15 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                             "That email already has an account. "
                             "Try signing in or resetting your password."
                         )
+                    elif "error sending confirmation email" in _se_msg:
+                        st.error(
+                            "Account creation could not send the confirmation email."
+                        )
+                        st.info(
+                            "Supabase email delivery is not configured yet. "
+                            "In Supabase Auth settings, either configure SMTP "
+                            "or temporarily disable email confirmation, then try again."
+                        )
                     elif "signup is disabled" in _se_msg:
                         st.error(
                             "Sign-up is currently disabled. "
