@@ -9,6 +9,11 @@ from core.dependencies import (
 from core.navigation import _get_current_plan, _plan_gate
 from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback, init_runtime
 
+try:
+    import altair as alt
+except Exception:
+    alt = None
+
 init_runtime()
 from domain.risk import _calc_risk_level
 from cache import (
@@ -515,8 +520,23 @@ def page_productivity():
             df_t_clean = df_t[df_t["Average UPH"].apply(
                 lambda x: _math2.isfinite(float(x)) if x is not None else False)]
             if not df_t_clean.empty:
-                st.line_chart(df_t_clean.pivot(index="Month", columns="Department", values="Average UPH"),
-                              use_container_width=True)
+                if alt is not None:
+                    _trend_chart = (
+                        alt.Chart(df_t_clean)
+                        .mark_line(point=True)
+                        .encode(
+                            x=alt.X("Month:O", title="Month"),
+                            y=alt.Y("Average UPH:Q", title="Average UPH"),
+                            color=alt.Color("Department:N", title="Department"),
+                            tooltip=["Month", "Department", alt.Tooltip("Average UPH:Q", format=".2f")],
+                        )
+                    )
+                    st.altair_chart(_trend_chart, use_container_width=True)
+                else:
+                    st.line_chart(
+                        df_t_clean.pivot(index="Month", columns="Department", values="Average UPH"),
+                        use_container_width=True,
+                    )
         except Exception: pass
         st.dataframe(df_t, use_container_width=True, hide_index=True)
         _tr_buf = io.BytesIO()
@@ -570,8 +590,23 @@ def page_productivity():
                 )
                 df_r_plot = df_r_clean.copy()
                 df_r_plot["Date"] = df_r_plot["Date"].dt.strftime("%Y-%m-%d")
-                st.line_chart(df_r_plot.pivot_table(index="Date", columns="Employee", values=col_name, aggfunc="mean"),
-                              use_container_width=True)
+                if alt is not None:
+                    _rolling_chart = (
+                        alt.Chart(df_r_plot)
+                        .mark_line(point=True)
+                        .encode(
+                            x=alt.X("Date:O", title="Date"),
+                            y=alt.Y(f"{col_name}:Q", title=roll_period),
+                            color=alt.Color("Employee:N", title="Employee"),
+                            tooltip=["Date", "Employee", alt.Tooltip(f"{col_name}:Q", format=".2f")],
+                        )
+                    )
+                    st.altair_chart(_rolling_chart, use_container_width=True)
+                else:
+                    st.line_chart(
+                        df_r_plot.pivot_table(index="Date", columns="Employee", values=col_name, aggfunc="mean"),
+                        use_container_width=True,
+                    )
             if not df_r_clean.empty:
                 df_r = df_r_clean.sort_values(["Date", "Employee"]).copy()
                 df_r["Date"] = df_r["Date"].dt.strftime("%Y-%m-%d")
