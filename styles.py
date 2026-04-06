@@ -224,8 +224,15 @@ def apply_global_styles():
   [data-baseweb="tag"] {
     background: var(--dpd-surface) !important;
     color: var(--dpd-text) !important;
+    caret-color: var(--dpd-navy-900) !important;
     border: 1px solid var(--dpd-border) !important;
     border-radius: 8px !important;
+  }
+  .stTextInput input::selection,
+  .stTextArea textarea::selection,
+  .stNumberInput input::selection {
+    background: #BBD8F8 !important;
+    color: #0F2D52 !important;
   }
   .stTextInput input:focus,
   .stTextArea textarea:focus,

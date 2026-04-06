@@ -45,6 +45,11 @@ function resolvePlan(sub: any): string {
 }
 
 function resolvePendingPlan(sub: any): string {
+  const metaPending = sub.metadata?.pending_plan?.toLowerCase?.();
+  if (metaPending && PLAN_LIMITS[metaPending] !== undefined) {
+    return metaPending;
+  }
+
   const pendingItem = sub.pending_update?.subscription_items?.[0];
   const pendingPrice = pendingItem?.price;
   const pendingPriceMetaPlan =
@@ -61,6 +66,15 @@ function resolvePendingPlan(sub: any): string {
     return PRICE_PLAN_MAP[pendingPriceId];
   }
   return "";
+}
+
+function resolvePendingChangeAt(sub: any): string | null {
+  const metaTs = sub.metadata?.pending_change_at;
+  if (metaTs && typeof metaTs === "string") {
+    const parsed = Date.parse(metaTs);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  return getPeriodEnd(sub);
 }
 
 async function verifyStripeSignature(
@@ -311,9 +325,14 @@ Deno.serve(async (req) => {
           if (typeof existing?.employee_limit === "number") limit = existing.employee_limit;
           pendingPlan = existingPendingPlan;
           pendingChangeAt = existingPendingChangeAt;
-        } else if (hasPendingUpdate) {
+        } else if (hasPendingUpdate || !!sub.metadata?.pending_plan) {
           pendingPlan = pendingPlanFromStripe || existingPendingPlan || null;
-          pendingChangeAt = getPeriodEnd(sub) || existingPendingChangeAt;
+          pendingChangeAt = resolvePendingChangeAt(sub) || existingPendingChangeAt;
+          // Preserve current app access until the pending change date.
+          if (pendingPlan && pendingChangeAt && !hasPendingChangeElapsed(pendingChangeAt)) {
+            if (existing?.plan) plan = existing.plan;
+            if (typeof existing?.employee_limit === "number") limit = existing.employee_limit;
+          }
         }
 
         const upsertRow: Record<string, unknown> = {

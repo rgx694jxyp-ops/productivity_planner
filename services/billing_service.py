@@ -43,10 +43,9 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
         app_url = app_origin or "http://localhost:8501"
         return_url = f"{app_url}/?portal=return"
         portal_url = create_billing_portal_url(return_url=return_url)
-        manage_plan_url = create_billing_portal_url(
-            return_url=return_url,
-            flow="subscription_update",
-        ) or portal_url
+        # Keep Manage action on the generic billing portal because some Stripe
+        # workspaces reject/loop on subscription_update deep-links.
+        manage_plan_url = portal_url
 
         price_map = {
             "starter": _get_config("STRIPE_PRICE_STARTER") or "",
@@ -65,6 +64,8 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
 
         plan_order, plan_info, gains, rank = get_plan_constants()
         alternatives = get_plan_alternatives(plan_raw, pending_plan)
+        # Product decision: in-app change cards should only offer upgrades.
+        alternatives = [p for p in alternatives if rank.get(p, 0) > rank.get(plan_raw, 0)]
 
         return {
             "success": True,
@@ -104,7 +105,25 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
 def request_plan_change(target_price: str, tenant_id: str) -> dict:
     """Request plan change in Stripe and normalize return shape."""
     try:
-        from database import modify_subscription
+        from database import _get_config, get_subscription, modify_subscription
+        # Block in-app downgrades; upgrades remain immediate.
+        sub = get_subscription(tenant_id) or {}
+        current_plan = str(sub.get("plan", "starter") or "starter").lower()
+        price_to_plan = {
+            _get_config("STRIPE_PRICE_STARTER") or "": "starter",
+            _get_config("STRIPE_PRICE_PRO") or "": "pro",
+            _get_config("STRIPE_PRICE_BUSINESS") or "": "business",
+        }
+        target_plan = price_to_plan.get(target_price, "")
+        plan_rank = {"starter": 1, "pro": 2, "business": 3}
+        if target_plan and plan_rank.get(target_plan, 0) < plan_rank.get(current_plan, 0):
+            return {
+                "success": False,
+                "data": None,
+                "error": "Downgrades are disabled in this screen. Keep your current plan and contact support if you need a billing change.",
+                "warnings": [],
+            }
+
         ok, msg = modify_subscription(target_price, tenant_id)
         return {
             "success": bool(ok),

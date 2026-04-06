@@ -1665,6 +1665,8 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
     if is_upgrade:
         # Immediate prorated charge for upgrades.
         _request_data["proration_behavior"] = "create_prorations"
+        _request_data["metadata[pending_plan]"] = ""
+        _request_data["metadata[pending_change_at]"] = ""
     else:
         # Downgrade billing changes now, but app access is deferred via pending_plan.
         if not _period_end_iso:
@@ -1672,6 +1674,7 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
         _request_data["proration_behavior"] = "none"
         _request_data["billing_cycle_anchor"] = "unchanged"
         _request_data["metadata[pending_plan]"] = _target_plan
+        _request_data["metadata[pending_change_at]"] = _period_end_iso
 
     modify_resp = requests.post(
         f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
