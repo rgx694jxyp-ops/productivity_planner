@@ -276,7 +276,7 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
         _uph_q = _sb.table("uph_history").select(
             "emp_id, units, hours_worked, uph, work_date, department"
         ).gte("work_date", from_iso).lte("work_date", to_iso)
-        _emp_q = _sb.table("employees").select("emp_id, name, department")
+        _emp_q = _sb.table("employees").select("id, emp_id, name, department")
         if tenant_id:
             _uph_q = _uph_q.eq("tenant_id", tenant_id)
             _emp_q = _emp_q.eq("tenant_id", tenant_id)
@@ -285,10 +285,11 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
             _uph_q = _tq3(_uph_q)
             _emp_q = _tq3(_emp_q)
         subs = (_uph_q.execute().data or [])
-        emps_lookup = {e["emp_id"]: e for e in (_emp_q.execute().data or [])}
+        # uph_history.emp_id is a bigint FK to employees.id — key by numeric id
+        emps_lookup = {e["id"]: e for e in (_emp_q.execute().data or [])}
     except Exception:
         subs = []
-        emps_lookup = {e["emp_id"]: e for e in (_cached_employees() or [])}
+        emps_lookup = {e["id"]: e for e in (_cached_employees() or [])}
     # Fallback to unit_submissions if uph_history returned nothing for that range
     if not subs:
         try:
