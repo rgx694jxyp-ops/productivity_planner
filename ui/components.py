@@ -248,6 +248,24 @@ def toggle_simple_mode():
     else:
         st.session_state["simple_mode"] = False
 
+    # Keep the app on the light theme regardless of mode toggles.
+    st.markdown(
+        """
+        <style>
+        html, body, .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewContainer"] > .main,
+        [data-testid="stAppViewContainer"] > .main > div,
+        section.main,
+        .main,
+        .main .block-container {
+            background: #F7F9FC !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 def simplified_supervisor_view(gs: list[dict]):
     """
@@ -659,7 +677,37 @@ def _apply_mode_styling(mode: str):
     )
     if mode == "Plan":
         st.markdown(
-            "<style>.stApp { background: #FAFBFD !important; }[data-testid=\"stExpander\"] { margin-bottom: 20px !important; }</style>",
+            """
+            <style>
+            html, body, .stApp,
+            [data-testid="stAppViewContainer"],
+            [data-testid="stAppViewContainer"] > .main,
+            [data-testid="stAppViewContainer"] > .main > div,
+            section.main,
+            .main,
+            .main .block-container {
+                background: #FAFBFD !important;
+            }
+            [data-testid="stExpander"] { margin-bottom: 20px !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <style>
+            html, body, .stApp,
+            [data-testid="stAppViewContainer"],
+            [data-testid="stAppViewContainer"] > .main,
+            [data-testid="stAppViewContainer"] > .main > div,
+            section.main,
+            .main,
+            .main .block-container {
+                background: #F7F9FC !important;
+            }
+            </style>
+            """,
             unsafe_allow_html=True,
         )
 
