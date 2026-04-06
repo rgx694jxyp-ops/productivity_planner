@@ -65,15 +65,6 @@ def page_import():
 
     if not require_db(): return
 
-    _entered_from = str(st.session_state.get("_entered_from_page_key", "") or "")
-    if _entered_from and _entered_from != "import":
-        for _k in [
-            "uploaded_sessions", "alloc_rows", "pipeline_done", "mapping",
-            "_import_complete_summary", "confirm_import_preview",
-        ]:
-            st.session_state.pop(_k, None)
-        st.session_state.import_step = 1
-
     step = st.session_state.import_step
 
     # ── Reset button — shown whenever something is in progress ───────────────

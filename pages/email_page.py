@@ -3,7 +3,7 @@ from core.runtime import date, st, init_runtime
 
 init_runtime()
 from pages.employees import _build_archived_productivity
-from pages.productivity import _build_period_report
+from services.productivity_service import _build_period_report
 
 def page_email():
     st.title("📧 Email Setup")

@@ -33,7 +33,7 @@ def run_scheduled_reports_for_tenant(tenant_id: str = "", force_now: bool = Fals
         send_report_email,
     )
     from goals import load_goals
-    from pages.productivity import _build_period_report, _resolve_period_dates
+    from services.productivity_service import _build_period_report, _resolve_period_dates
     from settings import Settings
 
     tid = tenant_id or st.session_state.get("tenant_id", "")
