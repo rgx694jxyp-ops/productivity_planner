@@ -8,6 +8,14 @@ from core.dependencies import (
 )
 from core.navigation import _get_current_plan
 from core.runtime import datetime, json, re, st, time, traceback, init_runtime
+from services.settings_service import (
+    escape_html,
+    format_error_timestamp,
+    format_iso_date_human,
+    get_plan_alternatives,
+    get_plan_constants,
+    summarize_error_counts,
+)
 
 init_runtime()
 
@@ -44,11 +52,7 @@ def page_settings():
                 _pc = {"starter": "#6b7280", "pro": "#2563eb", "business": "#7c3aed"}.get(_plan_raw, "#6b7280")
                 _renew_str = ""
                 if _period_end:
-                    try:
-                        _pe = datetime.fromisoformat(_period_end.replace("Z", "+00:00"))
-                        _renew_str = _pe.strftime("%b %d, %Y")
-                    except Exception:
-                        pass
+                    _renew_str = format_iso_date_human(_period_end)
                 st.markdown(f"""
                 <div style="background:{_pc}12;border:2px solid {_pc};border-radius:10px;
                             padding:14px 20px;margin-bottom:4px;display:flex;
@@ -152,44 +156,9 @@ def page_settings():
                         "You keep current access until then, and additional changes are temporarily locked."
                     )
 
-                _PORD  = ["starter", "pro", "business"]
-                _PINFO = {
-                    "starter":  {"label": "Starter",  "price": "$30/mo", "emp": "Up to 25",  "clr": "#6b7280"},
-                    "pro":      {"label": "Pro",      "price": "$59/mo", "emp": "Up to 100", "clr": "#2563eb"},
-                    "business": {"label": "Business", "price": "$99/mo", "emp": "Unlimited", "clr": "#7c3aed"},
-                }
-                _FEATS = {
-                    "starter":  ["CSV upload & auto-detection", "Dashboard & rankings",
-                                 "Dept-level UPH tracking", "Weekly email reports", "Excel & PDF exports"],
-                    "pro":      ["Everything in Starter", "Goal setting & UPH targets",
-                                 "Employee trend analysis", "Underperformer flagging & alerts",
-                                 "Custom date range reports",
-                                 "Coaching notes per employee"],
-                    "business": ["Everything in Pro", "Unlimited employees"],
-                }
-                # What you GAIN when moving from key[0] → key[1]
-                _GAINS = {
-                    ("starter", "pro"):      ["75 more employee slots (25 → 100)", "Goal setting & UPH targets",
-                                              "Employee trend analysis", "Underperformer alerts",
-                                              "Custom date ranges",
-                                              "Coaching notes per employee"],
-                    ("pro", "business"):     ["Unlimited employees (100 → ∞)"],
-                    ("starter", "business"): ["Unlimited employees", "Goal setting & UPH targets",
-                                              "Employee trend analysis", "Underperformer alerts",
-                                              "Custom date ranges", "Coaching notes per employee"],
-                    ("pro", "starter"):      ["75 employee slots (100 → 25)", "Goal setting & UPH targets",
-                                              "Employee trend analysis", "Underperformer alerts",
-                                              "Custom date ranges",
-                                              "Coaching notes per employee"],
-                    ("business", "pro"):     ["Unlimited employees (capped at 100)"],
-                    ("business", "starter"): ["Unlimited employees", "Goal setting & UPH targets",
-                                              "Employee trend analysis", "Underperformer alerts",
-                                              "Custom date ranges", "Coaching notes per employee"],
-                }
-
-                _rank = {"starter": 1, "pro": 2, "business": 3}
+                _PORD, _PINFO, _GAINS, _rank = get_plan_constants()
                 _cur_rank = _rank.get(_plan_raw, 1)
-                _alternatives = [] if _pending_plan else [p for p in _PORD if p != _plan_raw]
+                _alternatives = get_plan_alternatives(_plan_raw, _pending_plan)
                 if not _alternatives:
                     if not _pending_plan:
                         st.info("No plan alternatives are available right now.")
@@ -291,7 +260,7 @@ def page_settings():
                 _app_origin = st.context.headers.get("Origin", "")
                 _inv_link = f"{_app_origin}/?invite={_inv_code}" if _app_origin else f"Invite code: {_inv_code}"
                 st.markdown("**Invite link — share this with anyone you want to add to your team:**")
-                _safe_link = _inv_link.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                _safe_link = escape_html(_inv_link)
                 st.markdown(
                     f'<div style="background:#1e1e2e;border-radius:6px;padding:10px 14px;'
                     f'font-family:monospace;font-size:13px;color:#ffffff;word-break:break-all;">'
@@ -569,9 +538,7 @@ def page_settings():
                 st.markdown(f"**{len(errors)}** error(s) found")
 
                 # Summary badges
-                _err_count = sum(1 for e in errors if e.get("severity") == "error")
-                _warn_count = sum(1 for e in errors if e.get("severity") == "warning")
-                _info_count = sum(1 for e in errors if e.get("severity") == "info")
+                _err_count, _warn_count, _info_count = summarize_error_counts(errors)
                 bc1, bc2, bc3 = st.columns(3)
                 bc1.metric("Errors", _err_count)
                 bc2.metric("Warnings", _warn_count)
@@ -580,24 +547,6 @@ def page_settings():
                 st.divider()
 
                 _SEV_ICON = {"error": "🔴", "warning": "🟡", "info": "🔵"}
-
-                def _fmt_ts(raw_ts: str) -> str:
-                    """Convert UTC ISO timestamp to browser-local time via JS offset stored in session."""
-                    try:
-                        from datetime import timezone as _tz, timedelta as _td
-                        import datetime as _dt_mod
-                        raw = str(raw_ts or "").replace("Z", "+00:00")
-                        if not raw:
-                            return ""
-                        _utc_dt = _dt_mod.datetime.fromisoformat(raw)
-                        if _utc_dt.tzinfo is None:
-                            _utc_dt = _utc_dt.replace(tzinfo=_tz.utc)
-                        # Use tz offset (minutes) stored from JS component, if available
-                        _tz_offset_min = int(st.session_state.get("_tz_offset_min", 0))
-                        _local_dt = _utc_dt.astimezone(_tz(offset=_td(minutes=-_tz_offset_min)))
-                        return _local_dt.strftime("%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        return str(raw_ts or "")[:19].replace("T", " ")
 
                 # Capture browser UTC offset once via query params (survives rerun)
                 _tz_qp = st.query_params.get("_tz", None)
@@ -614,7 +563,7 @@ def page_settings():
                     icon = _SEV_ICON.get(sev, "⚪")
                     cat = err.get("category", "unknown")
                     msg = err.get("message", "")
-                    ts = _fmt_ts(err.get("created_at", ""))
+                    ts = format_error_timestamp(err.get("created_at", ""), st.session_state.get("_tz_offset_min", 0))
                     user = err.get("user_email", "")
 
                     with st.expander(f"{icon} **[{cat}]** {msg[:120]}{'…' if len(msg) > 120 else ''} — {ts}"):
