@@ -9,6 +9,12 @@ from core.dependencies import (
 from core.navigation import _get_current_plan, _plan_gate
 from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback
 from domain.risk import _calc_risk_level
+from cache import (
+    raw_cached_active_flags as _raw_cached_active_flags,
+    raw_cached_all_coaching_notes as _raw_cached_all_coaching_notes,
+    raw_cached_coaching_notes_for as _raw_cached_coaching_notes_for,
+    raw_cached_targets as _raw_cached_targets,
+)
 try:
     from pages.common import _normalize_label_text
 except Exception:
@@ -84,7 +90,6 @@ def page_productivity():
     chosen_prod = st.radio(
         "Productivity views",
         PROD_OPTS,
-        index=PROD_OPTS.index(st.session_state.prod_view),
         horizontal=True,
         label_visibility="collapsed",
         key="prod_view",

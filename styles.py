@@ -8,6 +8,7 @@ def apply_global_styles():
 <style>
   /* Global font */
   html, body, [class*="css"], .stApp { font-family: 'Inter', sans-serif !important; }
+  :root { color-scheme: light !important; }
 
   /* Hide Streamlit chrome */
   #MainMenu, footer,
@@ -51,6 +52,9 @@ def apply_global_styles():
   html, body { background: #F7F9FC !important; }
   .stApp { background: #F7F9FC !important; }
   [data-testid="stAppViewContainer"] { background: #F7F9FC !important; }
+  [data-testid="stAppViewContainer"] > .main { background: #F7F9FC !important; }
+  [data-testid="stAppViewContainer"] > .main > div { background: #F7F9FC !important; }
+  section.main { background: #F7F9FC !important; }
   .main { background: #F7F9FC !important; }
   .main .block-container { padding-top: 1.8rem; padding-bottom: 3rem; max-width: 1200px; background: #F7F9FC !important; }
 

@@ -10,6 +10,12 @@ from core.dependencies import (
 from core.navigation import _get_current_plan
 from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback
 from services.coaching_service import find_coaching_impact
+from database import add_coaching_note, delete_coaching_note
+from cache import (
+    raw_cached_active_flags as _raw_cached_active_flags,
+    raw_cached_all_coaching_notes as _raw_cached_all_coaching_notes,
+    raw_cached_coaching_notes_for as _raw_cached_coaching_notes_for,
+)
 from ui.components import (
     _render_breadcrumb,
     _render_session_context_bar,
@@ -545,6 +551,21 @@ def _emp_coaching():
             note_text  = st.text_area("Add a coaching note", height=120, key="cn_note",
                                        value=st.session_state.cn_note_val,
                                        placeholder="What did you discuss? What's the plan?")
+            _issue_options = [
+                "Equipment issue",
+                "Staffing",
+                "Individual performance",
+                "Training gap",
+                "Process issue",
+                "Quality issue",
+                "Attendance",
+            ]
+            selected_issues = st.multiselect(
+                "Common issues observed",
+                _issue_options,
+                key="cn_common_issues",
+                help="Tag the likely cause so we can track patterns over time.",
+            )
             nc1, nc2 = st.columns([2, 3])
             created_by = nc2.text_input("Your name (optional)", key="cn_by",
                                          value=st.session_state.cn_by_val,
@@ -553,7 +574,11 @@ def _emp_coaching():
             _sv1, _sv2 = st.columns(2)
             if _sv1.button("💾 Save note", type="primary", use_container_width=True):
                 if note_text.strip():
-                    add_coaching_note(emp_id, note_text.strip(), created_by.strip())
+                    _issue_prefix = ""
+                    if selected_issues:
+                        _issue_prefix = "[Issues: " + ", ".join(selected_issues) + "]\n"
+                    _final_note = f"{_issue_prefix}{note_text.strip()}"
+                    add_coaching_note(emp_id, _final_note, created_by.strip())
                     _raw_cached_coaching_notes_for.clear()
                     _raw_cached_all_coaching_notes.clear()
                     _preview = note_text.strip()[:80]
@@ -561,6 +586,7 @@ def _emp_coaching():
                     st.session_state[_fu_key] = True   # prompt follow-up scheduler
                     st.session_state.cn_note_val = ""
                     st.session_state.cn_by_val   = ""
+                    st.session_state.cn_common_issues = []
                     # Track coaching session progress
                     st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
                     st.session_state["_last_coached_emp_id"] = emp_id

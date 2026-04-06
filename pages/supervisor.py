@@ -32,7 +32,7 @@ from ui.coaching_components import (
 def page_supervisor():
     """One-screen supervisor view: risks, trends, context, actions. Daily-use focused."""
     st.title("👔 Supervisor View")
-    st.caption("One-screen daily overview: team health, top risks, trends, and next steps.")
+    st.caption("One-screen daily overview: team health, top risks, and next steps.")
 
     gs, history = load_goal_status_history("Loading supervisor data…")
     if gs is None:
@@ -57,7 +57,6 @@ def page_supervisor():
             _lines.append(f"✔ You coached {_coached_yesterday} {_pl} last session")
         if _below > 0:
             _lines.append(f"⚠ {_below} employee{'s' if _below != 1 else ''} still below goal ({_high} high-risk)")
-            _lines.append("→ Recommended action below — start there")
         else:
             _lines.append("✔ All employees on target — great shape")
         _body = "<br>".join(f"<span style='font-size:13px;color:#1B5E20;'>{l}</span>" for l in _lines)
