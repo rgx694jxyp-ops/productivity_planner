@@ -19,7 +19,9 @@ from datetime import datetime, date, timedelta
 import streamlit as st
 
 from core.dependencies import _cached_employees, require_db
-from core.runtime import _html_mod
+from core.runtime import _html_mod, init_runtime
+
+init_runtime()
 
 # ── Constant ──────────────────────────────────────────────────────────────────
 _CHECKPOINT_INTERVAL_HRS = 2   # generate a checkpoint every N hours

@@ -1,4 +1,6 @@
-from core.runtime import date, pd, st
+from core.runtime import date, pd, st, init_runtime
+
+init_runtime()
 from domain.risk import _get_all_risk_levels
 from pages.common import load_goal_status_history
 from ui.components import (

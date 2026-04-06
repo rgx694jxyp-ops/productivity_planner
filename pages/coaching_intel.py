@@ -15,7 +15,9 @@ from datetime import date, timedelta
 import streamlit as st
 
 from core.dependencies import require_db
-from core.runtime import _html_mod
+from core.runtime import _html_mod, init_runtime
+
+init_runtime()
 
 # ── Tag taxonomy ──────────────────────────────────────────────────────────────
 ISSUE_TYPES    = ["", "speed", "accuracy", "process", "attendance", "training"]

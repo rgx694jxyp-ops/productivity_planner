@@ -7,7 +7,9 @@ from core.dependencies import (
     _log_app_error,
 )
 from core.navigation import _get_current_plan, _plan_gate
-from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback
+from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback, init_runtime
+
+init_runtime()
 from domain.risk import _calc_risk_level
 from cache import (
     raw_cached_active_flags as _raw_cached_active_flags,

@@ -6,7 +6,9 @@ from core.dependencies import (
     require_db,
 )
 from core.navigation import _get_current_plan
-from core.runtime import _html_mod, date, datetime, io, math, pd, st, tempfile, time, traceback
+from core.runtime import _html_mod, date, datetime, io, math, pd, st, tempfile, time, traceback, init_runtime
+
+init_runtime()
 from pages.common import get_user_timezone_now
 from ui.components import diagnose_upload, show_diagnosis, show_manual_entry_form
 import hashlib

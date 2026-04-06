@@ -7,7 +7,9 @@ from core.dependencies import (
     _tenant_log_path,
 )
 from core.navigation import _get_current_plan
-from core.runtime import datetime, json, re, st, time, traceback
+from core.runtime import datetime, json, re, st, time, traceback, init_runtime
+
+init_runtime()
 
 def page_settings():
     st.title("⚙️ Settings")

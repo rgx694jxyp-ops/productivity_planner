@@ -3,7 +3,9 @@ from core.dependencies import (
     _cached_coaching_notes_for,
     _cached_employees,
 )
-from core.runtime import _html_mod, date, st
+from core.runtime import _html_mod, date, st, init_runtime
+
+init_runtime()
 from domain.risk import _get_all_risk_levels
 from pages.common import load_goal_status_history
 from services.coaching_service import summarize_coaching_activity
