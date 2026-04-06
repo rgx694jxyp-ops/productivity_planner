@@ -77,6 +77,48 @@ function resolvePendingChangeAt(sub: any): string | null {
   return getPeriodEnd(sub);
 }
 
+// Resolve a pending plan change from a Stripe subscription schedule.
+// Stripe portal-initiated downgrades attach a schedule to the subscription
+// rather than setting pending_update, so we must read the schedule phases.
+async function resolvePendingPlanFromSchedule(
+  sub: any
+): Promise<{ plan: string; changeAt: string | null } | null> {
+  const scheduleId = typeof sub.schedule === "string" ? sub.schedule : null;
+  if (!scheduleId) return null;
+  try {
+    const resp = await fetch(
+      `https://api.stripe.com/v1/subscription_schedules/${scheduleId}`,
+      { headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` } }
+    );
+    if (!resp.ok) return null;
+    const schedule = await resp.json();
+    if (schedule.status !== "active") return null;
+    const phases: any[] = schedule.phases || [];
+    if (phases.length < 2) return null;
+    // Find the phase that contains now, then take the next phase.
+    const now = Math.floor(Date.now() / 1000);
+    const currentIdx = phases.reduce(
+      (best: number, p: any, i: number) =>
+        (p.start_date || 0) <= now ? i : best,
+      -1
+    );
+    if (currentIdx === -1 || currentIdx >= phases.length - 1) return null;
+    const nextPhase = phases[currentIdx + 1];
+    const rawPrice = nextPhase.items?.[0]?.price;
+    const resolvedPriceId =
+      typeof rawPrice === "string" ? rawPrice : rawPrice?.id ?? null;
+    const changeAt = nextPhase.start_date
+      ? new Date(Number(nextPhase.start_date) * 1000).toISOString()
+      : null;
+    if (!resolvedPriceId) return null;
+    const plan = PRICE_PLAN_MAP[resolvedPriceId] || "";
+    if (!plan) return null;
+    return { plan, changeAt };
+  } catch {
+    return null;
+  }
+}
+
 async function verifyStripeSignature(
   body: string,
   signature: string
@@ -240,7 +282,7 @@ Deno.serve(async (req) => {
           stripe_customer_id: customerId,
           stripe_subscription_id: subscriptionId,
           plan: plan,
-          status: "active",
+          status: sub.status || "active",
           employee_limit: limit,
           current_period_start: getPeriodStart(sub),
           current_period_end: getPeriodEnd(sub),
@@ -332,6 +374,19 @@ Deno.serve(async (req) => {
           if (pendingPlan && pendingChangeAt && !hasPendingChangeElapsed(pendingChangeAt)) {
             if (existing?.plan) plan = existing.plan;
             if (typeof existing?.employee_limit === "number") limit = existing.employee_limit;
+          }
+        } else {
+          // No pending_update and no metadata flag — check for a subscription schedule.
+          // Stripe portal-initiated downgrades attach a schedule instead of pending_update.
+          const schedulePending = await resolvePendingPlanFromSchedule(sub);
+          if (schedulePending?.plan) {
+            pendingPlan = schedulePending.plan;
+            pendingChangeAt = schedulePending.changeAt;
+            // Preserve current plan access until the scheduled change date.
+            if (!hasPendingChangeElapsed(pendingChangeAt)) {
+              if (existing?.plan) plan = existing.plan;
+              if (typeof existing?.employee_limit === "number") limit = existing.employee_limit;
+            }
           }
         }
 

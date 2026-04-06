@@ -1440,12 +1440,25 @@ def has_active_subscription(tenant_id: str = "") -> bool:
     if not sub:
         return False
     status = sub.get("status")
+    period_end = sub.get("current_period_end")
+    # past_due: keep access for 48 h after period end so the user has time to fix
+    # their payment before being hard-locked out. The subscription page renders
+    # a payment-update prompt for this status.
+    if status == "past_due":
+        if period_end:
+            try:
+                from datetime import timezone, timedelta
+                pe = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) <= (pe + timedelta(hours=48)):
+                    return True
+            except Exception:
+                pass
+        return False
     if status not in ("active", "trialing"):
         return False
     # Safety net: if the DB still says active but the period ended >48 h ago,
     # treat as expired. The webhook should have updated status already, but
     # this prevents stale access if webhook delivery fails.
-    period_end = sub.get("current_period_end")
     if period_end:
         try:
             from datetime import timezone, timedelta
@@ -1460,9 +1473,14 @@ def has_active_subscription(tenant_id: str = "") -> bool:
 def get_employee_limit(tenant_id: str = "") -> int:
     """Return the employee limit for the current plan. 0 if no sub, -1 if unlimited."""
     sub = get_subscription(tenant_id)
-    if not sub or sub.get("status") != "active":
+    if not sub or sub.get("status") not in ("active", "trialing"):
         return 0
-    return sub.get("employee_limit", 0)
+    limit = sub.get("employee_limit")
+    if limit is None or limit == 0:
+        # DB value is missing or was never written correctly — derive from plan name.
+        plan = str(sub.get("plan") or "").lower()
+        limit = PLAN_LIMITS.get(plan, 25)
+    return limit
 
 
 def get_employee_count(tenant_id: str = "") -> int:

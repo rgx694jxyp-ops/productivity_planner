@@ -140,6 +140,16 @@ def verify_checkout_and_activate():
         )
         stripe_sub = subs_sorted[0]
         _debug.append(f"stripe status picked: {stripe_sub.get('status')}")
+
+        # Only grant access when Stripe shows an active/trialing subscription.
+        # Prevents stale canceled/incomplete subscriptions from unlocking the app.
+        stripe_status = str(stripe_sub.get("status") or "").lower().strip()
+        if stripe_status not in ("active", "trialing"):
+            _debug.append(f"subscription not active/trialing: status={stripe_status or 'unknown'}")
+            st.session_state["_sub_check_result"] = False
+            st.session_state["_sub_check_ts"] = time.time()
+            st.session_state["_verify_debug"] = _debug
+            return False
     except Exception as e:
         _debug.append(f"stripe API err: {e}")
         st.session_state["_verify_debug"] = _debug
