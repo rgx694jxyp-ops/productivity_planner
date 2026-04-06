@@ -75,9 +75,13 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
                 if live.get("has_pending_update") and live_pending:
                     pending_plan = live_pending
                     try:
-                        live_period_end = live.get("current_period_end")
-                        if live_period_end:
-                            pending_date = datetime.fromtimestamp(int(live_period_end)).strftime("%b %d, %Y")
+                        _pending_ts = live.get("pending_change_at_ts")
+                        if _pending_ts:
+                            pending_date = datetime.fromtimestamp(int(_pending_ts)).strftime("%b %d, %Y")
+                        else:
+                            live_period_end = live.get("current_period_end")
+                            if live_period_end:
+                                pending_date = datetime.fromtimestamp(int(live_period_end)).strftime("%b %d, %Y")
                     except Exception:
                         pass
             except Exception:

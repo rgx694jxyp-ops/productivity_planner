@@ -1876,6 +1876,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
             "expand[]": [
                 "items.data.price",
                 "pending_update.subscription_items",
+                "schedule.phases.items.price",
                 "latest_invoice.payment_intent",
                 "latest_invoice.charge",
             ]
@@ -1908,6 +1909,40 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
         pending_price_id = pending_price or ""
     pending_plan = _resolve_plan_from_price_id(pending_price_id) if pending_price_id else ""
 
+    # Stripe may represent end-of-period plan changes via subscription schedule
+    # instead of pending_update depending on portal/account configuration.
+    schedule_obj = sub_obj.get("schedule") or {}
+    schedule_pending_plan = ""
+    schedule_change_at_ts = None
+    try:
+        if isinstance(schedule_obj, dict):
+            phases = schedule_obj.get("phases") or []
+            if phases:
+                now_ts = int(time.time())
+                next_phase = None
+                for ph in phases:
+                    start_ts = ph.get("start_date")
+                    if start_ts and int(start_ts) > now_ts:
+                        next_phase = ph
+                        break
+                if next_phase is not None:
+                    phase_items = next_phase.get("items") or []
+                    if phase_items:
+                        phase_price = phase_items[0].get("price")
+                        if isinstance(phase_price, dict):
+                            phase_price_id = phase_price.get("id") or ""
+                        else:
+                            phase_price_id = str(phase_price or "")
+                        if phase_price_id:
+                            schedule_pending_plan = _resolve_plan_from_price_id(phase_price_id)
+                            schedule_change_at_ts = next_phase.get("start_date")
+    except Exception:
+        schedule_pending_plan = ""
+        schedule_change_at_ts = None
+
+    if not pending_plan and schedule_pending_plan:
+        pending_plan = schedule_pending_plan
+
     latest_invoice = sub_obj.get("latest_invoice") or {}
     payment_intent = latest_invoice.get("payment_intent") or {}
     charge = latest_invoice.get("charge") or {}
@@ -1937,9 +1972,11 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
         "db_current_period_end": row.get("current_period_end") or "",
         "db_pending_plan": row.get("pending_plan") or "",
         "db_pending_change_at": row.get("pending_change_at") or "",
-        "has_pending_update": bool(pending_update),
+        "has_pending_update": bool(pending_update) or bool(schedule_pending_plan),
         "pending_plan": pending_plan,
         "pending_price_id": pending_price_id,
+        "pending_change_at_ts": schedule_change_at_ts,
+        "pending_change_source": "pending_update" if pending_update else ("schedule" if schedule_pending_plan else ""),
         "latest_invoice_id": latest_invoice.get("id") or "",
         "latest_invoice_status": latest_invoice.get("status") or "",
         "latest_payment_intent_status": payment_intent.get("status") or "",
