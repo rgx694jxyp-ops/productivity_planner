@@ -140,8 +140,18 @@ def page_settings():
                 st.caption("Upgrade or downgrade your plan. Upgrades apply immediately; downgrades apply at the end of your billing period.")
 
                 _pending_plan = (sub.get("pending_plan") or "").strip().lower()
+                _pending_change_at = sub.get("pending_change_at") or ""
+                _pending_date = "period end"
+                if _pending_change_at:
+                    try:
+                        _pending_dt = datetime.fromisoformat(_pending_change_at.replace("Z", "+00:00"))
+                        _pending_date = _pending_dt.strftime("%b %d, %Y")
+                    except Exception:
+                        _pending_date = _renew_str or "period end"
+                elif _renew_str:
+                    _pending_date = _renew_str
                 if _pending_plan:
-                    _pending_date = _renew_str or "period end"
+                    st.info(f"Your plan will change to {_pending_plan.capitalize()} on {_pending_date}.")
                     st.warning(
                         f"A pending downgrade to {_pending_plan.capitalize()} is already scheduled for {_pending_date}. "
                         "You keep current access until then, and additional changes are temporarily locked."
@@ -184,9 +194,10 @@ def page_settings():
 
                 _rank = {"starter": 1, "pro": 2, "business": 3}
                 _cur_rank = _rank.get(_plan_raw, 1)
-                _alternatives = [p for p in _PORD if p != _plan_raw]
+                _alternatives = [] if _pending_plan else [p for p in _PORD if p != _plan_raw]
                 if not _alternatives:
-                    st.info("No plan alternatives are available right now.")
+                    if not _pending_plan:
+                        st.info("No plan alternatives are available right now.")
                 _pcols = st.columns(len(_alternatives)) if _alternatives else []
                 for _ci, _pk in enumerate(_alternatives):
                     _pi    = _PINFO[_pk]

@@ -1012,6 +1012,93 @@ def suggest_employees_for_order(order_id: str,
 
 # ── Export helpers ────────────────────────────────────────────────────────────
 
+# ── Shift Plans ──────────────────────────────────────────────────────────────
+
+def save_shift_plan(plan_date: str, shift_start: str, shift_end: str,
+                    departments: list, task_baselines: dict, notes: str = "") -> dict:
+    """Upsert a daily shift plan for today."""
+    sb = get_client()
+    tid = get_tenant_id()
+    payload = {
+        "tenant_id":      tid,
+        "plan_date":      plan_date,
+        "shift_start":    shift_start,
+        "shift_end":      shift_end,
+        "departments":    departments,
+        "task_baselines": task_baselines,
+        "notes":          notes,
+        "updated_at":     datetime.utcnow().isoformat() + "Z",
+    }
+    r = sb.table("shift_plans").upsert(
+        payload, on_conflict="tenant_id,plan_date"
+    ).execute()
+    return r.data[0] if r.data else payload
+
+
+def get_shift_plan(plan_date: str) -> dict | None:
+    """Load a single day's shift plan."""
+    sb = get_client()
+    r = _tq(sb.table("shift_plans").select("*").eq("plan_date", plan_date)).execute()
+    return r.data[0] if r.data else None
+
+
+def save_shift_checkpoint(plan_date: str, department: str,
+                           checkpoint: str, expected: float, actual: float) -> dict:
+    """Record an actual vs expected checkpoint reading."""
+    sb = get_client()
+    r = sb.table("shift_checkpoints").insert({
+        "tenant_id":  get_tenant_id(),
+        "plan_date":  plan_date,
+        "department": department,
+        "checkpoint": checkpoint,
+        "expected":   expected,
+        "actual":     actual,
+    }).execute()
+    return r.data[0] if r.data else {}
+
+
+def get_shift_checkpoints(plan_date: str) -> list[dict]:
+    """All checkpoint readings for a given date."""
+    sb = get_client()
+    r = _tq(sb.table("shift_checkpoints").select("*").eq(
+        "plan_date", plan_date)).order("recorded_at").execute()
+    return r.data or []
+
+
+# ── Coaching Note Tag helpers ─────────────────────────────────────────────────
+
+def get_all_coaching_notes(days: int = 30) -> list[dict]:
+    """All non-archived coaching notes for this tenant within the last N days."""
+    from datetime import timedelta
+    sb = get_client()
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    r = _tq(sb.table("coaching_notes").select(
+        "id, emp_id, note, created_by, created_at, issue_type, action_taken, tone, uph_before, uph_after"
+    ).eq("archived", False).gte("created_at", cutoff)).order("created_at", desc=True).execute()
+    return r.data or []
+
+
+def update_coaching_note_tags(note_id: str, issue_type: str = "",
+                               action_taken: str = "", tone: str = "",
+                               uph_before: float | None = None,
+                               uph_after: float | None = None):
+    """Patch tag columns on an existing coaching note (non-destructive)."""
+    sb = get_client()
+    payload: dict = {}
+    if issue_type:
+        payload["issue_type"] = issue_type
+    if action_taken:
+        payload["action_taken"] = action_taken
+    if tone:
+        payload["tone"] = tone
+    if uph_before is not None:
+        payload["uph_before"] = uph_before
+    if uph_after is not None:
+        payload["uph_after"] = uph_after
+    if payload:
+        _tq(sb.table("coaching_notes").update(payload).eq("id", note_id)).execute()
+
+
 def export_order_to_dict(order_id: str) -> dict:
     """Return a complete order record with all submissions for Excel export."""
     order = get_order(order_id)
@@ -1542,11 +1629,21 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
         "items[0][id]": sub_item_id,
         "items[0][price]": new_price_id,
     }
+    _period_end_iso = None
+    _period_end_ts = sub_obj.get("current_period_end") or items[0].get("current_period_end")
+    try:
+        if _period_end_ts:
+            _period_end_iso = datetime.utcfromtimestamp(int(_period_end_ts)).isoformat() + "Z"
+    except Exception:
+        _period_end_iso = None
+
     if is_upgrade:
         # Immediate prorated charge for upgrades.
         _request_data["proration_behavior"] = "create_prorations"
     else:
         # Downgrade billing changes now, but app access is deferred via pending_plan.
+        if not _period_end_iso:
+            return False, "Could not determine the current billing period end for this downgrade."
         _request_data["proration_behavior"] = "none"
         _request_data["billing_cycle_anchor"] = "unchanged"
         _request_data["metadata[pending_plan]"] = _target_plan
@@ -1572,7 +1669,7 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
                 sb.table("subscriptions").update(
                     {
                         "pending_plan": _target_plan,
-                        "pending_change_at": datetime.utcnow().isoformat() + "Z",
+                        "pending_change_at": _period_end_iso,
                         "updated_at": datetime.utcnow().isoformat() + "Z",
                     }
                 ).eq("tenant_id", tid).execute()

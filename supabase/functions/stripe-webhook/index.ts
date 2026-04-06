@@ -141,6 +141,12 @@ function getPeriodStart(sub: any): string | null {
   return new Date(Number(ts) * 1000).toISOString();
 }
 
+function hasPendingChangeElapsed(pendingChangeAt: string | null): boolean {
+  if (!pendingChangeAt) return false;
+  const pendingTs = Date.parse(pendingChangeAt);
+  return Number.isFinite(pendingTs) && Date.now() >= pendingTs;
+}
+
 // Log a Stripe event to subscription_events for debugging.
 // Wrapped in try/catch so a missing table never breaks the main webhook flow.
 async function logSubscriptionEvent(
@@ -285,61 +291,29 @@ Deno.serve(async (req) => {
         }
 
         // If Stripe has a pending update (common for end-of-period downgrades),
-        // keep current access until the cycle actually flips.
+        // keep current access until pending_change_at passes.
         const hasPendingUpdate = !!sub.pending_update;
         const pendingPlanFromStripe = resolvePendingPlan(sub);
-        let pendingPlan: string | null = hasPendingUpdate ? (pendingPlanFromStripe || null) : null;
-        let pendingChangeAt: string | null = hasPendingUpdate ? new Date().toISOString() : null;
+        let pendingPlan: string | null = null;
+        let pendingChangeAt: string | null = null;
 
-        const nextPeriodStart = getPeriodStart(sub);
-        if (hasPendingUpdate) {
-          const { data: curRows } = await supabase
-            .from("subscriptions")
-            .select("plan, employee_limit, pending_plan, pending_change_at, current_period_start")
-            .eq("tenant_id", tenantId)
-            .limit(1);
-          if (curRows?.length) {
-            const currentPlan = curRows[0].plan;
-            const currentLimit = curRows[0].employee_limit;
-            const currentPendingPlan = curRows[0].pending_plan;
-            const currentPendingChangeAt = curRows[0].pending_change_at;
-            if (currentPlan) plan = currentPlan;
-            if (typeof currentLimit === "number") limit = currentLimit;
-            if (!pendingPlan && currentPendingPlan) pendingPlan = currentPendingPlan;
-            if (!pendingChangeAt && currentPendingChangeAt) pendingChangeAt = currentPendingChangeAt;
-          }
-        } else {
-          // App can intentionally defer downgrade access until renewal while Stripe already
-          // has the lower price configured. Preserve current DB plan until period rollover.
-          const { data: curRows } = await supabase
-            .from("subscriptions")
-            .select("plan, employee_limit, pending_plan, pending_change_at, current_period_start")
-            .eq("tenant_id", tenantId)
-            .limit(1);
-          if (curRows?.length) {
-            const currentPlan = curRows[0].plan;
-            const currentLimit = curRows[0].employee_limit;
-            const currentPendingPlan = curRows[0].pending_plan;
-            const currentPendingChangeAt = curRows[0].pending_change_at;
-            const currentPeriodStart = curRows[0].current_period_start;
+        const { data: curRows } = await supabase
+          .from("subscriptions")
+          .select("plan, employee_limit, pending_plan, pending_change_at")
+          .eq("tenant_id", tenantId)
+          .limit(1);
+        const existing = curRows?.[0] || null;
+        const existingPendingPlan = existing?.pending_plan || null;
+        const existingPendingChangeAt = existing?.pending_change_at || null;
 
-            let hasRolledPeriod = false;
-            if (currentPeriodStart && nextPeriodStart) {
-              const prevTs = Date.parse(currentPeriodStart);
-              const nextTs = Date.parse(nextPeriodStart);
-              hasRolledPeriod = Number.isFinite(prevTs) && Number.isFinite(nextTs) && nextTs > prevTs;
-            }
-
-            if (currentPendingPlan && !hasRolledPeriod) {
-              if (currentPlan) plan = currentPlan;
-              if (typeof currentLimit === "number") limit = currentLimit;
-              pendingPlan = currentPendingPlan;
-              pendingChangeAt = currentPendingChangeAt || new Date().toISOString();
-            } else {
-              pendingPlan = null;
-              pendingChangeAt = null;
-            }
-          }
+        if (existingPendingPlan && !hasPendingChangeElapsed(existingPendingChangeAt)) {
+          if (existing?.plan) plan = existing.plan;
+          if (typeof existing?.employee_limit === "number") limit = existing.employee_limit;
+          pendingPlan = existingPendingPlan;
+          pendingChangeAt = existingPendingChangeAt;
+        } else if (hasPendingUpdate) {
+          pendingPlan = pendingPlanFromStripe || existingPendingPlan || null;
+          pendingChangeAt = getPeriodEnd(sub) || existingPendingChangeAt;
         }
 
         const upsertRow: Record<string, unknown> = {

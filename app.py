@@ -705,6 +705,9 @@ def render_sidebar() -> str:
             ("import", "📁  Import Data"),
             ("employees", "👥  Employees"),
             ("productivity", "📈  Productivity"),
+            ("shift_plan", "📋  Shift Plan"),
+            ("coaching_intel", "🧠  Coaching Intel"),
+            ("cost_impact", "💰  Cost Impact"),
             ("email", "📧  Email Setup"),
         ]
         nav_items.append(("settings", "⚙️  Settings"))
@@ -726,6 +729,12 @@ def render_sidebar() -> str:
                 st.session_state["_current_page_key"] = "employees"
             elif "productivity" in goto:
                 st.session_state["_current_page_key"] = "productivity"
+            elif "shift" in goto:
+                st.session_state["_current_page_key"] = "shift_plan"
+            elif "coach" in goto or "intel" in goto:
+                st.session_state["_current_page_key"] = "coaching_intel"
+            elif "cost" in goto or "impact" in goto:
+                st.session_state["_current_page_key"] = "cost_impact"
             elif "email" in goto:
                 st.session_state["_current_page_key"] = "email"
             elif "setting" in goto:
@@ -1356,12 +1365,18 @@ def main():
     _prev_page = str(st.session_state.get("_last_rendered_page_key", "") or "")
     st.session_state["_entered_from_page_key"] = _prev_page
     st.session_state["_last_rendered_page_key"] = page
+    from pages.shift_plan import page_shift_plan
+    from pages.coaching_intel import page_coaching_intel
+    from pages.cost_impact import page_cost_impact
     handlers = {
         "supervisor": page_supervisor,
         "dashboard": page_dashboard,
         "import": page_import,
         "employees": page_employees,
         "productivity": page_productivity,
+        "shift_plan": page_shift_plan,
+        "coaching_intel": page_coaching_intel,
+        "cost_impact": page_cost_impact,
         "email": page_email,
         "settings": page_settings,
     }
