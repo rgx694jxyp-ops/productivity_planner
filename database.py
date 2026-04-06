@@ -1873,6 +1873,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
     # subscription ids masking pending updates.
     sub_obj = None
     stripe_sub_id = stripe_sub_id_db
+    debug_candidates = []
     try:
         if stripe_cid:
             list_resp = requests.get(
@@ -1893,6 +1894,16 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
             if list_resp.status_code == 200:
                 subs = list_resp.json().get("data", []) or []
                 if subs:
+                    debug_candidates = [
+                        {
+                            "id": s.get("id") or "",
+                            "status": s.get("status") or "",
+                            "created": s.get("created") or 0,
+                            "cancel_at_period_end": bool(s.get("cancel_at_period_end")),
+                            "has_pending_update": bool(s.get("pending_update")),
+                        }
+                        for s in subs[:10]
+                    ]
                     preferred = ["active", "trialing", "past_due", "unpaid", "incomplete"]
                     subs_sorted = sorted(
                         subs,
@@ -2033,6 +2044,8 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
         "tenant_id": tid,
         "stripe_customer_id": stripe_cid,
         "stripe_subscription_id": stripe_sub_id,
+        "stripe_subscription_id_db": stripe_sub_id_db,
+        "debug_subscription_candidates": debug_candidates,
         "status": sub_obj.get("status") or row.get("status") or "",
         "current_plan": current_plan,
         "current_price_id": current_price_id,

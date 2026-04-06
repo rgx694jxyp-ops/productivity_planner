@@ -144,6 +144,21 @@ def page_settings():
                             f"has_pending={bool(_live.get('has_pending_update'))} · "
                             f"pending_plan={_live.get('pending_plan','') or 'none'}"
                         )
+                        st.caption(
+                            "Live sub debug: "
+                            f"chosen={_live.get('stripe_subscription_id','') or 'none'} · "
+                            f"db={_live.get('stripe_subscription_id_db','') or 'none'}"
+                        )
+                        _cand = _live.get("debug_subscription_candidates") or []
+                        if _cand:
+                            st.caption("Stripe candidate subscriptions (id/status/cancel_at_period_end/has_pending_update):")
+                            st.code(
+                                "\n".join(
+                                    f"{c.get('id','')} | {c.get('status','')} | cancel_at_period_end={c.get('cancel_at_period_end')} | has_pending_update={c.get('has_pending_update')}"
+                                    for c in _cand
+                                ),
+                                language=None,
+                            )
 
                         if _pending_plan:
                             st.success(
