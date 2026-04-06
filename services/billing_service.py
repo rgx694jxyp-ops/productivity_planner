@@ -58,6 +58,8 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
         pending_plan = str(sub.get("pending_plan") or "").strip().lower()
         pending_change_at = sub.get("pending_change_at") or ""
         pending_date = "period end"
+        pending_cancel = bool(sub.get("cancel_at_period_end"))
+        pending_kind = "cancel" if pending_cancel else ""
         if pending_change_at:
             _fmt = format_iso_date_human(pending_change_at)
             pending_date = _fmt or renew_str or "period end"
@@ -74,6 +76,7 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
                 live_pending = str(live.get("pending_plan") or "").strip().lower()
                 if live.get("has_pending_update") and live_pending:
                     pending_plan = live_pending
+                    pending_kind = "plan_change"
                     try:
                         _pending_ts = live.get("pending_change_at_ts")
                         if _pending_ts:
@@ -84,8 +87,14 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
                                 pending_date = datetime.fromtimestamp(int(live_period_end)).strftime("%b %d, %Y")
                     except Exception:
                         pass
+                elif bool(live.get("cancel_at_period_end")):
+                    pending_cancel = True
+                    pending_kind = "cancel"
             except Exception:
                 pass
+
+        if pending_plan and not pending_kind:
+            pending_kind = "plan_change"
 
         plan_order, plan_info, gains, rank = get_plan_constants()
         alternatives = get_plan_alternatives(plan_raw, pending_plan)
@@ -108,6 +117,8 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
                 "price_map": price_map,
                 "pending_plan": pending_plan,
                 "pending_date": pending_date,
+                "pending_cancel": pending_cancel,
+                "pending_kind": pending_kind,
                 "plan_order": plan_order,
                 "plan_info": plan_info,
                 "gains": gains,

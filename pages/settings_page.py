@@ -49,6 +49,7 @@ def page_settings():
                 _renew_str = _bill_data.get("renew_str", "")
                 _pending_plan = _bill_data.get("pending_plan", "")
                 _pending_date = _bill_data.get("pending_date", "period end")
+                _pending_cancel = bool(_bill_data.get("pending_cancel", False))
 
                 _pc = {"starter": "#6b7280", "pro": "#2563eb", "business": "#7c3aed"}.get(_plan_raw, "#6b7280")
                 st.markdown(
@@ -78,6 +79,14 @@ def page_settings():
                         f"<strong style='color:#9A3412;'>Pending billing change:</strong> "
                         f"<span style='color:#7C2D12;'>Plan changes to <strong>{_pending_plan.capitalize()}</strong> on <strong>{_pending_date}</strong>."
                         f" You keep current access until then.</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                elif _pending_cancel:
+                    st.markdown(
+                        f"<div style='background:#FFF7ED;border:1px solid #FDBA74;border-radius:8px;padding:10px 12px;margin:8px 0 12px;'>"
+                        f"<strong style='color:#9A3412;'>Pending billing change:</strong> "
+                        f"<span style='color:#7C2D12;'>Cancellation is scheduled for <strong>{_pending_date}</strong>."
+                        f" Your current plan stays active until then.</span></div>",
                         unsafe_allow_html=True,
                     )
 
@@ -142,7 +151,8 @@ def page_settings():
                             "Live pending debug: "
                             f"source={_live.get('pending_change_source','') or 'none'} · "
                             f"has_pending={bool(_live.get('has_pending_update'))} · "
-                            f"pending_plan={_live.get('pending_plan','') or 'none'}"
+                            f"pending_plan={_live.get('pending_plan','') or 'none'} · "
+                            f"cancel_at_period_end={bool(_live.get('cancel_at_period_end'))}"
                         )
                         st.caption(
                             "Live sub debug: "
