@@ -304,6 +304,12 @@ def get_employee(emp_id: str) -> dict | None:
     return r.data[0] if r.data else None
 
 
+def get_employee_numeric_id(emp_id: str) -> int | None:
+    """Convert text emp_id (e.g. 'EMP009') to numeric employees.id."""
+    emp = get_employee(emp_id)
+    return emp.get("id") if emp else None
+
+
 def upsert_employee(emp_id: str, name: str, department: str = "",
                     shift: str = "") -> dict:
     """Insert or update a single employee record."""
@@ -842,8 +848,13 @@ def get_avg_uph(emp_id: str, days: int = 30) -> float | None:
 
 def add_coaching_note(emp_id: str, note: str, created_by: str = "") -> dict:
     sb = get_client()
+    # Convert text emp_id to numeric ID
+    numeric_emp_id = get_employee_numeric_id(emp_id)
+    if not numeric_emp_id:
+        return {}
+    
     r  = sb.table("coaching_notes").insert({
-        "emp_id": emp_id, "note": note.strip(), "created_by": created_by,
+        "emp_id": numeric_emp_id, "note": note.strip(), "created_by": created_by,
         **_tenant_fields(),
     }).execute()
     return r.data[0] if r.data else {}
@@ -851,8 +862,13 @@ def add_coaching_note(emp_id: str, note: str, created_by: str = "") -> dict:
 
 def get_coaching_notes(emp_id: str, include_archived: bool = False) -> list[dict]:
     sb   = get_client()
+    # Convert text emp_id to numeric ID
+    numeric_emp_id = get_employee_numeric_id(emp_id)
+    if not numeric_emp_id:
+        return []
+    
     r    = _tq(sb.table("coaching_notes").select("*").eq(
-        "emp_id", emp_id)).order("created_at", desc=True).execute()
+        "emp_id", numeric_emp_id)).order("created_at", desc=True).execute()
     rows = r.data or []
     if not include_archived:
         rows = [row for row in rows if not row.get("archived", False)]
@@ -867,11 +883,16 @@ def delete_coaching_note(note_id: str):
 def archive_coaching_notes(emp_id: str):
     """Mark all notes for an employee as archived (soft delete)."""
     sb = get_client()
+    # Convert text emp_id to numeric ID
+    numeric_emp_id = get_employee_numeric_id(emp_id)
+    if not numeric_emp_id:
+        return
+    
     try:
-        _tq(sb.table("coaching_notes").update({"archived": True}).eq("emp_id", emp_id)).execute()
+        _tq(sb.table("coaching_notes").update({"archived": True}).eq("emp_id", numeric_emp_id)).execute()
     except Exception:
         # archived column may not exist — fall back to hard delete
-        _tq(sb.table("coaching_notes").delete().eq("emp_id", emp_id)).execute()
+        _tq(sb.table("coaching_notes").delete().eq("emp_id", numeric_emp_id)).execute()
 
 
 # ── Shifts ────────────────────────────────────────────────────────────────────
