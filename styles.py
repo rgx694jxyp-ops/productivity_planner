@@ -20,6 +20,7 @@ def apply_global_styles():
     --dpd-text-muted: #5D7693;
     --dpd-sidebar-text: #D6E2F2;
     --dpd-sidebar-text-strong: #FFFFFF;
+    --dpd-on-navy: #FFFFFF;
     --dpd-focus: rgba(37, 99, 168, 0.35);
   }
 
@@ -59,12 +60,11 @@ def apply_global_styles():
   h3 { font-weight: 600 !important; color: var(--dpd-navy-800) !important; }
 
   .main p,
-  .main span,
   .main label,
-  .main div,
   .block-container p,
-  .block-container span,
-  .block-container label {
+  .block-container label,
+  [data-testid="stMarkdownContainer"] p,
+  [data-testid="stMarkdownContainer"] li {
     color: var(--dpd-text) !important;
   }
   .main .stCaption,
@@ -90,6 +90,28 @@ def apply_global_styles():
   [data-testid="stSidebar"] label,
   [data-testid="stSidebar"] div {
     color: var(--dpd-sidebar-text) !important;
+  }
+  [data-testid="stSidebarNav"],
+  [data-testid="stSidebarNav"] * {
+    color: var(--dpd-sidebar-text) !important;
+  }
+  [data-testid="stSidebarNav"] a {
+    border-radius: 8px !important;
+  }
+  [data-testid="stSidebarNav"] a:hover {
+    background: rgba(255, 255, 255, 0.10) !important;
+    color: var(--dpd-sidebar-text-strong) !important;
+  }
+  [data-testid="stSidebarNav"] a[aria-current="page"] {
+    background: rgba(255, 255, 255, 0.16) !important;
+    color: var(--dpd-sidebar-text-strong) !important;
+  }
+  [data-testid="stSidebar"] [data-baseweb="radio"] label {
+    border-radius: 8px !important;
+    padding: 6px 10px !important;
+  }
+  [data-testid="stSidebar"] [data-baseweb="radio"] label:hover {
+    background: rgba(255, 255, 255, 0.12) !important;
   }
   [data-testid="stSidebar"] .stRadio label {
     font-size: 13px !important;
@@ -243,6 +265,12 @@ def apply_global_styles():
     background: transparent !important;
   }
 
+  /* Prevent unreadable tab text when hover/selected state mixes with inherited styles */
+  .stTabs [data-baseweb="tab"] *,
+  .stTabs [aria-selected="true"] * {
+    color: inherit !important;
+  }
+
   /* Metrics, cards, tables */
   [data-testid="stMetric"] {
     background: var(--dpd-surface) !important;
@@ -260,6 +288,12 @@ def apply_global_styles():
   [data-testid="stMetricValue"] > div {
     font-size: 26px !important;
     font-weight: 700 !important;
+    color: var(--dpd-navy-900) !important;
+  }
+  [data-testid="stMetric"] * {
+    color: var(--dpd-text) !important;
+  }
+  [data-testid="stMetricValue"] * {
     color: var(--dpd-navy-900) !important;
   }
   [data-testid="stDataFrame"] {
@@ -326,6 +360,18 @@ def apply_global_styles():
     margin-bottom: 24px;
     box-shadow: 0 4px 20px rgba(15, 45, 82, 0.28), 0 0 0 2px rgba(77, 163, 255, 0.25);
     border-left: 6px solid #4DA3FF;
+  }
+  .dpd-rail,
+  .dpd-rail *,
+  .dpd-rail-label,
+  .dpd-rail-name,
+  .dpd-rail-why,
+  .dpd-rail-ok {
+    color: var(--dpd-on-navy) !important;
+  }
+  .dpd-rail .stCaption,
+  .dpd-rail small {
+    color: #DCE9F8 !important;
   }
   .dpd-sticky-wrap {
     position: fixed;
