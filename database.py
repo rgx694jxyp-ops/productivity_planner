@@ -1991,12 +1991,26 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
                 timeout=10,
             )
             if sched_list.status_code == 200:
+                _fallback_sched = None
                 for _s in (sched_list.json().get("data") or []):
                     _sub_ref = _s.get("subscription")
                     _sub_id = _sub_ref.get("id") if isinstance(_sub_ref, dict) else _sub_ref
                     if str(_sub_id or "") == stripe_sub_id:
                         schedule_obj = _s
                         break
+                    # Some portal-generated schedules are customer-scoped and may
+                    # not include a direct subscription reference yet. Keep a
+                    # best-effort fallback candidate with a future phase.
+                    if _fallback_sched is None and str((_s.get("status") or "")).lower() in ("not_started", "active"):
+                        _phases = _s.get("phases") or []
+                        _has_future = any(
+                            (ph.get("start_date") and int(ph.get("start_date")) > int(time.time()))
+                            for ph in _phases
+                        )
+                        if _has_future:
+                            _fallback_sched = _s
+                if (not schedule_obj or not isinstance(schedule_obj, dict)) and _fallback_sched is not None:
+                    schedule_obj = _fallback_sched
 
         if isinstance(schedule_obj, dict):
             phases = schedule_obj.get("phases") or []
