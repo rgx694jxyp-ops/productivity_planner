@@ -155,6 +155,12 @@ def page_settings():
                             f"cancel_at_period_end={bool(_live.get('cancel_at_period_end'))}"
                         )
                         st.caption(
+                            "Live price debug: "
+                            f"current_price={_live.get('current_price_id','') or 'none'} · "
+                            f"pending_price={_live.get('pending_price_id','') or 'none'} · "
+                            f"schedule_pending_plan={_live.get('schedule_pending_plan','') or 'none'}"
+                        )
+                        st.caption(
                             "Live sub debug: "
                             f"chosen={_live.get('stripe_subscription_id','') or 'none'} · "
                             f"db={_live.get('stripe_subscription_id_db','') or 'none'}"

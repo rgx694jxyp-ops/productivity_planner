@@ -1839,6 +1839,58 @@ def _resolve_plan_from_price_id(price_id: str) -> str:
     return price_map.get(price_id, "starter")
 
 
+def _resolve_plan_from_price_id_live(price_id: str, stripe_key: str) -> str:
+    """Resolve plan key from Stripe price id using local config, then Stripe metadata.
+
+    This avoids mislabeling plan changes when env price mappings are stale.
+    """
+    if not price_id:
+        return ""
+
+    # 1) Fast path: local config mapping.
+    starter_id = _get_config("STRIPE_PRICE_STARTER") or ""
+    pro_id = _get_config("STRIPE_PRICE_PRO") or ""
+    business_id = _get_config("STRIPE_PRICE_BUSINESS") or ""
+    if price_id == starter_id:
+        return "starter"
+    if price_id == pro_id:
+        return "pro"
+    if price_id == business_id:
+        return "business"
+
+    # 2) Stripe lookup for metadata/lookup_key hints.
+    try:
+        import requests
+
+        p_resp = requests.get(
+            f"https://api.stripe.com/v1/prices/{price_id}",
+            auth=(stripe_key, ""),
+            params={"expand[]": ["product"]},
+            timeout=10,
+        )
+        if p_resp.status_code == 200:
+            p_obj = p_resp.json() or {}
+            meta_plan = str(((p_obj.get("metadata") or {}).get("plan") or "")).strip().lower()
+            if meta_plan in PLAN_LIMITS:
+                return meta_plan
+
+            lookup_key = str(p_obj.get("lookup_key") or "").strip().lower()
+            for key in ("starter", "pro", "business"):
+                if key in lookup_key:
+                    return key
+
+            product_obj = p_obj.get("product") or {}
+            if isinstance(product_obj, dict):
+                prod_name = str(product_obj.get("name") or "").strip().lower()
+                for key in ("starter", "pro", "business"):
+                    if key in prod_name:
+                        return key
+    except Exception:
+        pass
+
+    return ""
+
+
 def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
     """Fetch live Stripe subscription details, including pending plan changes."""
     import requests
@@ -1951,6 +2003,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
     current_plan = (
         (sub_obj.get("metadata") or {}).get("plan")
         or (current_price.get("metadata") or {}).get("plan")
+        or _resolve_plan_from_price_id_live(current_price_id, stripe_key)
         or _resolve_plan_from_price_id(current_price_id)
     )
     current_plan = (current_plan or "starter").lower()
@@ -1962,7 +2015,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
         pending_price_id = pending_price.get("id") or ""
     else:
         pending_price_id = pending_price or ""
-    pending_plan = _resolve_plan_from_price_id(pending_price_id) if pending_price_id else ""
+    pending_plan = _resolve_plan_from_price_id_live(pending_price_id, stripe_key) if pending_price_id else ""
 
     # Stripe may represent end-of-period plan changes via subscription schedule
     # instead of pending_update depending on portal/account configuration.
@@ -2032,7 +2085,7 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
                         else:
                             phase_price_id = str(phase_price or "")
                         if phase_price_id:
-                            schedule_pending_plan = _resolve_plan_from_price_id(phase_price_id)
+                            schedule_pending_plan = _resolve_plan_from_price_id_live(phase_price_id, stripe_key) or _resolve_plan_from_price_id(phase_price_id)
                             schedule_change_at_ts = next_phase.get("start_date")
     except Exception:
         schedule_pending_plan = ""
@@ -2075,6 +2128,8 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
         "has_pending_update": bool(pending_update) or bool(schedule_pending_plan),
         "pending_plan": pending_plan,
         "pending_price_id": pending_price_id,
+        "schedule_pending_plan": schedule_pending_plan,
+        "schedule_pending_change_at_ts": schedule_change_at_ts,
         "pending_change_at_ts": schedule_change_at_ts,
         "pending_change_source": "pending_update" if pending_update else ("schedule" if schedule_pending_plan else ""),
         "latest_invoice_id": latest_invoice.get("id") or "",
