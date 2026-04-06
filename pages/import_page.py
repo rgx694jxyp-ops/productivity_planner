@@ -8,7 +8,7 @@ from core.dependencies import (
 from core.navigation import _get_current_plan
 from core.runtime import _html_mod, date, datetime, io, math, pd, st, tempfile, time, traceback
 from pages.common import get_user_timezone_now
-from ui_improvements import diagnose_upload, show_diagnosis, show_manual_entry_form
+from ui.components import diagnose_upload, show_diagnosis, show_manual_entry_form
 import hashlib
 import json
 import re

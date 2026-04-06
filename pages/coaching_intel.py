@@ -318,7 +318,7 @@ def page_coaching_intel():
             _gs = st.session_state.get("goal_status", [])
             _history = st.session_state.get("history", [])
             if _gs and _history:
-                from ui_improvements import find_coaching_impact
+                from services.coaching_service import find_coaching_impact
                 _wins = []
                 for row in _gs:
                     _eid = str(row.get("EmployeeID", row.get("Employee Name", "")))

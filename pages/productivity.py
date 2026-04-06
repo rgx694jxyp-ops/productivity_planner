@@ -21,13 +21,15 @@ except Exception:
             s = s[: max_len - 3].rstrip() + "..."
         return s or "Unknown"
 from pages.employees import _build_archived_productivity
-from ui_improvements import (
+from ui.components import (
     _apply_mode_styling,
     _render_breadcrumb,
     _render_confidence_ux,
-    _render_primary_action_rail,
     _render_session_context_bar,
-    _render_soft_action_buttons,
+)
+from ui.coaching_components import (
+    _render_primary_action_rail,
+   _render_soft_action_buttons,
 )
 
 def page_productivity():

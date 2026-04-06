@@ -9,13 +9,13 @@ from core.dependencies import (
 )
 from core.navigation import _get_current_plan
 from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback
-from ui_improvements import (
+from services.coaching_service import find_coaching_impact
+from ui.components import (
     _render_breadcrumb,
     _render_session_context_bar,
-    find_coaching_impact,
     show_coaching_impact,
-    translate_to_floor_language,
 )
+from utils.floor_language import translate_to_floor_language
 try:
     from pages.common import _build_coaching_recommendations
 except Exception:

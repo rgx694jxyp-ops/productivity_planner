@@ -48,8 +48,11 @@ def apply_global_styles():
   }
 
   /* Page background */
+  html, body { background: #F7F9FC !important; }
   .stApp { background: #F7F9FC !important; }
-  .main .block-container { padding-top: 1.8rem; padding-bottom: 3rem; max-width: 1200px; }
+  [data-testid="stAppViewContainer"] { background: #F7F9FC !important; }
+  .main { background: #F7F9FC !important; }
+  .main .block-container { padding-top: 1.8rem; padding-bottom: 3rem; max-width: 1200px; background: #F7F9FC !important; }
 
   /* Sidebar */
   [data-testid="stSidebar"] { background: #0F2D52 !important; border-right: none !important; }

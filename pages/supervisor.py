@@ -1,16 +1,16 @@
 from core.dependencies import (
     _cached_all_coaching_notes,
     _cached_coaching_notes_for,
+    _cached_employees,
 )
 from core.runtime import _html_mod, date, st
 from domain.risk import _get_all_risk_levels
 from pages.common import load_goal_status_history
-from ui_improvements import (
-    _render_adaptive_action_suggestion,
+from services.coaching_service import summarize_coaching_activity
+from services.recommendation_service import _render_adaptive_action_suggestion
+from ui.components import (
     _render_breadcrumb,
     _render_confidence_ux,
-    _render_primary_action_rail,
-    _render_priority_strip,
     _render_session_context_bar,
     _render_session_progress,
     build_operation_status,
@@ -23,7 +23,10 @@ from ui_improvements import (
     show_shift_complete_state,
     show_start_shift_card,
     simplified_supervisor_view,
-    summarize_coaching_activity,
+)
+from ui.coaching_components import (
+    _render_primary_action_rail,
+    _render_priority_strip,
 )
 
 def page_supervisor():
@@ -66,6 +69,7 @@ def page_supervisor():
             f'</div>',
             unsafe_allow_html=True,
         )
+
 
     # Session context and breadcrumbs
     _render_breadcrumb("supervisor")

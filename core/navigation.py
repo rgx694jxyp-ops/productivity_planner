@@ -206,7 +206,7 @@ def render_sidebar() -> str:
             bust_cache()
             st.rerun()
 
-        from ui_improvements import toggle_simple_mode
+        from ui.components import toggle_simple_mode
 
         toggle_simple_mode()
         if st.session_state.get("simple_mode"):
