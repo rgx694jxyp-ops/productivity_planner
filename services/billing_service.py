@@ -1,5 +1,7 @@
 """Billing workflow orchestration for the Settings page."""
 
+from datetime import datetime
+
 from services.settings_service import format_iso_date_human, get_plan_alternatives, get_plan_constants
 
 
@@ -61,6 +63,25 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
             pending_date = _fmt or renew_str or "period end"
         elif renew_str:
             pending_date = renew_str
+
+        # Fallback: when Stripe portal schedules a change but DB pending fields
+        # have not been reconciled yet, read live Stripe pending_update state.
+        if not pending_plan:
+            try:
+                from database import get_live_stripe_subscription_status
+
+                live = get_live_stripe_subscription_status(tenant_id) or {}
+                live_pending = str(live.get("pending_plan") or "").strip().lower()
+                if live.get("has_pending_update") and live_pending:
+                    pending_plan = live_pending
+                    try:
+                        live_period_end = live.get("current_period_end")
+                        if live_period_end:
+                            pending_date = datetime.fromtimestamp(int(live_period_end)).strftime("%b %d, %Y")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         plan_order, plan_info, gains, rank = get_plan_constants()
         alternatives = get_plan_alternatives(plan_raw, pending_plan)
