@@ -805,10 +805,14 @@ def delete_duplicate_uph_history():
 
 def get_uph_history(emp_id: str, days: int = 90) -> list[dict]:
     from datetime import timedelta
-    sb       = get_client()
-    cutoff   = (date.today() - timedelta(days=days)).isoformat()
-    r        = _tq(sb.table("uph_history").select("*").eq(
-        "emp_id", emp_id).gte("work_date", cutoff)).order("work_date").execute()
+    sb     = get_client()
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    # uph_history.emp_id is a bigint FK to employees.id — resolve text code first
+    numeric_id = get_employee_numeric_id(emp_id)
+    if numeric_id is None:
+        return []
+    r = _tq(sb.table("uph_history").select("*").eq(
+        "emp_id", numeric_id).gte("work_date", cutoff)).order("work_date").execute()
     return r.data or []
 
 
