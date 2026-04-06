@@ -22,13 +22,14 @@ PAGE_CONFIG = {
 }
 
 
-_INITIALIZED = False
+_PAGE_CONFIG_SET = False
 
 
 def init_runtime() -> None:
-    global _INITIALIZED
-    if _INITIALIZED:
-        return
-    st.set_page_config(**PAGE_CONFIG)
+    """Initialize runtime: set page config once, apply styles every load."""
+    global _PAGE_CONFIG_SET
+    if not _PAGE_CONFIG_SET:
+        st.set_page_config(**PAGE_CONFIG)
+        _PAGE_CONFIG_SET = True
+    # Always apply styles on every page load (styles are lost on nav)
     apply_global_styles()
-    _INITIALIZED = True
