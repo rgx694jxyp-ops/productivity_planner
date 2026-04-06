@@ -1864,32 +1864,76 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
     except Exception:
         return None
 
-    stripe_sub_id = row.get("stripe_subscription_id") or ""
     stripe_cid = row.get("stripe_customer_id") or ""
-    if not stripe_sub_id:
+    stripe_sub_id_db = row.get("stripe_subscription_id") or ""
+    if not stripe_sub_id_db and not stripe_cid:
         return None
 
-    sub_resp = requests.get(
-        f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
-        auth=(stripe_key, ""),
-        params={
-            "expand[]": [
-                "items.data.price",
-                "pending_update.subscription_items",
-                "schedule.phases.items.price",
-                "latest_invoice.payment_intent",
-                "latest_invoice.charge",
-            ]
-        },
-        timeout=10,
-    )
-    if sub_resp.status_code != 200:
-        return {
-            "error": f"Stripe lookup failed: {sub_resp.status_code} {sub_resp.text[:200]}",
-            "tenant_id": tid,
-        }
+    # Prefer resolving the current subscription by customer to avoid stale DB
+    # subscription ids masking pending updates.
+    sub_obj = None
+    stripe_sub_id = stripe_sub_id_db
+    try:
+        if stripe_cid:
+            list_resp = requests.get(
+                "https://api.stripe.com/v1/subscriptions",
+                auth=(stripe_key, ""),
+                params={
+                    "customer": stripe_cid,
+                    "status": "all",
+                    "limit": 20,
+                    "expand[]": [
+                        "data.items.data.price",
+                        "data.pending_update.subscription_items",
+                        "data.schedule.phases.items.price",
+                    ],
+                },
+                timeout=10,
+            )
+            if list_resp.status_code == 200:
+                subs = list_resp.json().get("data", []) or []
+                if subs:
+                    preferred = ["active", "trialing", "past_due", "unpaid", "incomplete"]
+                    subs_sorted = sorted(
+                        subs,
+                        key=lambda s: (
+                            preferred.index(s.get("status")) if s.get("status") in preferred else 999,
+                            -(s.get("created") or 0),
+                        ),
+                    )
+                    if stripe_sub_id_db:
+                        sub_obj = next((s for s in subs_sorted if (s.get("id") or "") == stripe_sub_id_db), None)
+                    if sub_obj is None:
+                        sub_obj = subs_sorted[0]
+                    stripe_sub_id = sub_obj.get("id") or stripe_sub_id_db
+    except Exception:
+        sub_obj = None
 
-    sub_obj = sub_resp.json()
+    # Fallback to direct id lookup if list path didn't produce a subscription.
+    if sub_obj is None and stripe_sub_id:
+        sub_resp = requests.get(
+            f"https://api.stripe.com/v1/subscriptions/{stripe_sub_id}",
+            auth=(stripe_key, ""),
+            params={
+                "expand[]": [
+                    "items.data.price",
+                    "pending_update.subscription_items",
+                    "schedule.phases.items.price",
+                    "latest_invoice.payment_intent",
+                    "latest_invoice.charge",
+                ]
+            },
+            timeout=10,
+        )
+        if sub_resp.status_code != 200:
+            return {
+                "error": f"Stripe lookup failed: {sub_resp.status_code} {sub_resp.text[:200]}",
+                "tenant_id": tid,
+            }
+        sub_obj = sub_resp.json()
+
+    if sub_obj is None:
+        return None
     current_item = ((sub_obj.get("items") or {}).get("data") or [{}])[0]
     current_price = current_item.get("price") or {}
     current_price_id = current_price.get("id") or ""
