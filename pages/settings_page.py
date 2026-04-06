@@ -11,9 +11,6 @@ from core.runtime import datetime, json, re, st, time, traceback, init_runtime
 from services.settings_service import (
     escape_html,
     format_error_timestamp,
-    format_iso_date_human,
-    get_plan_alternatives,
-    get_plan_constants,
     summarize_error_counts,
 )
 
@@ -31,28 +28,28 @@ def page_settings():
         st.subheader("Your Subscription")
         st.caption("Manage subscription, invoices, and plan limits.")
         try:
+            from services.billing_service import get_billing_dashboard, request_plan_change
             from database import (
-                get_subscription, get_employee_count, get_employee_limit,
                 create_billing_portal_url, get_live_stripe_subscription_status,
-                modify_subscription,
-                _get_config,
             )
             _tid_local = st.session_state.get("tenant_id", "")
-            sub = get_subscription(_tid_local)
+            _app_url = st.context.headers.get("Origin", "http://localhost:8501")
+            _bill_result = get_billing_dashboard(_tid_local, _app_url)
+            if not _bill_result.get("success"):
+                raise RuntimeError(_bill_result.get("error") or "Could not load billing dashboard")
+
+            _bill_data = _bill_result.get("data") or {}
+            sub = _bill_data.get("sub") if _bill_data.get("has_subscription") else None
             if sub:
-                _plan_raw   = sub.get("plan", "unknown").lower()
-                _plan_label = _plan_raw.capitalize()
-                _status     = sub.get("status", "unknown")
-                _limit      = sub.get("employee_limit", 0)
-                _limit_str  = "Unlimited" if _limit == -1 else str(_limit)
-                _emp_count  = get_employee_count(_tid_local)
-                _period_end = sub.get("current_period_end", "")
+                _plan_raw = _bill_data.get("plan_raw", "unknown")
+                _plan_label = _bill_data.get("plan_label", _plan_raw.capitalize())
+                _status = _bill_data.get("status", "unknown")
+                _limit_str = _bill_data.get("limit_str", "0")
+                _emp_count = _bill_data.get("emp_count", 0)
+                _renew_str = _bill_data.get("renew_str", "")
 
                 # ── Current plan banner ───────────────────────────────
                 _pc = {"starter": "#6b7280", "pro": "#2563eb", "business": "#7c3aed"}.get(_plan_raw, "#6b7280")
-                _renew_str = ""
-                if _period_end:
-                    _renew_str = format_iso_date_human(_period_end)
                 st.markdown(f"""
                 <div style="background:{_pc}12;border:2px solid {_pc};border-radius:10px;
                             padding:14px 20px;margin-bottom:4px;display:flex;
@@ -74,20 +71,9 @@ def page_settings():
                 if sub.get("cancel_at_period_end"):
                     st.warning("Your subscription will cancel at the end of the current period.")
 
-                _app_url    = st.context.headers.get("Origin", "http://localhost:8501")
-                _return_url = _app_url + "/?portal=return"
-                _portal_url = create_billing_portal_url(return_url=_return_url)
-                _manage_plan_url = create_billing_portal_url(
-                    return_url=_return_url,
-                    flow="subscription_update",
-                ) or _portal_url
-
-                # Plan-targeted deep links so Stripe opens the intended update flow.
-                _price_map = {
-                    "starter": _get_config("STRIPE_PRICE_STARTER") or "",
-                    "pro": _get_config("STRIPE_PRICE_PRO") or "",
-                    "business": _get_config("STRIPE_PRICE_BUSINESS") or "",
-                }
+                _portal_url = _bill_data.get("portal_url")
+                _manage_plan_url = _bill_data.get("manage_plan_url")
+                _price_map = _bill_data.get("price_map", {})
 
                 if _manage_plan_url:
                     st.link_button("Manage Subscription (change plan tier)",
@@ -138,17 +124,8 @@ def page_settings():
                 st.markdown("##### Change Plan")
                 st.caption("Upgrade or downgrade your plan. Upgrades apply immediately; downgrades apply at the end of your billing period.")
 
-                _pending_plan = (sub.get("pending_plan") or "").strip().lower()
-                _pending_change_at = sub.get("pending_change_at") or ""
-                _pending_date = "period end"
-                if _pending_change_at:
-                    try:
-                        _pending_dt = datetime.fromisoformat(_pending_change_at.replace("Z", "+00:00"))
-                        _pending_date = _pending_dt.strftime("%b %d, %Y")
-                    except Exception:
-                        _pending_date = _renew_str or "period end"
-                elif _renew_str:
-                    _pending_date = _renew_str
+                _pending_plan = _bill_data.get("pending_plan", "")
+                _pending_date = _bill_data.get("pending_date", "period end")
                 if _pending_plan:
                     st.info(f"Your plan will change to {_pending_plan.capitalize()} on {_pending_date}.")
                     st.warning(
@@ -156,9 +133,11 @@ def page_settings():
                         "You keep current access until then, and additional changes are temporarily locked."
                     )
 
-                _PORD, _PINFO, _GAINS, _rank = get_plan_constants()
+                _PINFO = _bill_data.get("plan_info", {})
+                _GAINS = _bill_data.get("gains", {})
+                _rank = _bill_data.get("rank", {})
                 _cur_rank = _rank.get(_plan_raw, 1)
-                _alternatives = get_plan_alternatives(_plan_raw, _pending_plan)
+                _alternatives = _bill_data.get("alternatives", [])
                 if not _alternatives:
                     if not _pending_plan:
                         st.info("No plan alternatives are available right now.")
@@ -211,8 +190,8 @@ def page_settings():
                                 st.error(f"Price for {_pi['label']} is not configured.")
                             else:
                                 with st.spinner("Requesting plan change in Stripe…"):
-                                    _ok, _msg = modify_subscription(_target_price, _tid_local)
-                                if _ok:
+                                    _chg = request_plan_change(_target_price, _tid_local)
+                                if _chg.get("success"):
                                     if _is_up:
                                         st.success("Upgrade submitted. Access and billing should refresh shortly.")
                                     else:
@@ -225,10 +204,10 @@ def page_settings():
                                     _bust_cache()
                                     st.rerun()
                                 else:
-                                    st.error(_msg or "Could not change plan.")
+                                    st.error(_chg.get("error") or "Could not change plan.")
             else:
                 st.info("No active subscription found.")
-                _app_url = st.context.headers.get("Origin", "http://localhost:8501")
+                _app_url = _bill_data.get("app_url", st.context.headers.get("Origin", "http://localhost:8501"))
                 try:
                     _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
                     if _portal_url:

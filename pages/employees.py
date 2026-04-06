@@ -13,6 +13,12 @@ from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback,
 
 init_runtime()
 from services.coaching_service import find_coaching_impact
+from services.employee_service import (
+    build_employee_history_frames,
+    filter_employees_by_department,
+    load_employee_history_workflow,
+    parse_history_range,
+)
 from services.employees_service import _build_archived_productivity
 from database import add_coaching_note, archive_coaching_notes, delete_coaching_note
 from export_manager import export_employee
@@ -100,10 +106,7 @@ def _emp_history():
     depts    = sorted({e.get("department","") for e in emps if e.get("department")})
     dept_sel = st.selectbox("Filter by department", ["All departments"] + depts, key="eh_dept")
 
-    if dept_sel == "All departments":
-        filtered_emps = emps
-    else:
-        filtered_emps = [e for e in emps if e.get("department","") == dept_sel]
+    filtered_emps = filter_employees_by_department(emps, dept_sel)
 
     if not filtered_emps:
         st.info("No employees in that department.")
@@ -125,80 +128,28 @@ def _emp_history():
                                 key="eh_from_input", placeholder="MM/DD/YYYY")
     to_str    = dc2.text_input("To",   value=st.session_state.get("eh_to",   _def_to),
                                 key="eh_to_input",   placeholder="MM/DD/YYYY")
-    try:
-        from_date_h = datetime.strptime(from_str.strip(), "%m/%d/%Y").date()
-    except Exception:
-        from_date_h = date.today() - _tdelta(days=90)
-    try:
-        to_date_h = datetime.strptime(to_str.strip(), "%m/%d/%Y").date()
-    except Exception:
-        to_date_h = date.today()
+    _range = parse_history_range(from_str, to_str, default_days=90)
     st.session_state["eh_from"] = from_str
     st.session_state["eh_to"]   = to_str
-    days = max(1, (to_date_h - from_date_h).days)
-    from_iso = from_date_h.isoformat()
-    to_iso   = to_date_h.isoformat()
-
-    # uph_history stores the numeric employees.id (bigint FK) in emp_id, not the text code.
-    # Resolve the text emp_id to the numeric id before querying.
-    _this_emp_rec = next((e for e in filtered_emps if e["emp_id"] == emp_id), None)
-    _uph_emp_id = int(_this_emp_rec["id"]) if (_this_emp_rec and _this_emp_rec.get("id") is not None) else emp_id
-
-    # Query uph_history within date range
-    try:
-        from database import get_client as _gc_h, _tq as _tq_h
-        _sb_h = _gc_h()
-        _r_h  = _tq_h(_sb_h.table("uph_history").select("*") \
-                      .eq("emp_id", _uph_emp_id) \
-                      .gte("work_date", from_iso) \
-                      .lte("work_date", to_iso)) \
-                      .order("work_date").execute()
-        history = _r_h.data or []
-    except Exception as _eh:
-        history = []
-
-    # Fallback: derive from unit_submissions if uph_history empty
-    if not history:
-        try:
-            from collections import defaultdict as _dh
-            from database import get_client as _gc_s, _tq as _tq_s
-            _sb3 = _gc_s()
-            _r3  = _tq_s(_sb3.table("unit_submissions").select("*") \
-                        .eq("emp_id", emp_id) \
-                        .gte("work_date", from_iso) \
-                        .lte("work_date", to_iso)) \
-                        .order("work_date").execute()
-            _day = _dh(lambda: {"units": 0.0, "hours": 0.0})
-            for _s in (_r3.data or []):
-                _dk = _s.get("work_date", "")
-                _day[_dk]["units"] += float(_s.get("units") or 0)
-                _day[_dk]["hours"] += float(_s.get("hours_worked") or 0)
-            history = [{"work_date": _dk,
-                        "uph":   round(_v["units"] / _v["hours"], 2) if _v["hours"] > 0 else 0,
-                        "units": round(_v["units"]),
-                        "hours_worked": round(_v["hours"], 2)}
-                       for _dk, _v in sorted(_day.items())]
-        except Exception:
-            pass
+    _hist_result = load_employee_history_workflow(
+        filtered_emps,
+        emp_id,
+        _range["from_iso"],
+        _range["to_iso"],
+    )
+    history = (_hist_result.get("data") or {}).get("history", [])
 
     if not history:
         st.info("No history yet for this employee.")
         return
 
-    uphvals = [float(h.get("uph") or 0) for h in history if h.get("uph")]
-    avg_uph = round(sum(uphvals) / len(uphvals), 2) if uphvals else None
+    _frames = build_employee_history_frames(history)
+    _frame_data = _frames.get("data") or {}
+    avg_uph = _frame_data.get("avg_uph")
     st.metric(f"Avg UPH ({from_str} – {to_str})", f"{avg_uph:.2f}" if avg_uph else "No data")
 
-    df = pd.DataFrame([{
-        "Date":  h.get("work_date", ""),
-        "UPH":   round(float(h.get("uph") or 0), 2),
-        "Units": int(h.get("units", 0) or 0),
-        "Hours": round(float(h.get("hours_worked") or 0), 2),
-    } for h in history]).sort_values("Date")
-
-    # Remove rows with 0 or non-finite UPH before charting to avoid Infinity warnings
-    import math as _math
-    df_chart = df[df["UPH"].apply(lambda x: x > 0 and _math.isfinite(x))]
+    df = _frame_data.get("df")
+    df_chart = _frame_data.get("df_chart")
     if not df_chart.empty:
         st.line_chart(df_chart.set_index("Date")[["UPH"]], use_container_width=True)
     else:
