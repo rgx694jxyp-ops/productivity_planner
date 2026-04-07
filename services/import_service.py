@@ -14,8 +14,6 @@ import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
-import streamlit as st
-
 _SUSPICIOUS_NAME_RE = re.compile(
     r"(<\s*/?\s*script\b|drop\s+table|;--|javascript:)", re.IGNORECASE
 )
@@ -148,7 +146,7 @@ def _restore_uph_snapshot(
             except Exception:
                 verified_deleted = attempted_deletes
 
-    if attempted_deletes == 0 and touched_keys:
+    if touched_keys:
         _prev_key_set = {
             (
                 str(_r.get("emp_id", "") or ""),
@@ -164,6 +162,11 @@ def _restore_uph_snapshot(
             _work_date = str(_k[1] or "")
             _dept = str(_k[2] or "")
             if (_emp_id, _work_date, _dept) in _prev_key_set:
+                continue
+            _pre_chk = _sb.table("uph_history").select("id").eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
+                "work_date", _work_date
+            ).eq("department", _dept).limit(1).execute()
+            if not (_pre_chk.data or []):
                 continue
             attempted_deletes += 1
             _sb.table("uph_history").delete().eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
@@ -198,12 +201,12 @@ def _restore_uph_snapshot(
 
 # ── Upload log helpers ────────────────────────────────────────────────────────
 
-def _list_recent_uploads(days: int = 7) -> list[dict]:
+def _list_recent_uploads(tenant_id: str, days: int = 7) -> list[dict]:
     try:
         from database import get_client as _db_get_client, _tq as _db_tq
         from pages.common import get_user_timezone_now
 
-        _tenant_id = st.session_state.get("tenant_id", "")
+        _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id:
             return []
 
@@ -221,12 +224,12 @@ def _list_recent_uploads(days: int = 7) -> list[dict]:
         return []
 
 
-def _record_upload_event(filename: str, row_count: int, payload: dict):
+def _record_upload_event(tenant_id: str, filename: str, row_count: int, payload: dict):
     try:
         from database import get_client as _db_get_client
         from pages.common import get_user_timezone_now  # noqa: F401 (imported for side-effect in payload)
 
-        _tenant_id = st.session_state.get("tenant_id", "")
+        _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id:
             return None
 
@@ -244,11 +247,11 @@ def _record_upload_event(filename: str, row_count: int, payload: dict):
         return None
 
 
-def _deactivate_upload(upload_id, payload: dict | None = None) -> None:
+def _deactivate_upload(tenant_id: str, upload_id, payload: dict | None = None) -> None:
     try:
         from database import get_client as _db_get_client, _tq as _db_tq
 
-        _tenant_id = st.session_state.get("tenant_id", "")
+        _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id:
             return
         _sb = _db_get_client()
@@ -260,11 +263,11 @@ def _deactivate_upload(upload_id, payload: dict | None = None) -> None:
         pass
 
 
-def _get_upload_by_id(upload_id):
+def _get_upload_by_id(tenant_id: str, upload_id):
     try:
         from database import get_client as _db_get_client, _tq as _db_tq
 
-        _tenant_id = st.session_state.get("tenant_id", "")
+        _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id or not upload_id:
             return None
         _sb = _db_get_client()
@@ -355,10 +358,10 @@ def _build_import_fingerprint(rows: list[dict]) -> str:
         return ""
 
 
-def _find_matching_upload_by_fingerprint(fingerprint: str, days: int = 3650):
+def _find_matching_upload_by_fingerprint(tenant_id: str, fingerprint: str, days: int = 3650):
     if not fingerprint:
         return None
-    _uploads = _list_recent_uploads(days=days)
+    _uploads = _list_recent_uploads(tenant_id=tenant_id, days=days)
     for _u in _uploads:
         _meta = _decode_jsonish(_u.get("header_mapping"))
         if not isinstance(_meta, dict):

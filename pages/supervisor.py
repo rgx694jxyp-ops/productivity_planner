@@ -2,8 +2,10 @@ from core.dependencies import (
     _cached_active_flags,
     _cached_all_coaching_notes,
     _cached_coaching_notes_for,
+    _cached_employees,
 )
 from core.runtime import _html_mod, date, st, init_runtime
+import re
 
 init_runtime()
 from domain.risk import _get_all_risk_levels
@@ -38,6 +40,43 @@ def _normalize_emp_id(value) -> str:
     if s.endswith(".0") and s[:-2].isdigit():
         return s[:-2]
     return s
+
+
+def _canonical_issue_tag(tag: str) -> str:
+    """Map Performance Journal issue labels to Supervisor context tags."""
+    t = str(tag or "").strip().lower()
+    mapping = {
+        "equipment issue": "Equipment issues",
+        "equipment issues": "Equipment issues",
+        "staffing": "Short staffed",
+        "short staffed": "Short staffed",
+        "new employee": "New employee",
+        "cross-training": "Cross-training",
+        "cross training": "Cross-training",
+        "shift change": "Shift change",
+    }
+    return mapping.get(t, str(tag or "").strip())
+
+
+def _extract_issue_tags_from_notes(notes: list[dict]) -> list[str]:
+    """Extract [Issues: ...] tags from coaching note text (Performance Journal format)."""
+    if not notes:
+        return []
+    pat = re.compile(r"\[\s*issues\s*:\s*([^\]]+)\]", re.IGNORECASE)
+    out: list[str] = []
+    seen = set()
+    for n in notes[:10]:
+        txt = str(n.get("note", "") or "")
+        m = pat.search(txt)
+        if not m:
+            continue
+        raw = m.group(1)
+        for part in raw.split(","):
+            c = _canonical_issue_tag(part)
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+    return out
 
 def page_supervisor():
     """One-screen supervisor view: risks, trends, context, actions. Daily-use focused."""
@@ -89,6 +128,10 @@ def page_supervisor():
         emp_id: _cached_coaching_notes_for(emp_id)
         for emp_id in _coachable_emp_ids
     }
+    _notes_by_emp_norm = {
+        _normalize_emp_id(emp_id): notes
+        for emp_id, notes in (_notes_by_emp or {}).items()
+    }
     _op_status = build_operation_status(gs)
     _patterns = detect_department_patterns(gs)
     _coaching_activity = summarize_coaching_activity(_notes_by_emp, history)
@@ -124,7 +167,12 @@ def page_supervisor():
             pass
 
     show_start_shift_card(gs, follow_up_due)
-    adaptive = _render_adaptive_action_suggestion(gs, history, st.session_state.get("_last_coached_emp_id"))
+    adaptive = _render_adaptive_action_suggestion(
+        gs,
+        history,
+        st.session_state.get("_last_coached_emp_id"),
+        coached_today=int(st.session_state.get("_coached_today", 0)),
+    )
     if adaptive and coached_today > 0 and adaptive.get("emp_id"):
         show_resume_session_card(adaptive["name"], adaptive.get("context", "Next up"), adaptive["emp_id"])
     show_shift_complete_state(high_priority_remaining, medium_priority_remaining, coached_today)
@@ -236,10 +284,28 @@ def page_supervisor():
             for emp_id, flag in _flags_dict.items()
         }
 
+        # Alias flag records by both employees.emp_id and employees.id so tags
+        # still resolve when page rows use a different ID shape.
+        _emps = _cached_employees() or []
+        for _e in _emps:
+            _code = _normalize_emp_id(_e.get("emp_id", ""))
+            _row_id = _normalize_emp_id(_e.get("id", ""))
+            if not _code and not _row_id:
+                continue
+            _flag = _flags_by_emp.get(_code) or _flags_by_emp.get(_row_id)
+            if not _flag:
+                continue
+            if _code:
+                _flags_by_emp[_code] = _flag
+            if _row_id:
+                _flags_by_emp[_row_id] = _flag
+
         for emp in below_goal:
             emp_id = _normalize_emp_id(emp.get("EmployeeID", emp.get("Employee Name", "")))
             risk_level, risk_score, risk_details = _risk_cache_all.get(emp_id, ("🟢 Low", 0, {}))
             flagged_info = _flags_by_emp.get(emp_id, {})
+            note_tags = _extract_issue_tags_from_notes(_notes_by_emp_norm.get(emp_id, []))
+            context_tags = flagged_info.get("context_tags", []) or note_tags
             
             risk_list.append({
                 "name": emp.get("Employee", emp.get("Employee Name", "Unknown")),
@@ -252,7 +318,7 @@ def page_supervisor():
                 "risk_level": risk_level,
                 "risk_score": risk_score,
                 "risk_details": risk_details,
-                "context_tags": flagged_info.get("context_tags", []),
+                "context_tags": context_tags,
             })
         
         # Sort by risk score (highest first) and take top 5
