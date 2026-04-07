@@ -1,7 +1,7 @@
 from core.dependencies import (
+    _cached_active_flags,
     _cached_all_coaching_notes,
     _cached_coaching_notes_for,
-    _cached_employees,
 )
 from core.runtime import _html_mod, date, st, init_runtime
 
@@ -30,6 +30,14 @@ from ui.coaching_components import (
     _render_primary_action_rail,
     _render_priority_strip,
 )
+
+
+def _normalize_emp_id(value) -> str:
+    """Normalize employee IDs so '123.0' and '123' match."""
+    s = str(value or "").strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        return s[:-2]
+    return s
 
 def page_supervisor():
     """One-screen supervisor view: risks, trends, context, actions. Daily-use focused."""
@@ -102,15 +110,16 @@ def page_supervisor():
     _render_priority_strip(gs, history)
     _render_confidence_ux(history)
 
+    # Count follow-ups from already-fetched note history to avoid extra per-employee cache/db calls.
     follow_up_due = 0
-    for e in (_cached_employees() or []):
+    for emp_notes in (_notes_by_emp or {}).values():
         try:
-            emp_notes = _cached_coaching_notes_for(e.get("emp_id", ""))
-            if emp_notes:
-                last_dt = str(emp_notes[0].get("created_at", ""))[:10]
-                if last_dt == date.today().isoformat():
-                    continue
-                follow_up_due += 1
+            if not emp_notes:
+                continue
+            last_dt = str(emp_notes[0].get("created_at", ""))[:10]
+            if last_dt == date.today().isoformat():
+                continue
+            follow_up_due += 1
         except Exception:
             pass
 
@@ -220,17 +229,15 @@ def page_supervisor():
         risk_list = []
         _risk_cache_all = _get_all_risk_levels(gs, history)
 
-        # Pre-fetch all flags once — avoids a DB call on every loop iteration.
-        _all_flags: list = []
-        try:
-            from goals import get_employee_flags
-            _all_flags = get_employee_flags() or []
-        except Exception:
-            pass
-        _flags_by_emp = {str(f.get("emp_id", "")): f for f in _all_flags}
+        # Pull context tags from active flags cache (dict keyed by emp_id).
+        _flags_dict = _cached_active_flags() or {}
+        _flags_by_emp = {
+            _normalize_emp_id(emp_id): (flag or {})
+            for emp_id, flag in _flags_dict.items()
+        }
 
         for emp in below_goal:
-            emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+            emp_id = _normalize_emp_id(emp.get("EmployeeID", emp.get("Employee Name", "")))
             risk_level, risk_score, risk_details = _risk_cache_all.get(emp_id, ("🟢 Low", 0, {}))
             flagged_info = _flags_by_emp.get(emp_id, {})
             

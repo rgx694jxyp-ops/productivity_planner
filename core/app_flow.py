@@ -141,7 +141,8 @@ def enforce_subscription_access() -> bool:
 
     sub_check_ts = float(st.session_state.get("_sub_check_ts", 0) or 0)
     sub_cached = st.session_state.get("_sub_check_result")
-    cache_ttl = 30
+    # Avoid frequent entitlement lookups on every page switch; refresh every 3 minutes.
+    cache_ttl = 180
     if sub_cached is None or (time.time() - sub_check_ts) > cache_ttl:
         try:
             from billing import get_subscription_entitlement
