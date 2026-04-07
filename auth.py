@@ -10,6 +10,16 @@ SESSION_TIMEOUT_SECONDS = 28800
 MAX_SESSION_LIFETIME_SECONDS = 43200
 
 
+def _show_safe_error(message: str, *, next_steps: str = "", technical_detail: str = "") -> None:
+    """Show a clean auth error while keeping raw details behind an expander."""
+    st.error(message)
+    if next_steps:
+        st.info(next_steps)
+    if technical_detail:
+        with st.expander("Technical details", expanded=False):
+            st.code(str(technical_detail))
+
+
 def _auth_redirect_url() -> str:
     """Return a stable, browser-reachable redirect URL for auth emails.
 
@@ -277,9 +287,17 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                                 st.success("Password updated! Sign in with your new password.")
                                 st.rerun()
                             else:
-                                st.error(f"Could not update password: {_upd_resp.text}")
+                                _show_safe_error(
+                                    "Could not update your password right now.",
+                                    next_steps="Please try again. If this continues, request a new reset link.",
+                                    technical_detail=_upd_resp.text,
+                                )
                         except Exception as _upe:
-                            st.error(f"Could not update password: {_upe}")
+                            _show_safe_error(
+                                "Could not update your password right now.",
+                                next_steps="Please try again. If this continues, request a new reset link.",
+                                technical_detail=str(_upe),
+                            )
                 st.markdown("</div>", unsafe_allow_html=True)
                 return
 
@@ -445,7 +463,11 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                                 if "team seats" in _msg.lower() or "plan '" in _msg.lower():
                                     st.error(_msg)
                                 else:
-                                    st.error(f"Could not join team: {_inv_err}")
+                                    _show_safe_error(
+                                        "Could not join that team right now.",
+                                        next_steps="Check with your admin that the invite is valid and has available seats, then try again.",
+                                        technical_detail=str(_inv_err),
+                                    )
                                 st.markdown("</div>", unsafe_allow_html=True)
                                 return
                         else:
@@ -500,7 +522,11 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                             "Check SUPABASE_URL and SUPABASE_KEY in .streamlit/secrets.toml."
                         )
                     else:
-                        st.error(f"Login failed: {str(_le).strip() or 'Unknown Supabase auth error'}")
+                        _show_safe_error(
+                            "Sign-in failed.",
+                            next_steps="Please retry. If this continues, use Forgot password or contact support.",
+                            technical_detail=str(_le).strip() or "Unknown Supabase auth error",
+                        )
                     log_app_error_cb("login", f"Failed login for {email.strip()}: {_le}")
 
         if st.button("Forgot password?", type="secondary", use_container_width=True, key="forgot_pw_btn"):
@@ -587,7 +613,11 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                             "Enable Email sign-up in the Supabase Auth settings."
                         )
                     else:
-                        st.error(f"Could not create account: {str(_se).strip() or 'Unknown sign-up error'}")
+                        _show_safe_error(
+                            "Could not create your account right now.",
+                            next_steps="Please try again in a moment. If this continues, contact support.",
+                            technical_detail=str(_se).strip() or "Unknown sign-up error",
+                        )
                     log_app_error_cb("signup", f"Failed signup for {_signup_email.strip()}: {_se}")
 
     # ── Team invite code ──────────────────────────────────────────────────

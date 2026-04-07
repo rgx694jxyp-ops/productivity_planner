@@ -1,3 +1,5 @@
+import json
+
 from core.runtime import datetime, st, time
 
 try:
@@ -116,6 +118,55 @@ def log_app_error(category: str, message: str, detail: str = "", severity: str =
         print(f"[APP_ERROR] [{severity}] [{category}] {message}")
 
 
+def show_user_error(
+    message: str,
+    *,
+    next_steps: str = "",
+    technical_detail: str = "",
+    category: str = "app",
+    severity: str = "error",
+    expander_label: str = "Technical details",
+) -> None:
+    """Show a clean user message while preserving technical detail for diagnosis."""
+    st.error(message)
+    if next_steps:
+        st.info(next_steps)
+    if technical_detail:
+        with st.expander(expander_label, expanded=False):
+            st.code(str(technical_detail))
+        try:
+            log_app_error(category, message, detail=str(technical_detail), severity=severity)
+        except Exception:
+            pass
+
+
+def log_operational_event(
+    event_type: str,
+    *,
+    status: str = "info",
+    detail: str = "",
+    context: dict | None = None,
+    tenant_id: str = "",
+    user_email: str = "",
+) -> None:
+    """Write a JSONL operations event for production diagnostics."""
+    payload = {
+        "ts": get_audit_timestamp(),
+        "event_type": str(event_type or "unknown"),
+        "status": str(status or "info"),
+        "detail": str(detail or ""),
+        "tenant_id": str(tenant_id or st.session_state.get("tenant_id", "") or ""),
+        "user_email": str(user_email or st.session_state.get("user_email", "") or ""),
+        "context": context or {},
+    }
+
+    try:
+        with open(tenant_log_path("dpd_ops"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
 def _get_db_client():
     if not DB_AVAILABLE:
         raise RuntimeError(DB_ERROR)
@@ -132,6 +183,8 @@ _cached_targets = cached_targets
 _cached_uph_history = cached_uph_history
 _full_sign_out = full_sign_out
 _log_app_error = log_app_error
+_log_operational_event = log_operational_event
+_show_user_error = show_user_error
 _render_sign_out_button = render_sign_out_button
 _set_auth_cookies = set_auth_cookies
 _success_then_rerun = success_then_rerun

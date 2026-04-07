@@ -1,4 +1,5 @@
-from core.runtime import st
+_RISK_CACHE_VER: tuple[int, int] | None = None
+_RISK_CACHE: dict = {}
 
 
 def calc_risk_level(emp, history):
@@ -102,16 +103,20 @@ def calc_risk_level(emp, history):
 
 
 def get_all_risk_levels(gs: list, history: list) -> dict:
+    global _RISK_CACHE_VER, _RISK_CACHE
+
     ver = (len(gs), len(history))
-    if st.session_state.get("_risk_cache_ver") == ver:
-        return st.session_state.get("_risk_cache", {})
+    if _RISK_CACHE_VER == ver:
+        return _RISK_CACHE
+
     cache = {}
     for row in gs:
         if row.get("goal_status") == "below_goal":
             emp_id = str(row.get("EmployeeID", row.get("Employee Name", "")))
             cache[emp_id] = calc_risk_level(row, history)
-    st.session_state["_risk_cache"] = cache
-    st.session_state["_risk_cache_ver"] = ver
+
+    _RISK_CACHE = cache
+    _RISK_CACHE_VER = ver
     return cache
 
 

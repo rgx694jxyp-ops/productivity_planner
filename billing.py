@@ -1,22 +1,3 @@
-# --- Entitlement function ---
-def get_subscription_entitlement(tenant_id: str = "") -> dict:
-    """Legacy import path: delegate entitlement logic to services.billing_service."""
-    try:
-        from services.billing_service import get_subscription_entitlement as _svc_get_subscription_entitlement
-
-        return _svc_get_subscription_entitlement(tenant_id=tenant_id)
-    except Exception:
-        return {
-            "has_access": False,
-            "status": "none",
-            "plan": "starter",
-            "employee_limit": 0,
-            "show_payment_banner": False,
-            "show_pending_downgrade_banner": False,
-            "pending_plan": "",
-            "pending_change_at": "",
-            "access_reason": "entitlement_unavailable",
-        }
 import time
 from datetime import datetime
 
@@ -28,6 +9,7 @@ def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
     """After Stripe checkout, verify payment and create subscription in DB."""
     import requests as _req
     import database as _db
+    from core.dependencies import log_operational_event
 
     _debug = []
     get_subscription = _db.get_subscription
@@ -39,12 +21,30 @@ def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     tid = str(tenant_id or "").strip()
     uid = str(user_id or "").strip()
+    log_operational_event(
+        "checkout_verification_attempt",
+        status="start",
+        tenant_id=tid,
+        detail="verify_checkout_and_activate invoked",
+        context={"has_user_id": bool(uid)},
+    )
     if not stripe_key:
         _debug.append("no STRIPE_SECRET_KEY")
+        log_operational_event(
+            "checkout_verification_result",
+            status="error",
+            tenant_id=tid,
+            detail="Missing Stripe secret key",
+        )
         st.session_state["_verify_debug"] = _debug
         return False
     if not tid:
         _debug.append("no tenant_id")
+        log_operational_event(
+            "checkout_verification_result",
+            status="error",
+            detail="Missing tenant id",
+        )
         st.session_state["_verify_debug"] = _debug
         return False
     if not uid:
@@ -88,6 +88,12 @@ def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
 
     if not cust_id:
         _debug.append("no stripe_customer_id after fallback")
+        log_operational_event(
+            "checkout_verification_result",
+            status="failed",
+            tenant_id=tid,
+            detail="No Stripe customer id found",
+        )
         st.session_state["_verify_debug"] = _debug
         return False
 
@@ -146,6 +152,13 @@ def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
 
         if not subs:
             _debug.append("no subscriptions found in Stripe")
+            log_operational_event(
+                "checkout_verification_result",
+                status="failed",
+                tenant_id=tid,
+                detail="No Stripe subscriptions found",
+                context={"customer_id": cust_id},
+            )
             st.session_state["_verify_debug"] = _debug
             return False
 
@@ -165,6 +178,13 @@ def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
         stripe_status = str(stripe_sub.get("status") or "").lower().strip()
         if stripe_status not in ("active", "trialing"):
             _debug.append(f"subscription not active/trialing: status={stripe_status or 'unknown'}")
+            log_operational_event(
+                "checkout_verification_result",
+                status="denied",
+                tenant_id=tid,
+                detail="Stripe subscription not active/trialing",
+                context={"stripe_status": stripe_status or "unknown"},
+            )
             st.session_state["_sub_check_result"] = False
             st.session_state["_sub_check_ts"] = time.time()
             st.session_state["_verify_debug"] = _debug
@@ -178,6 +198,12 @@ def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
             return False
     except Exception as e:
         _debug.append(f"stripe API err: {e}")
+        log_operational_event(
+            "checkout_verification_result",
+            status="error",
+            tenant_id=tid,
+            detail=f"Stripe API error: {e}",
+        )
         st.session_state["_verify_debug"] = _debug
         return False
 
@@ -257,12 +283,30 @@ def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
         st.session_state["_sub_check_result"] = True
         st.session_state["_sub_check_ts"] = _time.time()
         st.session_state["_verify_debug"] = _debug
+        log_operational_event(
+            "checkout_verification_result",
+            status="success",
+            tenant_id=tid,
+            detail="Webhook-confirmed subscription activation",
+            context={
+                "plan": _sub_row.get("plan"),
+                "status": _sub_row.get("status"),
+                "stripe_subscription_id": _sub_row.get("stripe_subscription_id"),
+            },
+        )
         return True
 
     _debug.append("DB row not yet active after polling — waiting for webhook-confirmed activation")
     st.session_state["_sub_check_result"] = False
     st.session_state["_sub_check_ts"] = _time.time()
     st.session_state["_verify_debug"] = _debug
+    log_operational_event(
+        "checkout_verification_result",
+        status="pending",
+        tenant_id=tid,
+        detail="Stripe looked valid but DB sync not yet confirmed",
+        context={"stripe_subscription_id": stripe_sub_id},
+    )
     return False
 
 
@@ -509,7 +553,14 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                         else:
                             st.info("You already have an active subscription. Go to Settings → Billing to manage it.")
                     else:
-                        st.error(f"Checkout failed: {err}")
+                        from core.dependencies import show_user_error
+
+                        show_user_error(
+                            "Could not start checkout right now.",
+                            next_steps="Please try again in a moment. If this keeps happening, use Manage Subscription or contact support.",
+                            technical_detail=str(err or "unknown checkout error"),
+                            category="billing",
+                        )
 
     if not (_price_starter or _price_pro or _price_business):
         st.info("Payment system is being configured. Check back soon.")

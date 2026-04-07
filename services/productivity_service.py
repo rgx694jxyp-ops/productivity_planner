@@ -6,7 +6,8 @@ import io
 from collections import defaultdict
 from datetime import date, timedelta
 
-from core.dependencies import _cached_employees, _get_db_client
+from database import get_client as _get_db_client
+from database import get_employees as _get_employees
 
 
 # ── Priority list risk scoring ─────────────────────────────────────────────
@@ -289,7 +290,7 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
         emps_lookup = {e["id"]: e for e in (_emp_q.execute().data or [])}
     except Exception:
         subs = []
-        emps_lookup = {e["id"]: e for e in (_cached_employees() or [])}
+        emps_lookup = {e["id"]: e for e in (_get_employees() or [])}
     # Fallback to unit_submissions if uph_history returned nothing for that range
     if not subs:
         try:

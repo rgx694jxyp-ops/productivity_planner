@@ -4,6 +4,7 @@ Centralized plan enforcement helpers for service layer.
 from typing import Any
 
 from services.billing_service import get_subscription_entitlement
+from services.observability import log_operational_event
 
 PLAN_RANKS = {
     "starter": 1,
@@ -72,12 +73,6 @@ PLAN_FEATURES = {
             "priority_support": True,
         },
     },
-}
-
-FEATURE_MIN_PLAN = {
-    "advanced": "pro",
-    "coaching_insights": "pro",
-    "priority_support": "business",
 }
 
 FEATURE_MESSAGES = {
@@ -234,10 +229,24 @@ def enforce_people_limit(
         return result
 
     if result["limit_type"] == "invite":
+        log_operational_event(
+            "plan_limit_denial",
+            status="denied",
+            tenant_id=tenant_id,
+            detail="Invite limit exceeded",
+            context=result,
+        )
         raise PlanEnforcementError(
             f"Plan '{result['plan']}' allows max {result['invite_limit']} team seats, requested {result['projected_total']}."
         )
 
+    log_operational_event(
+        "plan_limit_denial",
+        status="denied",
+        tenant_id=tenant_id,
+        detail="Employee limit exceeded",
+        context=result,
+    )
     raise PlanEnforcementError(
         f"Plan '{result['plan']}' allows max {result['employee_limit']} employee seats, requested {result['projected_total']}."
     )
@@ -285,11 +294,11 @@ def enforce_seat_limit(tenant_id: str, requested_count: int) -> None:
 
 def enforce_plan_or_raise(tenant_id: str, feature_name: str) -> None:
     if not can_access_feature(tenant_id, feature_name):
+        log_operational_event(
+            "access_gate_denial",
+            status="denied",
+            tenant_id=tenant_id,
+            detail=f"Feature denied: {feature_name}",
+            context={"feature": feature_name, "plan": get_current_plan(tenant_id)},
+        )
         raise PlanEnforcementError(get_feature_upgrade_message(feature_name))
-
-# Plans that unlock the full feature set (pro / business / admin / enterprise).
-_PAID_PLANS = {"pro", "business", "admin", "enterprise"}
-
-def is_paid_plan(plan_name: str) -> bool:
-    """Return True if *plan_name* grants access to paid/advanced features."""
-    return str(plan_name or "").lower() in _PAID_PLANS

@@ -1,4 +1,4 @@
-from core.dependencies import _cached_targets, _success_then_rerun
+from core.dependencies import _cached_targets, _log_app_error, _show_user_error, _success_then_rerun
 from core.runtime import date, st, init_runtime
 
 init_runtime()
@@ -81,7 +81,13 @@ def page_email():
                     if ok:
                         st.success(f"✓ Test email sent to {_to}")
                     else:
-                        st.error(f"Send failed: {err}")
+                        _show_user_error(
+                            "Could not send the test email.",
+                            next_steps="Check delivery settings and try again. You can switch to Resend API if SMTP continues failing.",
+                            technical_detail=str(err or "unknown email send error"),
+                            category="email",
+                        )
+                        _log_app_error("email", "Resend test email failed", detail=str(err or ""), severity="warning")
             st.divider()
             st.markdown("##### Resend Quick Setup")
             st.caption("1) Create Resend account. 2) Verify sender domain. 3) Create API key. 4) Paste key. 5) Send test.")
@@ -380,7 +386,13 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                             else:
                                 st.success(f"✓ Report sent to {len(to_addrs)} recipient(s).")
                         else:
-                            st.error(f"Send failed: {err}")
+                            _show_user_error(
+                                "Could not send the report right now.",
+                                next_steps="Please retry in a moment. If this keeps failing, verify email delivery settings.",
+                                technical_detail=str(err or "unknown report send error"),
+                                category="email",
+                            )
+                            _log_app_error("email", "Manual report send failed", detail=str(err or ""), severity="warning")
 
 
 

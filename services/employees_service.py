@@ -8,8 +8,9 @@ from collections import defaultdict
 from datetime import datetime as _dt
 
 import pandas as pd
-
-from core.dependencies import _cached_employees, _cached_targets, _get_db_client
+from database import get_client as _get_db_client
+from database import get_employees as _get_employees
+from goals import get_all_targets as _get_all_targets
 
 
 def _build_archived_productivity(session_state: dict, force: bool = False) -> bool:
@@ -22,7 +23,7 @@ def _build_archived_productivity(session_state: dict, force: bool = False) -> bo
     if not force and session_state.get("_archived_loaded") and (time.time() - _last) < 600:
         return True  # already fresh — skip the DB round-trip
 
-    _emp_rows = _cached_employees() or []
+    _emp_rows = _get_employees() or []
     _id_to_emp_code = {}
     emp_dept = {}
     emp_name = {}
@@ -273,7 +274,7 @@ def _build_archived_productivity(session_state: dict, force: bool = False) -> bo
     # ── Apply goals ───────────────────────────────────────────────────────────
     try:
         from goals import build_goal_status as _bgs
-        _arch_gs = _bgs(ranked, _cached_targets(), trend_data)
+        _arch_gs = _bgs(ranked, _get_all_targets(), trend_data)
     except Exception:
         _arch_gs = ranked
 

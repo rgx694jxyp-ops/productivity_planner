@@ -3,6 +3,8 @@ from core.dependencies import (
     _cached_employees,
     _cached_targets,
     _log_app_error,
+    _log_operational_event,
+    _show_user_error,
     require_db,
 )
 from services.plan_service import evaluate_import_limit
@@ -201,7 +203,12 @@ def _import_step1(tenant_id: str):
                                         )
                                     st.rerun()
                                 except Exception as _rm_err:
-                                    st.error(f"Could not remove upload: {_rm_err}")
+                                    _show_user_error(
+                                        "Could not remove this upload right now.",
+                                        next_steps="Please retry in a few seconds. If it keeps failing, contact support.",
+                                        technical_detail=traceback.format_exc(),
+                                        category="import",
+                                    )
                                     _log_app_error("import", f"Remove upload failed: {_rm_err}", detail=traceback.format_exc(), severity="error")
                         elif _is_active and _ins == 0:
                             st.caption("No rollback needed: this upload inserted 0 new rows (all duplicates).")
@@ -270,8 +277,20 @@ def _import_step1(tenant_id: str):
         try:
             raw_bytes = f.read()
         except Exception as _read_err:
-            st.error(f"Could not read **{f.name}**: {_read_err}")
+            _show_user_error(
+                f"Could not read {f.name}.",
+                next_steps="Confirm the file is not open elsewhere and try uploading again.",
+                technical_detail=str(_read_err),
+                category="import",
+            )
             _log_app_error("import", f"File read error ({f.name}): {_read_err}")
+            _log_operational_event(
+                "import_failure",
+                status="error",
+                tenant_id=tenant_id,
+                detail="File read error",
+                context={"filename": str(getattr(f, "name", "")), "error": str(_read_err)},
+            )
             continue
 
         if f.name.lower().endswith((".xlsx", ".xls")):
@@ -282,7 +301,12 @@ def _import_step1(tenant_id: str):
                 rows = _df.fillna("").to_dict("records")
                 headers = list(_df.columns)
             except Exception as _xlsx_err:
-                st.error(f"Could not read **{f.name}** as an Excel file: {_xlsx_err}")
+                _show_user_error(
+                    f"Could not parse {f.name} as an Excel file.",
+                    next_steps="Re-save the file as .xlsx or export as CSV, then upload again.",
+                    technical_detail=str(_xlsx_err),
+                    category="import",
+                )
                 continue
         else:
             headers, rows = _parse_csv(raw_bytes)
@@ -1449,13 +1473,27 @@ def _import_step3(tenant_id: str):
                         f"and uploaded {len(uph_batch)} fresh row(s)."
                     )
             except Exception as _uph_err:
-                st.error(f"UPH history storage failed: {_uph_err}")
+                _show_user_error(
+                    "Could not save imported history right now.",
+                    next_steps=(
+                        "Fix unresolved employee IDs (or missing employee records) and try the import again."
+                    ),
+                    technical_detail=traceback.format_exc(),
+                    category="pipeline",
+                )
                 st.info(
                     "Import stopped. Fix unresolved employee IDs (or missing employee records) "
                     "and run the import again so all history rows are written."
                 )
                 _log_app_error("pipeline", f"UPH history storage failed: {_uph_err}",
                                detail=traceback.format_exc(), severity="error")
+                _log_operational_event(
+                    "import_failure",
+                    status="error",
+                    tenant_id=tenant_id,
+                    detail="UPH history storage failed",
+                    context={"error": str(_uph_err)},
+                )
                 return
 
             _bust_cache()
@@ -1516,6 +1554,13 @@ def _import_step3(tenant_id: str):
             st.error("Pipeline error:")
             st.code(_tb)
             _log_app_error("pipeline", str(_pipe_err), detail=_tb)
+            _log_operational_event(
+                "import_failure",
+                status="error",
+                tenant_id=tenant_id,
+                detail="Pipeline processing failed",
+                context={"error": str(_pipe_err)},
+            )
 
     st.divider()
     col1, col2 = st.columns(2)

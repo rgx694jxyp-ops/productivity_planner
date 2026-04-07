@@ -9,8 +9,6 @@ def plan_gate(min_plan: str, feature_name: str) -> bool:
     st.caption("Upgrade in Settings → Subscription to unlock this feature.")
     return False
 
-# For legacy compatibility in productivity.py
-_plan_gate = plan_gate
 from core.billing_cache import BILLING_CACHE_TTL_SECONDS
 from core.dependencies import bust_cache, full_sign_out, render_sign_out_button
 from core.runtime import _html_mod, datetime, st, time
@@ -135,7 +133,7 @@ def render_sidebar() -> str:
 
         st.divider()
         nav_items = [
-            ("supervisor", "👔  Supervisor"),
+            ("supervisor", "✅  Today"),
             ("dashboard", "📊  Dashboard"),
             ("import", "📁  Import Data"),
             ("employees", "👥  Employees"),

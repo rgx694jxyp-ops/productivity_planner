@@ -34,6 +34,7 @@ def test_sidebar_key_routes() -> None:
     # app.py should delegate navigation and dispatch to modular core files.
     assert "from core.navigation import render_app_navigation" in app_src
     assert "from core.page_router import dispatch_page" in app_src
+    assert "run_background_workflows" not in app_src
     assert "page = render_app_navigation()" in app_src
     assert "dispatch_page(page)" in app_src
 

@@ -12,7 +12,7 @@ def dispatch_page(page: str) -> None:
     from pages.productivity import page_productivity
     from pages.settings_page import page_settings
     from pages.shift_plan import page_shift_plan
-    from pages.supervisor import page_supervisor
+    from pages.today_screen import page_supervisor
 
     handlers = {
         "supervisor": page_supervisor,

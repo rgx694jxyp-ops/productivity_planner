@@ -11,7 +11,6 @@ from core.app_flow import (
     handle_fatal_app_error,
     handle_logout_request,
     handle_public_query_actions,
-    run_background_workflows,
     show_post_portal_feedback,
     sync_billing_portal_return,
     track_page_entry,
@@ -42,8 +41,6 @@ def main() -> None:
 
     if not enforce_subscription_access():
         st.stop()
-
-    run_background_workflows()
 
     show_post_portal_feedback()
 

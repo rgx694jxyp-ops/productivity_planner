@@ -1,6 +1,7 @@
 from core.dependencies import (
     _full_sign_out,
     _log_app_error,
+    _show_user_error,
     _render_sign_out_button,
     _set_auth_cookies,
     _tenant_log_path,
@@ -265,7 +266,13 @@ def page_settings():
                 except Exception:
                     pass
         except Exception as _sub_err:
-            st.error(f"Could not load subscription info: {_sub_err}")
+            _show_user_error(
+                "Could not load billing information.",
+                next_steps="Refresh the page. If this continues, use Settings later or contact support.",
+                technical_detail=traceback.format_exc(),
+                category="billing",
+            )
+            _log_app_error("billing", f"Billing tab load failed: {_sub_err}", detail=traceback.format_exc())
 
     st.caption("Productivity Planner · Powered by Supply Chain Automation Co")
 
@@ -396,7 +403,12 @@ def page_settings():
                 else:
                     st.info("No audit log yet — changes will appear here after goals or flags are modified.")
             except Exception as _ae:
-                st.error(f"Could not read audit log: {_ae}")
+                _show_user_error(
+                    "Could not read the audit log right now.",
+                    next_steps="Try again in a moment. If this continues, contact support.",
+                    technical_detail=traceback.format_exc(),
+                    category="settings",
+                )
 
         st.divider()
         st.subheader("🧹 Data cleanup")
@@ -423,8 +435,12 @@ def page_settings():
                             st.success("✓ No duplicates found — data is clean.")
                     except BaseException as _ce:
                         st.session_state.confirm_cleanup = False
-                        try:    st.error(f"Cleanup error: {repr(_ce)[:200]}")
-                        except Exception: st.error("Cleanup failed.")
+                        _show_user_error(
+                            "Cleanup failed.",
+                            next_steps="Please retry. If this continues, contact support before re-running cleanup.",
+                            technical_detail=traceback.format_exc(),
+                            category="cleanup",
+                        )
                         _log_app_error("cleanup", f"Duplicate cleanup failed: {repr(_ce)[:500]}", detail=traceback.format_exc())
             if cc2.button("Cancel", use_container_width=True):
                 st.session_state.confirm_cleanup = False
@@ -469,7 +485,12 @@ def page_settings():
                         _sb.auth.update_user({"password": new_pw})
                         st.success("✓ Password updated.")
                     except Exception as _cpe:
-                        st.error(f"Failed: {_cpe}")
+                        _show_user_error(
+                            "Could not change password right now.",
+                            next_steps="Verify your current password and try again.",
+                            technical_detail=traceback.format_exc(),
+                            category="auth",
+                        )
                         _log_app_error("auth", f"Password change failed: {_cpe}")
 
         # ── Data export (GDPR) ────────────────────────────────────────────
@@ -494,7 +515,12 @@ def page_settings():
                     else:
                         st.info("No data found for your account.")
                 except Exception as _gdpr_e:
-                    st.error(f"Export failed: {_gdpr_e}")
+                    _show_user_error(
+                        "Could not export your data right now.",
+                        next_steps="Please retry in a moment. If this continues, contact support.",
+                        technical_detail=traceback.format_exc(),
+                        category="gdpr",
+                    )
                     _log_app_error("gdpr", f"Data export failed: {_gdpr_e}", detail=traceback.format_exc())
 
         # ── Account deletion ─────────────────────────────────────────────
@@ -521,7 +547,12 @@ def page_settings():
                             _full_sign_out()
                             st.rerun()
                         except Exception as _del_e:
-                            st.error(f"Deletion failed: {_del_e}")
+                            _show_user_error(
+                                "Could not delete account data right now.",
+                                next_steps="Please retry. If this continues, contact support immediately.",
+                                technical_detail=traceback.format_exc(),
+                                category="gdpr",
+                            )
                             _log_app_error("gdpr", f"Account deletion failed: {_del_e}", detail=traceback.format_exc())
                 else:
                     st.warning("Type DELETE exactly to confirm.")

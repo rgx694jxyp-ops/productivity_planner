@@ -234,6 +234,16 @@ async function logSubscriptionEvent(
   }
 }
 
+function logWebhookEvent(eventName: string, payload: Record<string, unknown> = {}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    component: "stripe_webhook",
+    event: eventName,
+    ...payload,
+  };
+  console.log(JSON.stringify(entry));
+}
+
 // Helper to build the full mirrored subscription row
 function buildSubscriptionRow(sub: any, tenantId: string, customerId: string, existing?: any) {
   let currentPlan = resolvePlan(sub);
@@ -366,7 +376,10 @@ Deno.serve(async (req) => {
   try {
     event = await verifyStripeSignature(body, signature);
   } catch (err) {
-    console.error("Signature verification failed:", err);
+    logWebhookEvent("webhook_signature_failed", {
+      status: "error",
+      error: err?.message || String(err),
+    });
     return new Response(`Webhook Error: ${err.message}`, { status: 400 });
   }
 
@@ -386,7 +399,11 @@ Deno.serve(async (req) => {
       eventInsertErr.code === "23505" ||
       String(eventInsertErr.message || "").toLowerCase().includes("duplicate key");
     if (duplicateEvent) {
-      console.log(`Duplicate Stripe event skipped: ${event.id} (${event.type})`);
+      logWebhookEvent("webhook_duplicate_skipped", {
+        status: "duplicate",
+        stripe_event_id: event.id,
+        stripe_event_type: event.type,
+      });
       return new Response(JSON.stringify({ received: true, duplicate: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -396,7 +413,11 @@ Deno.serve(async (req) => {
   }
 
   try {
-    console.log(`Processing event: ${event.type}, supa_url=${SUPABASE_URL?.slice(0, 30)}, key_len=${SUPABASE_SERVICE_ROLE_KEY?.length}`);
+    logWebhookEvent("webhook_processing_started", {
+      status: "start",
+      stripe_event_id: event.id,
+      stripe_event_type: event.type,
+    });
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
@@ -622,12 +643,27 @@ Deno.serve(async (req) => {
       }
 
       default:
-        console.log(`Unhandled event type: ${event.type}`);
+        logWebhookEvent("webhook_unhandled_event", {
+          status: "ignored",
+          stripe_event_id: event.id,
+          stripe_event_type: event.type,
+        });
     }
   } catch (err) {
-    console.error("Error processing webhook:", err);
+    logWebhookEvent("webhook_processing_failed", {
+      status: "error",
+      stripe_event_id: event?.id || "",
+      stripe_event_type: event?.type || "",
+      error: err?.message || String(err),
+    });
     return new Response(`Webhook handler error: ${err.message}`, { status: 500 });
   }
+
+  logWebhookEvent("webhook_processing_completed", {
+    status: "success",
+    stripe_event_id: event?.id || "",
+    stripe_event_type: event?.type || "",
+  });
 
   return new Response(JSON.stringify({ received: true }), {
     status: 200,

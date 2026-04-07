@@ -1416,13 +1416,132 @@ def remove_followup_db(emp_id: str, followup_date: str, tenant_id: str = "") -> 
         print(f"[Warning] Could not remove follow-up from DB: {e}")
 
 
+# ── Supervisor Actions (DB-backed) ──────────────────────────────────────────
+
+def create_supervisor_action(
+    emp_id: str,
+    employee_name: str,
+    department: str,
+    issue_type: str,
+    reason: str,
+    action_type: str,
+    success_metric: str,
+    due_date: str,
+    note: str = "",
+    created_by: str = "",
+    baseline_uph: float = 0.0,
+    latest_uph: float = 0.0,
+    tenant_id: str = "",
+) -> dict:
+    tid = tenant_id or get_tenant_id()
+    if not tid or not emp_id:
+        return {}
+    payload = {
+        "tenant_id": tid,
+        "emp_id": str(emp_id),
+        "employee_name": str(employee_name or "")[:120],
+        "department": str(department or "")[:80],
+        "issue_type": str(issue_type or "")[:80],
+        "reason": str(reason or "")[:500],
+        "action_type": str(action_type or "")[:80],
+        "success_metric": str(success_metric or "")[:250],
+        "due_date": str(due_date or "")[:10] or None,
+        "note": str(note or "")[:2000],
+        "created_by": str(created_by or "")[:120],
+        "baseline_uph": baseline_uph,
+        "latest_uph": latest_uph,
+        "status": "new",
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    try:
+        sb = get_client()
+        result = sb.table("supervisor_actions").insert(payload).execute()
+        if payload["due_date"]:
+            add_followup_db(emp_id, employee_name, department, payload["due_date"], reason[:80], tenant_id=tid)
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[Warning] Could not create supervisor action: {e}")
+        return {}
+
+
+def list_supervisor_actions(
+    tenant_id: str = "",
+    statuses: list[str] | None = None,
+    emp_id: str = "",
+) -> list[dict]:
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return []
+    try:
+        sb = get_client()
+        query = (
+            sb.table("supervisor_actions")
+            .select("*")
+            .eq("tenant_id", tid)
+            .order("created_at", desc=True)
+        )
+        if emp_id:
+            query = query.eq("emp_id", str(emp_id))
+        if statuses:
+            normalized = [str(status or "").lower() for status in statuses if str(status or "").strip()]
+            if normalized:
+                query = query.in_("status", normalized)
+        result = query.execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[Warning] Could not list supervisor actions: {e}")
+        return []
+
+
+def update_supervisor_action(action_id: str, updates: dict, tenant_id: str = "") -> dict:
+    tid = tenant_id or get_tenant_id()
+    if not tid or not action_id:
+        return {}
+
+    patch = dict(updates or {})
+    patch["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    status = str(patch.get("status") or "").lower()
+    if status == "closed" and not patch.get("completed_at"):
+        patch["completed_at"] = datetime.utcnow().isoformat() + "Z"
+    if status == "escalated" and not patch.get("escalated_at"):
+        patch["escalated_at"] = datetime.utcnow().isoformat() + "Z"
+
+    try:
+        current_rows = list_supervisor_actions(tenant_id=tid)
+        current = next((row for row in current_rows if str(row.get("id")) == str(action_id)), {})
+        sb = get_client()
+        result = (
+            sb.table("supervisor_actions")
+            .update(patch)
+            .eq("tenant_id", tid)
+            .eq("id", action_id)
+            .execute()
+        )
+
+        due_date = str(patch.get("due_date") or current.get("due_date") or "")[:10]
+        emp_code = str(current.get("emp_id") or "")
+        emp_name = str(current.get("employee_name") or "")
+        dept = str(current.get("department") or "")
+        reason = str(current.get("reason") or "")
+        if status == "closed":
+            if due_date and emp_code:
+                remove_followup_db(emp_code, due_date, tenant_id=tid)
+        elif due_date and emp_code:
+            add_followup_db(emp_code, emp_name, dept, due_date, reason[:80], tenant_id=tid)
+
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[Warning] Could not update supervisor action: {e}")
+        return {}
+
+
 # ── GDPR: data export & account deletion ─────────────────────────────────────
 
 _TENANT_TABLES = [
     "employees", "uph_history", "coaching_notes", "shifts",
     "uploaded_files", "clients", "orders", "order_assignments",
     "unit_submissions", "client_trends",
-    "tenant_goals", "tenant_settings", "tenant_email_config", "coaching_followups",
+    "tenant_goals", "tenant_settings", "tenant_email_config", "coaching_followups", "supervisor_actions",
     "subscriptions",
 ]
 
@@ -1817,10 +1936,7 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
 
     # Determine direction to control billing behavior
     _plan_order = {"starter": 1, "pro": 2, "business": 3}
-    _starter = _get_config("STRIPE_PRICE_STARTER") or ""
-    _pro = _get_config("STRIPE_PRICE_PRO") or ""
-    _business = _get_config("STRIPE_PRICE_BUSINESS") or ""
-    _price_to_plan = {_starter: "starter", _pro: "pro", _business: "business"}
+    _price_to_plan = _price_id_to_plan_map()
     _current_plan = (_price_to_plan.get(current_price_id, "") or sub_row.get("plan") or "starter").lower()
     _target_plan = (_price_to_plan.get(new_price_id, "") or "").lower()
     if not _target_plan:
@@ -1993,12 +2109,17 @@ def _resolve_plan_from_price_id(price_id: str) -> str:
     """Map a Stripe price id to the local plan key."""
     if not price_id:
         return "starter"
-    price_map = {
-        _get_config("STRIPE_PRICE_STARTER"): "starter",
-        _get_config("STRIPE_PRICE_PRO"): "pro",
-        _get_config("STRIPE_PRICE_BUSINESS"): "business",
-    }
+    price_map = _price_id_to_plan_map()
     return price_map.get(price_id, "starter")
+
+
+def _price_id_to_plan_map() -> dict[str, str]:
+    """Return configured Stripe price id -> plan mapping."""
+    return {
+        _get_config("STRIPE_PRICE_STARTER") or "": "starter",
+        _get_config("STRIPE_PRICE_PRO") or "": "pro",
+        _get_config("STRIPE_PRICE_BUSINESS") or "": "business",
+    }
 
 
 def _resolve_plan_from_price_id_live(price_id: str, stripe_key: str) -> str:

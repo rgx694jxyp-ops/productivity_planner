@@ -53,10 +53,7 @@ def _normalize_label_text_local(value, max_len: int = 64) -> str:
     return s or "Unknown"
 
 
-try:
-    from pages.common import _normalize_label_text
-except Exception:
-    _normalize_label_text = _normalize_label_text_local
+_normalize_label_text = _normalize_label_text_local
 
 
 # ── Name sanitization ─────────────────────────────────────────────────────────
@@ -322,12 +319,12 @@ def _get_upload_by_id(tenant_id: str, upload_id):
 
 def _estimate_new_employees_for_sessions(sessions: list[dict]) -> tuple[list[str], dict[str, str]]:
     """Return (new_employee_ids, id_to_name) inferred from uploaded sessions."""
-    from core.dependencies import _cached_employees
+    from database import get_employees as _get_employees
     from data_loader import auto_detect as _auto_detect
 
     _existing_ids = {
         str(e.get("emp_id", "")).strip()
-        for e in (_cached_employees() or [])
+        for e in (_get_employees() or [])
         if str(e.get("emp_id", "")).strip()
     }
     _new_ids = set()

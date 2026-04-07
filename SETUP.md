@@ -66,16 +66,39 @@ Copy `.env.example` to `.env` and fill in your values. Use a library like `pytho
 streamlit run app.py
 ```
 
-## 8. Email Reports (Manual Sending)
+## 8. Email Reports (Manual + Scheduled Worker)
 
-Email reports are currently configured for manual sending from inside the app.
+Manual sending is available in-app, and recurring schedules run in a separate worker process.
 
 Use the app's **Email Setup** page to:
 - configure delivery settings (SMTP or Resend)
 - add recipients
 - send reports from the **Send Now** tab
 
-No background scheduler setup is required.
+To run scheduled reports independent of user sessions:
+
+1. Export Supabase credentials (service-role key recommended for scheduler):
+```bash
+export SUPABASE_URL="https://your-project.supabase.co"
+export SUPABASE_KEY="your-service-role-or-anon-key"
+```
+
+2. Run one pass manually:
+```bash
+python3 scripts/email_scheduler_worker.py --once
+```
+
+3. Install OS scheduler integration:
+- macOS/Linux helper:
+```bash
+bash scripts/setup_scheduler.sh
+```
+- Windows helper:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install_scheduler_windows.ps1 -SupabaseUrl "https://your-project.supabase.co" -SupabaseKey "<key>"
+```
+
+This ensures scheduled email jobs run even when no one has the app open.
 
 Sign in with the email/password you created. On first login, the app automatically:
 - Creates a tenant (organization) for you

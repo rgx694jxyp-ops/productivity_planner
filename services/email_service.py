@@ -1,13 +1,6 @@
-import threading
 from datetime import date
-import time
-import traceback
 
-from core.dependencies import log_app_error, tenant_log_path
-
-
-EMAIL_SCHEDULER_ENABLED = False
-_email_thread_started = False
+from services.observability import log_operational_event, tenant_log_path
 
 
 def email_log(msg: str) -> None:
@@ -22,9 +15,6 @@ def email_log(msg: str) -> None:
 
 
 def run_scheduled_reports_for_tenant(tenant_id: str, force_now: bool = False, schedule_names: list[str] | None = None) -> list[dict]:
-    if not EMAIL_SCHEDULER_ENABLED:
-        return []
-
     from database import get_client as sched_client, get_subscription
     from email_engine import (
         get_schedules,
@@ -97,8 +87,22 @@ def run_scheduled_reports_for_tenant(tenant_id: str, force_now: bool = False, sc
         if ok:
             mark_schedule_sent(schedule.get("name", ""), timezone=tz, tenant_id=tid)
             email_log(f"[{tid[:8]}] SENT '{schedule.get('name')}' to {send_to} (tz={tz or 'not set'})")
+            log_operational_event(
+                "email_delivery",
+                status="success",
+                tenant_id=tid,
+                detail="Scheduled report sent",
+                context={"schedule": schedule.get("name", ""), "recipient_count": len(send_to)},
+            )
         else:
             email_log(f"[{tid[:8]}] FAILED '{schedule.get('name')}': {err}")
+            log_operational_event(
+                "email_failure",
+                status="failed",
+                tenant_id=tid,
+                detail="Scheduled report send failed",
+                context={"schedule": schedule.get("name", ""), "error": str(err or "")},
+            )
         results.append({
             "name": schedule.get("name", ""),
             "ok": ok,
@@ -106,81 +110,3 @@ def run_scheduled_reports_for_tenant(tenant_id: str, force_now: bool = False, sc
             "recipients": send_to,
         })
     return results
-
-
-def _bg_send_scheduled_emails() -> None:
-    if not EMAIL_SCHEDULER_ENABLED:
-        return
-
-    try:
-        from database import SUPABASE_KEY as bg_key, SUPABASE_URL as bg_url
-        from supabase import create_client as bg_create
-
-        sb = bg_create(bg_url, bg_key)
-        try:
-            response = sb.table("tenant_email_config").select("tenant_id, schedules").execute()
-            tenant_configs = response.data or []
-        except Exception as error:
-            email_log(f"Could not fetch tenant email configs: {error}")
-            return
-
-        for tenant_cfg in tenant_configs:
-            tid = tenant_cfg.get("tenant_id", "")
-            schedules = tenant_cfg.get("schedules") or []
-            if not tid or not schedules:
-                continue
-            try:
-                results = run_scheduled_reports_for_tenant(tenant_id=tid, force_now=False)
-                if not results and schedules:
-                    email_log(f"[{tid[:8]}] Has {len(schedules)} schedule(s) but none are due now")
-            except Exception as tenant_error:
-                email_log(f"[{tid[:8]}] Tenant error: {tenant_error}")
-                try:
-                    from database import log_error
-
-                    log_error("email", f"Tenant processing error: {tenant_error}", severity="error", tenant_id=tid)
-                except Exception:
-                    pass
-    except Exception as thread_error:
-        email_log(f"Thread error: {thread_error}")
-
-
-def start_email_thread():
-    if not EMAIL_SCHEDULER_ENABLED:
-        return None
-
-    global _email_thread_started
-    if _email_thread_started:
-        return None
-    _email_thread_started = True
-
-    def _loop():
-        time.sleep(30)
-        email_log("Background email thread started")
-        while True:
-            try:
-                _bg_send_scheduled_emails()
-            except Exception as error:
-                email_log(f"Unhandled loop error: {error}")
-            time.sleep(60)
-
-    thread = threading.Thread(target=_loop, daemon=True, name="email-scheduler")
-    thread.start()
-    return thread
-
-
-def run_page_render_email_check(session_state: dict, tenant_id: str) -> dict:
-    if not EMAIL_SCHEDULER_ENABLED:
-        return {"ran": False, "reason": "disabled"}
-    now = time.time()
-    last_check = float((session_state or {}).get("_last_email_check", 0) or 0)
-    if now - last_check > 60:
-        session_state["_last_email_check"] = now
-        try:
-            run_scheduled_reports_for_tenant(tenant_id=tenant_id, force_now=False)
-            return {"ran": True, "reason": "due"}
-        except Exception as error:
-            email_log(f"Page-render email check error: {error}")
-            log_app_error("email", f"Schedule check error: {error}", detail=traceback.format_exc())
-            return {"ran": True, "reason": "error", "error": str(error)}
-    return {"ran": False, "reason": "throttled"}

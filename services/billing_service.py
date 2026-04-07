@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from services.settings_service import format_iso_date_human, get_plan_alternatives, get_plan_constants
+from services.observability import log_operational_event
 
 
 def get_subscription_entitlement(tenant_id: str = "", user_email: str = "") -> dict:
@@ -245,8 +246,22 @@ def request_plan_change(target_price: str, tenant_id: str) -> dict:
             _get_config("STRIPE_PRICE_BUSINESS") or "": "business",
         }
         target_plan = price_to_plan.get(target_price, "")
+        log_operational_event(
+            "billing_plan_change",
+            status="attempt",
+            tenant_id=tenant_id,
+            detail="Plan change requested",
+            context={"current_plan": current_plan, "target_plan": target_plan or "unknown"},
+        )
         plan_rank = {"starter": 1, "pro": 2, "business": 3}
         if target_plan and plan_rank.get(target_plan, 0) < plan_rank.get(current_plan, 0):
+            log_operational_event(
+                "billing_plan_change",
+                status="denied",
+                tenant_id=tenant_id,
+                detail="Downgrade blocked in app",
+                context={"current_plan": current_plan, "target_plan": target_plan},
+            )
             return {
                 "success": False,
                 "data": None,
@@ -255,6 +270,13 @@ def request_plan_change(target_price: str, tenant_id: str) -> dict:
             }
 
         ok, msg = modify_subscription(target_price, tenant_id)
+        log_operational_event(
+            "billing_plan_change",
+            status="success" if ok else "failed",
+            tenant_id=tenant_id,
+            detail="Stripe modify_subscription completed",
+            context={"current_plan": current_plan, "target_plan": target_plan or "unknown", "message": msg or ""},
+        )
         return {
             "success": bool(ok),
             "data": {"ok": bool(ok), "message": msg or ""},
@@ -262,6 +284,16 @@ def request_plan_change(target_price: str, tenant_id: str) -> dict:
             "warnings": [],
         }
     except Exception as exc:
+        try:
+            log_operational_event(
+                "billing_plan_change",
+                status="error",
+                tenant_id=tenant_id,
+                detail=f"Exception during plan change: {exc}",
+                context={"target_price": target_price},
+            )
+        except Exception:
+            pass
         return {
             "success": False,
             "data": None,

@@ -3,13 +3,13 @@ from core.dependencies import (
     check_session_timeout,
     clear_auth_cookies,
     login_page,
+    log_operational_event,
     log_app_error,
     restore_session_from_cookies,
     verify_checkout_and_activate,
 )
 from core.billing_cache import BILLING_CACHE_TTL_SECONDS, clear_billing_cache
 from core.runtime import st, time, traceback
-from services.email_service import EMAIL_SCHEDULER_ENABLED, email_log, run_page_render_email_check, start_email_thread
 from ui.landing import show_landing_page, track_landing_event
 
 
@@ -129,6 +129,14 @@ def enforce_subscription_access() -> bool:
     user_id = str(st.session_state.get("user_id", "") or "")
     user_email = st.session_state.get("user_email", "").lower()
     if user_email and user_email in admin_emails:
+        log_operational_event(
+            "access_gate_allow",
+            status="allowed",
+            tenant_id=tenant_id,
+            user_email=user_email,
+            detail="Admin allowlist bypass",
+            context={"reason": "admin_email_allowlist"},
+        )
         st.session_state["_sub_active"] = True
         return True
 
@@ -163,25 +171,36 @@ def enforce_subscription_access() -> bool:
         stripe_sync_ok = False
 
     if stripe_sync_ok:
+        log_operational_event(
+            "access_gate_allow",
+            status="allowed",
+            tenant_id=tenant_id,
+            user_email=user_email,
+            detail="Access restored after verification",
+            context={"recheck": True},
+        )
         clear_billing_cache()
         st.session_state["_sub_active"] = True
         st.rerun()
+
+    entitlement = st.session_state.get("_billing_entitlement") or st.session_state.get("_sub_entitlement") or {}
+    log_operational_event(
+        "access_gate_denial",
+        status="denied",
+        tenant_id=tenant_id,
+        user_email=user_email,
+        detail="Subscription gate denied app access",
+        context={
+            "status": entitlement.get("status", "unknown"),
+            "access_reason": entitlement.get("access_reason", "unknown"),
+            "plan": entitlement.get("plan", "starter"),
+        },
+    )
 
     from core.dependencies import show_subscription_page
 
     show_subscription_page()
     return False
-
-
-def run_background_workflows() -> None:
-    if not EMAIL_SCHEDULER_ENABLED:
-        return
-
-    start_email_thread()
-    run_page_render_email_check(
-        st.session_state,
-        st.session_state.get("tenant_id", ""),
-    )
 
 
 def show_post_portal_feedback() -> None:
@@ -203,7 +222,7 @@ def handle_fatal_app_error(fatal_error: Exception) -> None:
     try:
         log_app_error("fatal", f"Unhandled app error: {fatal_error}", detail=fatal_tb)
     except Exception:
-        email_log(f"Fatal app error logging failed: {fatal_error}")
+        print(f"Fatal app error logging failed: {fatal_error}")
     st.error("A fatal app error occurred. Please refresh or contact support.")
     with st.expander("Technical details"):
         st.code(fatal_tb)
