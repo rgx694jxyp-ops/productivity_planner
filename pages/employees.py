@@ -503,7 +503,6 @@ def _emp_coaching():
 
             # ── Add entry ────────────────────────────────────────────────────
             if "cn_note_val" not in st.session_state: st.session_state.cn_note_val = ""
-            if "cn_by_val"   not in st.session_state: st.session_state.cn_by_val   = ""
             
             note_text  = st.text_area("Add a coaching note", height=120, key="cn_note",
                                        value=st.session_state.cn_note_val,
@@ -524,10 +523,11 @@ def _emp_coaching():
                 key="cn_common_issues",
                 help="Tag the likely cause so we can track patterns over time.",
             )
-            nc1, nc2 = st.columns([2, 3])
-            created_by = nc2.text_input("Your name (optional)", key="cn_by",
-                                         value=st.session_state.cn_by_val,
-                                         placeholder="Your name")
+            current_user_name = (
+                st.session_state.get("user_name", "").strip()
+                or st.session_state.get("user_email", "").strip()
+            )
+            st.caption(f"Note will be saved as: {current_user_name or 'Current user'}")
 
             _sv1, _sv2 = st.columns(2)
             if _sv1.button("💾 Save note", type="primary", use_container_width=True):
@@ -536,14 +536,13 @@ def _emp_coaching():
                     if selected_issues:
                         _issue_prefix = "[Issues: " + ", ".join(selected_issues) + "]\n"
                     _final_note = f"{_issue_prefix}{note_text.strip()}"
-                    add_coaching_note(emp_id, _final_note, created_by.strip())
+                    add_coaching_note(emp_id, _final_note, current_user_name)
                     _raw_cached_coaching_notes_for.clear()
                     _raw_cached_all_coaching_notes.clear()
                     _preview = note_text.strip()[:80]
                     st.session_state[f"_cn_last_note_{emp_id}"] = _preview
                     st.session_state[_fu_key] = True   # prompt follow-up scheduler
                     st.session_state.cn_note_val = ""
-                    st.session_state.cn_by_val   = ""
                     # Track coaching session progress
                     st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
                     st.session_state["_last_coached_emp_id"] = emp_id

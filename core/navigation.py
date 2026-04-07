@@ -1,3 +1,15 @@
+def plan_gate(min_plan: str, feature_name: str) -> bool:
+    tid = st.session_state.get("tenant_id", "")
+    plan = _get_current_plan(tid)
+    plan_ranks = {"starter": 1, "pro": 2, "business": 3, "admin": 99}
+    if plan_ranks.get(plan, 1) >= plan_ranks.get(min_plan, 1):
+        return True
+    st.info(f"{feature_name} is available on **{min_plan.capitalize()}** and above.")
+    st.caption("Upgrade in Settings → Subscription to unlock this feature.")
+    return False
+
+# For legacy compatibility in productivity.py
+_plan_gate = plan_gate
 from core.dependencies import bust_cache, full_sign_out, render_sign_out_button
 from core.runtime import _html_mod, datetime, st, time
 from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
@@ -78,6 +90,11 @@ def render_subscription_banner() -> None:
         + "</div>",
         unsafe_allow_html=True,
     )
+
+
+def render_app_navigation() -> str:
+    render_subscription_banner()
+    return render_sidebar()
 
 def render_sidebar() -> str:
 

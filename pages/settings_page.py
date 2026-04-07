@@ -284,7 +284,7 @@ def page_settings():
             )
             _tid_team = st.session_state.get("tenant_id", "")
             _my_role = get_my_role(_tid_team)
-            _is_admin = (_my_role == "admin" or _get_current_plan() == "admin")
+            _is_admin = (_my_role == "admin" or _get_current_plan(_tid_team) == "admin")
 
             # ── Invite link ────────────────────────────────────────────────────
             _inv_code = get_invite_code(_tid_team)
