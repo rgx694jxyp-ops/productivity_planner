@@ -44,7 +44,12 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
         return
 
     last_coached_id = st.session_state.get("_last_coached_emp_id", None)
-    adaptive = _render_adaptive_action_suggestion(gs, history, last_coached_id)
+    adaptive = _render_adaptive_action_suggestion(
+        gs,
+        history,
+        last_coached_id,
+        coached_today=int(st.session_state.get("_coached_today", 0)),
+    )
 
     _name_raw = adaptive["name"] if adaptive else rec.get("name", "")
     _dept_raw = rec.get("department", "")

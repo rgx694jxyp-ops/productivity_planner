@@ -8,19 +8,18 @@ from collections import defaultdict
 from datetime import datetime as _dt
 
 import pandas as pd
-import streamlit as st
 
 from core.dependencies import _cached_employees, _cached_targets, _get_db_client
 
 
-def _build_archived_productivity(force: bool = False) -> bool:
+def _build_archived_productivity(session_state: dict, force: bool = False) -> bool:
     """
     Build productivity session state from DB. Queries aggregate data directly
     to avoid fetching thousands of raw rows.
     Skips the rebuild if data was loaded recently (within 600 s) unless force=True.
     """
-    _last = float(st.session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
-    if not force and st.session_state.get("_archived_loaded") and (time.time() - _last) < 600:
+    _last = float(session_state.get("_archived_last_refresh_ts", 0.0) or 0.0)
+    if not force and session_state.get("_archived_loaded") and (time.time() - _last) < 600:
         return True  # already fresh — skip the DB round-trip
 
     _emp_rows = _cached_employees() or []
@@ -174,8 +173,8 @@ def _build_archived_productivity(force: bool = False) -> bool:
     employee_rolling_avg.sort(key=lambda r: (r["Employee"], r["Date"]))
 
     if not emp_agg:
-        st.session_state["_archived_loaded"] = False
-        st.session_state["_arch_debug"] = (
+        session_state["_archived_loaded"] = False
+        session_state["_arch_debug"] = (
             f"uph_history rows: {total_rows}, unit_submissions fallback ran: {total_rows == 0}"
         )
         return False
@@ -233,7 +232,7 @@ def _build_archived_productivity(force: bool = False) -> bool:
         dept_report.setdefault(r2.get("Department", ""), []).append(r2)
 
     # ── Build trend_data from per-employee weekly UPH ─────────────────────────
-    _trend_weeks = st.session_state.get("trend_weeks", 4)
+    _trend_weeks = session_state.get("trend_weeks", 4)
     all_weeks_sorted = sorted(
         {wk for emp_wks in emp_week_uph.values() for wk in emp_wks}
     )
@@ -278,7 +277,7 @@ def _build_archived_productivity(force: bool = False) -> bool:
     except Exception:
         _arch_gs = ranked
 
-    st.session_state.update({
+    session_state.update({
         "top_performers":       ranked,
         "goal_status":          _arch_gs,
         "dept_report":          dept_report,

@@ -326,7 +326,7 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
 
         # Load archived data if pipeline hasn't run this session
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
 
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             st.info("No productivity data available yet.")

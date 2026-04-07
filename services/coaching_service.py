@@ -1,6 +1,5 @@
 """Coaching service — coaching impact tracking, effectiveness analysis, and recommendations."""
 
-import streamlit as st
 from datetime import datetime, date, timedelta
 from utils.floor_language import _safe_float
 
@@ -183,45 +182,48 @@ def _get_primary_recommendation(gs: list[dict], history: list[dict]) -> dict | N
     return candidates[0]
 
 
-def _enhance_coaching_feedback(emp_name: str, emp_id: str, remaining_below_goal: int):
-    """Enhanced feedback after coaching save."""
-    coached_today = int(st.session_state.get("_coached_today", 1))
-
-    st.success("✔ Coaching logged and saved")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Coached Today", coached_today)
-    with col2:
-        st.metric("Remaining", remaining_below_goal)
-
+def build_coaching_feedback_payload(coached_today: int, remaining_below_goal: int) -> dict:
+    """Return post-coaching feedback as a structured payload (no UI rendering)."""
     if remaining_below_goal > 0:
         if coached_today == 1:
             momentum_msg = (
-                f"You're off to a great start — <strong>{remaining_below_goal} more</strong> "
+                f"You're off to a great start — {remaining_below_goal} more "
                 f"{'employee' if remaining_below_goal == 1 else 'employees'} to help."
             )
         elif coached_today % 5 == 0:
-            momentum_msg = f"🔥 {coached_today} coached today! <strong>{remaining_below_goal}</strong> remaining."
+            momentum_msg = f"{coached_today} coached today! {remaining_below_goal} remaining."
         else:
             momentum_msg = (
-                f"You're on a roll — <strong>{remaining_below_goal}</strong> "
+                f"You're on a roll — {remaining_below_goal} "
                 f"{'employee' if remaining_below_goal == 1 else 'employees'} left."
             )
+        return {
+            "success": True,
+            "data": {
+                "coached_today": int(coached_today),
+                "remaining": int(remaining_below_goal),
+                "message": momentum_msg,
+                "all_done": False,
+                "suggested_action": "continue_coaching",
+            },
+            "error": None,
+            "warnings": [],
+        }
 
-        st.markdown(
-            f'<div style="background: linear-gradient(90deg, #E3F2FD 0%, #E8F0F9 100%);border-radius: 8px;padding: 14px 16px;margin: 12px 0;font-size: 14px;border-left: 4px solid #4DA3FF;border-top: 1px solid #B3D8FF;">{momentum_msg}</div>',
-            unsafe_allow_html=True,
-        )
+    return {
+        "success": True,
+        "data": {
+            "coached_today": int(coached_today),
+            "remaining": 0,
+            "message": "All high-risk employees coached today.",
+            "all_done": True,
+            "suggested_action": "return_dashboard",
+        },
+        "error": None,
+        "warnings": [],
+    }
 
-        col_continue, col_return = st.columns(2)
-        if col_continue.button("⬇️ Continue Coaching →", key="continue_auto", type="primary", use_container_width=True):
-            st.rerun()
-        if col_return.button("↩️ Back to Dashboard", key="back_to_dash", use_container_width=True):
-            st.session_state["goto_page"] = "dashboard"
-            st.rerun()
-    else:
-        st.markdown(
-            '<div style="background: linear-gradient(90deg, #E8F5E9 0%, #F1F8E9 100%);border-radius: 8px;padding: 14px 16px;margin: 12px 0;font-size: 14px;border-left: 4px solid #6FE090;border-top: 1px solid #AED581;">🏆 <strong>All high-risk employees coached today!</strong> Your team is in great shape.</div>',
-            unsafe_allow_html=True,
-        )
+
+# Legacy name kept for compatibility with older imports.
+def _enhance_coaching_feedback(emp_name: str, emp_id: str, remaining_below_goal: int):
+    return build_coaching_feedback_payload(1, remaining_below_goal)

@@ -120,7 +120,7 @@ def _import_step1():
     st.caption("Upload a CSV or Excel export, or type a few rows in manually. We will help make it usable.")
 
     def _render_recent_uploads_panel():
-        _recent_uploads = _list_recent_uploads(days=7)
+        _recent_uploads = _list_recent_uploads(st.session_state.get("tenant_id", ""), days=7)
         _recent_uploads_visible = []
         for _u in _recent_uploads:
             _meta = _decode_jsonish(_u.get("header_mapping"))
@@ -184,10 +184,10 @@ def _import_step1():
                                         "attempted_deletes": int(_attempted),
                                         "verified_deleted": int(_verified),
                                     }
-                                    _deactivate_upload(_uid, _meta)
+                                    _deactivate_upload(st.session_state.get("tenant_id", ""), _uid, _meta)
 
                                     _bust_cache()
-                                    _build_archived_productivity(force=True)
+                                    _build_archived_productivity(st.session_state, force=True)
                                     if _verified == _attempted:
                                         st.success(
                                             f"✅ Rollback confirmed. Deleted {_verified}/{_attempted} row(s) from history. "
@@ -576,7 +576,7 @@ def _import_step3():
             _payload = {}
 
             if _upload_id:
-                _upload_row = _get_upload_by_id(_upload_id)
+                _upload_row = _get_upload_by_id(_tenant_id, _upload_id)
                 _payload = _decode_jsonish((_upload_row or {}).get("header_mapping")) if _upload_row else {}
 
             _undo_data = _payload.get("undo", {}) if isinstance(_payload, dict) else {}
@@ -603,11 +603,15 @@ def _import_step3():
                     "attempted_deletes": int(_attempted),
                     "verified_deleted": int(_verified),
                 }
-                _deactivate_upload(_upload_id, _payload)
+                _deactivate_upload(_tenant_id, _upload_id, _payload)
 
             _bust_cache()
-            _build_archived_productivity(force=True)
+            st.session_state["_archived_loaded"] = False
+            st.session_state["pipeline_done"] = False
+            st.session_state.import_step = 1
+            st.session_state.uploaded_sessions = []
             st.session_state.pop("_last_import_undo", None)
+            st.session_state.pop("_import_complete_summary", None)
             if _verified == _attempted:
                 st.success(
                     f"✅ Rollback confirmed. Deleted {_verified}/{_attempted} row(s) from history. "
@@ -724,7 +728,7 @@ def _import_step3():
 
     _candidate_preview_rows = _build_candidate_uph_rows(sessions, work_date)
     _preview_fingerprint = _build_import_fingerprint(_candidate_preview_rows)
-    _matching_upload = _find_matching_upload_by_fingerprint(_preview_fingerprint)
+    _matching_upload = _find_matching_upload_by_fingerprint(st.session_state.get("tenant_id", ""), _preview_fingerprint)
     _preview_dup_count = 0
     _preview_exact_duplicate_import = False
     _preview_mismatch_rows = []
@@ -1233,7 +1237,7 @@ def _import_step3():
             _undo_previous_rows = []
             _undo_touched_keys = []
             _batch_fingerprint = _build_import_fingerprint(uph_batch)
-            _matching_upload = _find_matching_upload_by_fingerprint(_batch_fingerprint)
+            _matching_upload = _find_matching_upload_by_fingerprint(st.session_state.get("tenant_id", ""), _batch_fingerprint)
             if _candidate_count > 0 and _matching_upload:
                 _dup_skipped = _candidate_count
                 _exact_duplicate_import = True
@@ -1411,7 +1415,7 @@ def _import_step3():
                         "created_at": get_user_timezone_now().isoformat(timespec="seconds"),
                     }
                     _upload_filename = ", ".join([s.get("filename", "") for s in sessions if s.get("filename")]).strip() or "Import"
-                    _upload_log_id = _record_upload_event(_upload_filename, _candidate_count, _upload_payload)
+                    _upload_log_id = _record_upload_event(_bg_tid, _upload_filename, _candidate_count, _upload_payload)
                     if len(uph_batch) > 0 and (_new_row_ids or _undo_previous_rows):
                         st.session_state["_last_import_undo"] = {
                             "tenant_id": _bg_tid,
@@ -1447,40 +1451,37 @@ def _import_step3():
                 return
 
             _bust_cache()
+            # Keep pipeline completion fast; rebuild full analytics lazily on first destination page.
+            bar.progress(90, text="Finalizing import…")
+            st.session_state["_archived_loaded"] = False
+            st.session_state["pipeline_done"] = False
+            st.session_state["_archived_last_refresh_ts"] = 0.0
 
-            # Rebuild productivity from full DB (includes all past imports)
-            # so that a second import doesn't lose the first import's data.
-            bar.progress(90, text="Rebuilding full productivity view…")
-            _full_ok = _build_archived_productivity()
-            _ranked_count = len(st.session_state.get("top_performers", []))
-            if _full_ok:
-                st.session_state["_archived_last_refresh_ts"] = time.time()
-            if not _full_ok:
-                # Fallback path: only compute heavy analytics when archived rebuild fails.
-                ranked = rank_employees(existing, all_mapping, ps, log)
-                targets = _cached_targets()
-                trend_data = analyse_trends(existing, all_mapping, weeks=st.session_state.trend_weeks)
-                goal_status = build_goal_status(ranked, targets, trend_data)
-                dept_report = build_department_report(ranked, ps, log)
-                dept_trends = calculate_department_trends(existing, all_mapping, ps, log)
-                weekly = build_weekly_summary(existing, all_mapping, ps, log)
-                rolling_avg = calculate_employee_rolling_average(existing, all_mapping, ps, log)
-                risk_scores = calculate_employee_risk(existing, all_mapping, ps, log)
-                _ranked_count = len(ranked)
+            # Quick summary from this import batch only (full trends/risks are computed lazily later).
+            _ranked_count = len({str(r.get("emp_id", "")) for r in uph_batch if str(r.get("emp_id", "")).strip()})
+            _dept_targets = _cached_targets()
+            _emp_totals = {}
+            for _r in uph_batch:
+                _eid = str(_r.get("emp_id", "") or "").strip()
+                if not _eid:
+                    continue
+                _dept = str(_r.get("department", "") or "")
+                _hours = float(_r.get("hours_worked", 0) or 0)
+                _units = float(_r.get("units", 0) or 0)
+                _cur = _emp_totals.get(_eid, {"units": 0.0, "hours": 0.0, "dept": _dept})
+                _cur["units"] += _units
+                _cur["hours"] += _hours
+                if _dept:
+                    _cur["dept"] = _dept
+                _emp_totals[_eid] = _cur
 
-                # Fallback: use only current import's data
-                st.session_state.update({
-                    "top_performers":    ranked,
-                    "dept_report":       dept_report,
-                    "dept_trends":       dept_trends,
-                    "weekly_summary":    weekly,
-                    "employee_rolling_avg": rolling_avg,
-                    "employee_risk":     risk_scores,
-                    "goal_status":       goal_status,
-                    "trend_data":        trend_data,
-                    "pipeline_done":     True,
-                    "_archived_loaded":  False,
-                })
+            _below_final = 0
+            for _v in _emp_totals.values():
+                _tgt = float(_dept_targets.get(_v.get("dept", ""), 0) or 0)
+                _uph = (_v["units"] / _v["hours"]) if _v["hours"] > 0 else 0
+                if _tgt > 0 and _uph < _tgt:
+                    _below_final += 1
+            _risks_final = 0
 
             st.session_state.update({
                 "mapping":           all_mapping,
@@ -1490,10 +1491,6 @@ def _import_step3():
             })
             bar.progress(100, text="Done!")
             _unique_emp_count = len({r["emp_id"] for r in alloc_rows})
-            _gs_final   = st.session_state.get("goal_status", [])
-            _below_final = len([r for r in _gs_final if r.get("goal_status") == "below_goal"])
-            _risks_final = len([r for r in _gs_final
-                                 if r.get("goal_status") == "below_goal" and r.get("trend") == "down"])
             st.session_state["_import_complete_summary"] = {
                 "emp_count": _unique_emp_count,
                 "ranked":    _ranked_count,

@@ -43,7 +43,7 @@ def load_goal_status_history(spinner_text: str = "Loading data…"):
             try:
                 from pages.employees import _build_archived_productivity
 
-                _build_archived_productivity()
+                _build_archived_productivity(st.session_state)
             except Exception:
                 pass
 

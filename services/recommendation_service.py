@@ -1,11 +1,15 @@
 """Recommendation service — picks next action based on context."""
 
 from datetime import datetime, date
-import streamlit as st
 from services.coaching_service import _get_primary_recommendation
 
 
-def _render_adaptive_action_suggestion(gs: list[dict], history: list[dict], last_coached_emp_id: str | None = None):
+def _render_adaptive_action_suggestion(
+    gs: list[dict],
+    history: list[dict],
+    last_coached_emp_id: str | None = None,
+    coached_today: int = 0,
+):
     """
     Adaptive recommendation rail logic.
     Evolves from "here's the next person" to context-aware suggestions based on:
@@ -35,7 +39,7 @@ def _render_adaptive_action_suggestion(gs: list[dict], history: list[dict], last
         last_dept = last_emp.get("Department", "")
         same_dept_coaching = (last_dept == rec_dept) and last_emp != rec
 
-    coached_today = int(st.session_state.get("_coached_today", 0))
+    coached_today = int(coached_today or 0)
     momentum_level = "building" if coached_today >= 2 else "starting" if coached_today == 1 else "fresh"
 
     try:

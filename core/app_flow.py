@@ -179,7 +179,10 @@ def run_background_workflows() -> None:
         return
 
     start_email_thread()
-    run_page_render_email_check()
+    run_page_render_email_check(
+        st.session_state,
+        st.session_state.get("tenant_id", ""),
+    )
 
 
 def show_post_portal_feedback() -> None:

@@ -172,9 +172,9 @@ def page_productivity():
         try:
             if _show_loading:
                 with st.spinner("Loading productivity data…"):
-                    _build_archived_productivity()
+                    _build_archived_productivity(st.session_state)
             else:
-                _build_archived_productivity()
+                _build_archived_productivity(st.session_state)
             st.session_state["_archived_last_refresh_ts"] = time.time()
         except BaseException as _ae:
             _log_app_error("productivity", f"Archive load error: {repr(_ae)[:500]}", detail=traceback.format_exc())
@@ -329,7 +329,7 @@ def page_productivity():
             st.warning("This feature requires a Pro plan or higher.")
             return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
         gs = st.session_state.get("goal_status", [])
         # If goal_status is empty but we have top_performers, rebuild it
         if not gs and st.session_state.get("top_performers"):
@@ -499,7 +499,7 @@ def page_productivity():
             st.warning("This feature requires a Pro plan or higher.")
             return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
         trends = st.session_state.dept_trends
         if not trends: st.info("No trend data yet."); return
         df_t = pd.DataFrame(trends)
@@ -578,7 +578,7 @@ def page_productivity():
             st.warning("This feature requires a Pro plan or higher.")
             return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
         rolling = st.session_state.get("employee_rolling_avg", [])
         if not rolling: st.info("No rolling average data yet."); return
         df_r = pd.DataFrame(rolling)
@@ -649,7 +649,7 @@ def page_productivity():
     # ── RISK ASSESSMENT ───────────────────────────────────────────────────────
     elif chosen_prod == "⚠️ Risk Assessment":
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
         risk = st.session_state.get("employee_risk", [])
         if not risk: st.info("No risk assessment data yet."); return
         df_risk = pd.DataFrame(risk)
@@ -682,7 +682,7 @@ def page_productivity():
     # ── WEEKLY ────────────────────────────────────────────────────────────────
     elif chosen_prod == "📅 Weekly":
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
         weekly = st.session_state.weekly_summary
         if not weekly: st.info("No weekly data yet."); return
         df_w = pd.DataFrame(weekly)
@@ -754,7 +754,7 @@ def page_productivity():
         st.caption("See the dollar impact of employee performance vs targets. Enter your average hourly wage to calculate.")
 
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
 
         gs = st.session_state.get("goal_status", [])
         if not gs:
@@ -883,7 +883,7 @@ def page_productivity():
         st.caption("Employees below goal ranked by risk (combines trend + streak + variance).")
 
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
 
         gs = st.session_state.get("goal_status", [])
         history = st.session_state.get("history", [])
@@ -1003,7 +1003,7 @@ def page_productivity():
         ]
 
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
-            _build_archived_productivity()
+            _build_archived_productivity(st.session_state)
 
         gs = st.session_state.get("goal_status", [])
         history = st.session_state.get("history", [])

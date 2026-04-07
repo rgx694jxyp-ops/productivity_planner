@@ -317,11 +317,12 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
                     emps_lookup.get(s.get("emp_id", ""), {}).get("department", "") == dept_choice)]
 
     if not subs:
-        body = (f"<h2>{dept_label} — {period_label}</h2>"
-                f"<p>No work data was found for <strong>{dept_label}</strong> "
-                f"between <strong>{from_iso}</strong> and <strong>{to_iso}</strong>.</p>"
-                f"<p>Employees may not have had submissions during this period, "
-                f"or the date range falls outside your imported data.</p>")
+        body = (
+            f"{dept_label} - {period_label}\n"
+            f"No work data was found for {dept_label} between {from_iso} and {to_iso}.\n"
+            "Employees may not have had submissions during this period, or the date "
+            "range falls outside your imported data."
+        )
         return None, subj, body
 
     emp_agg = defaultdict(lambda: {"units": 0.0, "hours": 0.0, "dept": ""})
@@ -401,132 +402,81 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
     on_g  = sum(1 for r in scope_gs if r["goal_status"] == "on_goal")
     below = sum(1 for r in scope_gs if r["goal_status"] == "below_goal")
 
-    # Top 3 performers
-    _top3 = scope_gs[:3]
-    _top3_html = ""
-    if _top3:
-        _top3_html = "<h3>🏆 Top Performers</h3><ol>"
-        for t in _top3:
-            _top3_html += f"<li><strong>{t['Employee Name']}</strong> ({t['Department']}) — {t['Average UPH']} UPH</li>"
-        _top3_html += "</ol>"
-
-    # Bottom 3 performers (with targets & risk)
-    _bottom = [r for r in reversed(scope_gs) if r["goal_status"] == "below_goal"][:3]
-    _bottom_html = ""
-    if _bottom:
-        _bottom_html = "<h3>⚠️ Needs Coaching</h3><table style='width:100%; border-collapse: collapse;'>"
-        _bottom_html += "<tr style='background: #f5f5f5;'><th style='padding: 8px; text-align: left; border: 1px solid #ddd;'>Employee</th><th style='text-align: center; border: 1px solid #ddd;'>Risk</th><th style='text-align: right; border: 1px solid #ddd;'>UPH</th></tr>"
-        for b in _bottom:
-            _risk = _email_risk_level(b, _email_hist)
-            _tgt = b.get('Target UPH', '—')
-            _diff = ""
-            try:
-                _diff = f" (vs {_tgt})"
-            except (ValueError, TypeError):
-                pass
-            _bottom_html += f"<tr><td style='padding: 8px; border: 1px solid #ddd;'><strong>{b['Employee Name']}</strong><br/><span style='font-size: 0.9em; color: #666;'>{b['Department']}</span></td><td style='text-align: center; border: 1px solid #ddd;'>{_risk}</td><td style='text-align: right; border: 1px solid #ddd;'>{b['Average UPH']}{_diff}</td></tr>"
-        _bottom_html += "</table>"
-
-    # ACTION SECTION 1: TODAY's critical attention (🔴 High risk)
-    _critical_html = ""
-    _critical_list = []
-    for r in scope_gs:
-        if r["goal_status"] == "below_goal":
-            _risk = _email_risk_level(r, _email_hist)
-            if "🔴" in _risk:
-                _critical_list.append(r)
-
-    if _critical_list:
-        _critical_html = "<h3 style='color: #8b0000;'>🔴 PRIORITY: Needs Attention TODAY</h3>"
-        _critical_html += "<div style='background: #ffe6e6; border-left: 4px solid #8b0000; padding: 12px; margin-bottom: 16px;'>"
-        for c in _critical_list[:3]:
-            _action = ""
-            try:
-                _cur = float(c.get("Average UPH") or 0)
-                _tgt = float(c.get("Target UPH") or 0)
-                _gap = _tgt - _cur
-                if _gap > 5:
-                    _action = "👉 <strong>Action:</strong> Schedule 1-on-1. Discuss specific goals & support needed."
-                else:
-                    _action = "👉 <strong>Action:</strong> Check in on any blockers or issues."
-            except Exception:
-                _action = "👉 <strong>Action:</strong> Check in immediately."
-            _critical_html += f"<div style='margin-bottom: 12px;'><strong>{c['Employee Name']}</strong> ({c['Department']}) — {c['Average UPH']} UPH<br/>{_action}</div>"
-        _critical_html += "</div>"
-
-    # ACTION SECTION 2: Who improved this week (trend = up)
-    _improved_html = ""
-    _improved_list = [r for r in scope_gs if r.get("trend") == "up" and r.get("change_pct", 0) > 0]
-    if _improved_list:
-        _improved_html = "<h3 style='color: #008000;'>🟢 Recognition: Who Improved This Week</h3>"
-        _improved_html += "<div style='background: #e6ffe6; border-left: 4px solid #008000; padding: 12px; margin-bottom: 16px;'>"
-        for imp in _improved_list[:3]:
-            _pct = imp.get("change_pct", 0)
-            _improved_html += f"<div style='margin-bottom: 8px;'><strong>✓ {imp['Employee Name']}</strong> ({imp['Department']}) — <span style='color: green;'>+{_pct:.1f}%</span> trending up<br/>👉 <strong>Action:</strong> Recognize this improvement. Ask what's working & how to sustain it.</div>"
-        _improved_html += "</div>"
-
-    # ACTION SECTION 3: Who is trending down (early warning)
-    _trending_down_html = ""
-    _trending_down = [r for r in scope_gs if r.get("trend") == "down" and r.get("goal_status") != "no_goal"]
-    if _trending_down:
-        _trending_down_html = "<h3 style='color: #ff6600;'>⚠️ Early Warning: Trending Down</h3>"
-        _trending_down_html += "<div style='background: #fff9e6; border-left: 4px solid #ff6600; padding: 12px; margin-bottom: 16px;'>"
-        _trending_down_html += f"<p><strong>{len(_trending_down)} employee(s) showing declining performance:</strong></p>"
-        for td in _trending_down[:5]:
-            _pct = td.get("change_pct", 0)
-            _status = "at risk" if td.get("goal_status") == "below_goal" else "still on track"
-            _trending_down_html += f"<div style='margin-bottom: 8px;'><strong>• {td['Employee Name']}</strong> ({td['Department']}) — {_pct:.1f}% down ({_status})<br/>👉 <strong>Action:</strong> Proactive check-in. Address trend early before it worsens.</div>"
-        _trending_down_html += "</div>"
-
-    # Average UPH across all employees
+    # Build a plain-text report body (no HTML rendering in service layer).
     _avg_all = round(sum(r["Average UPH"] for r in scope_gs) / len(scope_gs), 1) if scope_gs else 0
 
-    _dept_health_rows = []
+    _lines = [
+        f"{dept_label} - {period_label}",
+        f"Employees: {len(scope_gs)} | Avg UPH: {_avg_all} | On goal: {on_g} | Below goal: {below}",
+        "",
+        "Department Health",
+    ]
     for _dept in sorted({r.get("Department", "") for r in scope_gs if r.get("Department")}):
         _dept_rows = [r for r in scope_gs if r.get("Department") == _dept]
         _dept_on = sum(1 for r in _dept_rows if r.get("goal_status") == "on_goal")
         _dept_total = len(_dept_rows)
         _dept_pct = round((_dept_on / _dept_total) * 100) if _dept_total else 0
-        _dept_health_rows.append(
-            f"<tr><td style='padding:8px;border:1px solid #ddd;'><strong>{_dept}</strong></td>"
-            f"<td style='padding:8px;border:1px solid #ddd;text-align:center;'>{_dept_on}/{_dept_total}</td>"
-            f"<td style='padding:8px;border:1px solid #ddd;text-align:center;'>{_dept_pct}%</td></tr>"
-        )
-    _dept_health_html = ""
-    if _dept_health_rows:
-        _dept_health_html = (
-            "<h3>📊 Department Health</h3>"
-            "<table style='width:100%; border-collapse: collapse;'>"
-            "<tr style='background: #f5f5f5;'><th style='padding: 8px; text-align: left; border: 1px solid #ddd;'>Department</th>"
-            "<th style='text-align: center; border: 1px solid #ddd;'>On Goal</th>"
-            "<th style='text-align: center; border: 1px solid #ddd;'>Health</th></tr>"
-            + "".join(_dept_health_rows)
-            + "</table>"
-        )
+        _lines.append(f"- {_dept}: {_dept_on}/{_dept_total} on goal ({_dept_pct}%)")
 
-    _top_risks_html = ""
+    _top3 = scope_gs[:3]
+    if _top3:
+        _lines.extend(["", "Top Performers"])
+        for t in _top3:
+            _lines.append(f"- {t['Employee Name']} ({t['Department']}) - {t['Average UPH']} UPH")
+
+    _bottom = [r for r in reversed(scope_gs) if r["goal_status"] == "below_goal"][:3]
+    if _bottom:
+        _lines.extend(["", "Needs Coaching"])
+        for b in _bottom:
+            _risk = _email_risk_level(b, _email_hist)
+            _lines.append(
+                f"- {b['Employee Name']} ({b['Department']}) - {b['Average UPH']} UPH | Risk: {_risk}"
+            )
+
+    _critical_list = []
+    for r in scope_gs:
+        if r["goal_status"] == "below_goal" and "🔴" in _email_risk_level(r, _email_hist):
+            _critical_list.append(r)
+    if _critical_list:
+        _lines.extend(["", "Priority: Needs Attention Today"])
+        for c in _critical_list[:3]:
+            _action = "Check in immediately."
+            try:
+                _cur = float(c.get("Average UPH") or 0)
+                _tgt = float(c.get("Target UPH") or 0)
+                _gap = _tgt - _cur
+                _action = (
+                    "Schedule 1-on-1 and discuss specific goals/support."
+                    if _gap > 5 else "Check in on blockers or process issues."
+                )
+            except Exception:
+                pass
+            _lines.append(f"- {c['Employee Name']} ({c['Department']}) - {c['Average UPH']} UPH | Action: {_action}")
+
+    _improved_list = [r for r in scope_gs if r.get("trend") == "up" and r.get("change_pct", 0) > 0]
+    if _improved_list:
+        _lines.extend(["", "Recognition: Improved This Period"])
+        for imp in _improved_list[:3]:
+            _pct = imp.get("change_pct", 0)
+            _lines.append(
+                f"- {imp['Employee Name']} ({imp['Department']}) +{_pct:.1f}% trend"
+            )
+
+    _trending_down = [r for r in scope_gs if r.get("trend") == "down" and r.get("goal_status") != "no_goal"]
+    if _trending_down:
+        _lines.extend(["", f"Early Warning: {len(_trending_down)} trending down"])
+        for td in _trending_down[:5]:
+            _pct = td.get("change_pct", 0)
+            _status = "at risk" if td.get("goal_status") == "below_goal" else "still on track"
+            _lines.append(f"- {td['Employee Name']} ({td['Department']}) {_pct:.1f}% ({_status})")
+
     if plan_name in ("pro", "business"):
-        _risk_rows = []
+        _lines.extend(["", "Top Risks"])
         for _row in [r for r in scope_gs if r.get("goal_status") == "below_goal"][:5]:
-            _risk_rows.append(
-                f"<tr><td style='padding:8px;border:1px solid #ddd;'><strong>{_row['Employee Name']}</strong></td>"
-                f"<td style='padding:8px;border:1px solid #ddd;'>{_row['Department']}</td>"
-                f"<td style='padding:8px;border:1px solid #ddd;text-align:right;'>{_row['Average UPH']}</td>"
-                f"<td style='padding:8px;border:1px solid #ddd;text-align:center;'>{_email_risk_level(_row, _email_hist)}</td></tr>"
-            )
-        if _risk_rows:
-            _top_risks_html = (
-                "<h3>🔴 Top Risks — Action Required Today</h3>"
-                "<table style='width:100%; border-collapse: collapse;'>"
-                "<tr style='background: #f5f5f5;'><th style='padding: 8px; text-align: left; border: 1px solid #ddd;'>Employee</th>"
-                "<th style='padding: 8px; text-align: left; border: 1px solid #ddd;'>Dept</th>"
-                "<th style='padding: 8px; text-align: right; border: 1px solid #ddd;'>UPH</th>"
-                "<th style='padding: 8px; text-align: center; border: 1px solid #ddd;'>Risk</th></tr>"
-                + "".join(_risk_rows)
-                + "</table>"
+            _lines.append(
+                f"- {_row['Employee Name']} ({_row['Department']}) {_row['Average UPH']} UPH | {_email_risk_level(_row, _email_hist)}"
             )
 
-    _cost_html = ""
     if plan_name in ("pro", "business"):
         try:
             from settings import Settings as _ImpactS
@@ -544,24 +494,10 @@ def _build_period_report(d_start, d_end, dept_choice: str, depts: list,
                     _cost_total += max(((_target - _avg) / _target) * _hours * _avg_wage, 0)
             except Exception:
                 pass
-        _cost_html = f"<h3>💰 Cost Impact</h3><p>Estimated labor cost impact for below-goal performance in this period: <strong>${_cost_total:,.0f}</strong></p>"
+        _lines.extend(["", f"Estimated cost impact: ${_cost_total:,.0f}"])
 
-    body = (f"<h2>{dept_label} — {period_label}</h2>"
-            f"<p><strong>{len(scope_gs)}</strong> employees · "
-            f"Avg UPH: <strong>{_avg_all}</strong> · "
-            f"<strong style='color:green'>{on_g} on goal</strong> · "
-            f"<strong style='color:red'>{below} below goal</strong></p>"
-            f"<hr/>"
-            f"{_dept_health_html}"
-            f"{_top3_html}"
-            f"{_top_risks_html}"
-            f"{_critical_html}"
-            f"{_improved_html}"
-            f"{_trending_down_html}"
-            f"{_bottom_html}"
-            f"{_cost_html}"
-            f"<hr/>"
-            f"<p style='font-size: 0.9em; color: #666;'>See the attached Excel report for full details and department breakdown.</p>")
+    _lines.extend(["", "See attached Excel report for full details and department breakdown."])
+    body = "\n".join(_lines)
 
     xl_data = None
     try:

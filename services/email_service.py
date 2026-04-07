@@ -1,8 +1,9 @@
 import threading
 from datetime import date
+import time
+import traceback
 
 from core.dependencies import log_app_error, tenant_log_path
-from core.runtime import st, time, traceback
 
 
 EMAIL_SCHEDULER_ENABLED = False
@@ -20,7 +21,7 @@ def email_log(msg: str) -> None:
         pass
 
 
-def run_scheduled_reports_for_tenant(tenant_id: str = "", force_now: bool = False, schedule_names: list[str] | None = None) -> list[dict]:
+def run_scheduled_reports_for_tenant(tenant_id: str, force_now: bool = False, schedule_names: list[str] | None = None) -> list[dict]:
     if not EMAIL_SCHEDULER_ENABLED:
         return []
 
@@ -36,7 +37,7 @@ def run_scheduled_reports_for_tenant(tenant_id: str = "", force_now: bool = Fals
     from services.productivity_service import _build_period_report, _resolve_period_dates
     from settings import Settings
 
-    tid = tenant_id or st.session_state.get("tenant_id", "")
+    tid = str(tenant_id or "").strip()
     if not tid:
         return []
 
@@ -168,14 +169,18 @@ def start_email_thread():
     return thread
 
 
-def run_page_render_email_check() -> None:
+def run_page_render_email_check(session_state: dict, tenant_id: str) -> dict:
     if not EMAIL_SCHEDULER_ENABLED:
-        return
+        return {"ran": False, "reason": "disabled"}
     now = time.time()
-    if now - st.session_state.get("_last_email_check", 0) > 60:
-        st.session_state["_last_email_check"] = now
+    last_check = float((session_state or {}).get("_last_email_check", 0) or 0)
+    if now - last_check > 60:
+        session_state["_last_email_check"] = now
         try:
-            run_scheduled_reports_for_tenant(force_now=False)
+            run_scheduled_reports_for_tenant(tenant_id=tenant_id, force_now=False)
+            return {"ran": True, "reason": "due"}
         except Exception as error:
             email_log(f"Page-render email check error: {error}")
             log_app_error("email", f"Schedule check error: {error}", detail=traceback.format_exc())
+            return {"ran": True, "reason": "error", "error": str(error)}
+    return {"ran": False, "reason": "throttled"}
