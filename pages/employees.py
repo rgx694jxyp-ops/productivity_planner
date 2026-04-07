@@ -54,6 +54,12 @@ def page_employees():
     st.title("👥 Employees")
     if not require_db(): return
 
+    # Apply requested view switch before employees_view_tab widget is instantiated.
+    _pending_emp_view = st.session_state.pop("_employees_set_view", None)
+    if _pending_emp_view:
+        st.session_state["emp_view"] = _pending_emp_view
+        st.session_state["employees_view_tab"] = _pending_emp_view
+
     _sel_emp_id = st.session_state.get("cn_selected_emp")
     if _sel_emp_id:
         _emps = _cached_employees() or []
@@ -80,10 +86,11 @@ def page_employees():
             _views = ["Employee History", "Performance Journal", "Coaching Insights"]
             if _default_view not in _views:
                 _default_view = "Performance Journal"
+            if "employees_view_tab" not in st.session_state or st.session_state.get("employees_view_tab") not in _views:
+                st.session_state["employees_view_tab"] = _default_view
             _selected_view = st.radio(
                 "Employees view",
                 _views,
-                index=_views.index(_default_view),
                 horizontal=True,
                 key="employees_view_tab",
                 label_visibility="collapsed",
@@ -99,10 +106,11 @@ def page_employees():
             _views = ["Employee History", "Performance Journal"]
             if _default_view not in _views:
                 _default_view = "Performance Journal"
+            if "employees_view_tab" not in st.session_state or st.session_state.get("employees_view_tab") not in _views:
+                st.session_state["employees_view_tab"] = _default_view
             _selected_view = st.radio(
                 "Employees view",
                 _views,
-                index=_views.index(_default_view),
                 horizontal=True,
                 key="employees_view_tab",
                 label_visibility="collapsed",
@@ -525,11 +533,17 @@ def _emp_coaching():
                 st.divider()
 
             # ── Add entry ────────────────────────────────────────────────────
-            if "cn_note_val" not in st.session_state: st.session_state.cn_note_val = ""
-            
-            note_text  = st.text_area("Add a coaching note", height=120, key="cn_note",
-                                       value=st.session_state.cn_note_val,
-                                       placeholder="What did you discuss? What's the plan?")
+            # Defer widget clears to the start of a rerun so Streamlit allows state mutation.
+            if st.session_state.pop("_cn_clear_inputs", False):
+                st.session_state["cn_note"] = ""
+                st.session_state["cn_common_issues"] = []
+
+            note_text  = st.text_area(
+                "Add a coaching note",
+                height=120,
+                key="cn_note",
+                placeholder="What did you discuss? What's the plan?",
+            )
             _issue_options = [
                 "Equipment issue",
                 "Staffing",
@@ -565,11 +579,8 @@ def _emp_coaching():
                     _preview = note_text.strip()[:80]
                     st.session_state[f"_cn_last_note_{emp_id}"] = _preview
                     st.session_state[_fu_key] = True   # prompt follow-up scheduler
-                    st.session_state.cn_note_val = ""
-                    st.session_state["cn_note"] = ""
-                    st.session_state["cn_common_issues"] = []
-                    st.session_state["emp_view"] = "Performance Journal"
-                    st.session_state["employees_view_tab"] = "Performance Journal"
+                    st.session_state["_cn_clear_inputs"] = True
+                    st.session_state["_employees_set_view"] = "Performance Journal"
                     # Track coaching session progress
                     st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
                     st.session_state["_last_coached_emp_id"] = emp_id

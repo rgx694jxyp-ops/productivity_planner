@@ -20,7 +20,7 @@ _SUSPICIOUS_NAME_RE = re.compile(
 )
 
 
-def _db_exec_with_retry(query_builder, retries: int = 3, delay_s: float = 0.35):
+def _db_exec_with_retry(query_builder, retries: int = 6, delay_s: float = 0.5):
     """Execute DB operation with small retry window for transient disconnects."""
     last_err = None
     for attempt in range(max(1, retries)):
