@@ -11,12 +11,35 @@ import hashlib
 import json
 import math
 import re
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 _SUSPICIOUS_NAME_RE = re.compile(
     r"(<\s*/?\s*script\b|drop\s+table|;--|javascript:)", re.IGNORECASE
 )
+
+
+def _db_exec_with_retry(query_builder, retries: int = 3, delay_s: float = 0.35):
+    """Execute DB operation with small retry window for transient disconnects."""
+    last_err = None
+    for attempt in range(max(1, retries)):
+        try:
+            return query_builder()
+        except Exception as exc:
+            last_err = exc
+            msg = str(exc).lower()
+            transient = (
+                "server disconnected" in msg
+                or "connection reset" in msg
+                or "timed out" in msg
+                or "timeout" in msg
+            )
+            if (not transient) or attempt >= retries - 1:
+                raise
+            time.sleep(delay_s * (attempt + 1))
+    if last_err:
+        raise last_err
 
 
 def _normalize_label_text_local(value, max_len: int = 64) -> str:
@@ -138,9 +161,13 @@ def _restore_uph_snapshot(
                 pass
         if _ids:
             attempted_deletes = len(_ids)
-            _sb.table("uph_history").delete().in_("id", _ids).eq("tenant_id", _tn).execute()
+            _db_exec_with_retry(
+                lambda: _sb.table("uph_history").delete().in_("id", _ids).eq("tenant_id", _tn).execute()
+            )
             try:
-                _check = _sb.table("uph_history").select("id").in_("id", _ids).eq("tenant_id", _tn).execute()
+                _check = _db_exec_with_retry(
+                    lambda: _sb.table("uph_history").select("id").in_("id", _ids).eq("tenant_id", _tn).execute()
+                )
                 _still_present = len(_check.data or [])
                 verified_deleted = attempted_deletes - _still_present
             except Exception:
@@ -163,18 +190,24 @@ def _restore_uph_snapshot(
             _dept = str(_k[2] or "")
             if (_emp_id, _work_date, _dept) in _prev_key_set:
                 continue
-            _pre_chk = _sb.table("uph_history").select("id").eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
-                "work_date", _work_date
-            ).eq("department", _dept).limit(1).execute()
+            _pre_chk = _db_exec_with_retry(
+                lambda: _sb.table("uph_history").select("id").eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
+                    "work_date", _work_date
+                ).eq("department", _dept).limit(1).execute()
+            )
             if not (_pre_chk.data or []):
                 continue
             attempted_deletes += 1
-            _sb.table("uph_history").delete().eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
-                "work_date", _work_date
-            ).eq("department", _dept).execute()
-            _chk = _sb.table("uph_history").select("id").eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
-                "work_date", _work_date
-            ).eq("department", _dept).limit(1).execute()
+            _db_exec_with_retry(
+                lambda: _sb.table("uph_history").delete().eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
+                    "work_date", _work_date
+                ).eq("department", _dept).execute()
+            )
+            _chk = _db_exec_with_retry(
+                lambda: _sb.table("uph_history").select("id").eq("tenant_id", _tn).eq("emp_id", _emp_id).eq(
+                    "work_date", _work_date
+                ).eq("department", _dept).limit(1).execute()
+            )
             if not (_chk.data or []):
                 verified_deleted += 1
 
@@ -191,9 +224,11 @@ def _restore_uph_snapshot(
                 "department": _r.get("department", ""),
                 "tenant_id": _tn,
             })
-        _sb.table("uph_history").upsert(
-            _prev, on_conflict="tenant_id,emp_id,work_date,department"
-        ).execute()
+        _db_exec_with_retry(
+            lambda: _sb.table("uph_history").upsert(
+                _prev, on_conflict="tenant_id,emp_id,work_date,department"
+            ).execute()
+        )
         restored_rows = len(_prev)
 
     return restored_rows, attempted_deletes, verified_deleted

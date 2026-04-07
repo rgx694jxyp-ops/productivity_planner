@@ -75,19 +75,42 @@ def page_employees():
     tenant_id = st.session_state.get("tenant_id")
     _plan = _get_current_plan(tenant_id)
     try:
+        _default_view = st.session_state.get("emp_view", "Performance Journal")
         if _is_paid_plan(_plan):
-            t1, t2, t3 = st.tabs(["Employee History", "Performance Journal", "Coaching Insights"])
-            with t1:
+            _views = ["Employee History", "Performance Journal", "Coaching Insights"]
+            if _default_view not in _views:
+                _default_view = "Performance Journal"
+            _selected_view = st.radio(
+                "Employees view",
+                _views,
+                index=_views.index(_default_view),
+                horizontal=True,
+                key="employees_view_tab",
+                label_visibility="collapsed",
+            )
+            st.session_state["emp_view"] = _selected_view
+            if _selected_view == "Employee History":
                 _emp_history()
-            with t2:
+            elif _selected_view == "Performance Journal":
                 _emp_coaching()
-            with t3:
+            else:
                 _emp_ai_coaching()
         else:
-            t1, t2 = st.tabs(["Employee History", "Performance Journal"])
-            with t1:
+            _views = ["Employee History", "Performance Journal"]
+            if _default_view not in _views:
+                _default_view = "Performance Journal"
+            _selected_view = st.radio(
+                "Employees view",
+                _views,
+                index=_views.index(_default_view),
+                horizontal=True,
+                key="employees_view_tab",
+                label_visibility="collapsed",
+            )
+            st.session_state["emp_view"] = _selected_view
+            if _selected_view == "Employee History":
                 _emp_history()
-            with t2:
+            else:
                 _emp_coaching()
     except Exception as e:
         st.error(f"Error: {e}")
@@ -172,7 +195,7 @@ def _emp_ai_coaching():
     st.caption("Smart recommendations based on employee performance, goals, and trends.")
 
     if not st.session_state.get("pipeline_done") and not st.session_state.get("_archived_loaded"):
-        _build_archived_productivity()
+        _build_archived_productivity(st.session_state)
 
     recs = _build_coaching_recommendations()
     if not recs:
@@ -543,6 +566,10 @@ def _emp_coaching():
                     st.session_state[f"_cn_last_note_{emp_id}"] = _preview
                     st.session_state[_fu_key] = True   # prompt follow-up scheduler
                     st.session_state.cn_note_val = ""
+                    st.session_state["cn_note"] = ""
+                    st.session_state["cn_common_issues"] = []
+                    st.session_state["emp_view"] = "Performance Journal"
+                    st.session_state["employees_view_tab"] = "Performance Journal"
                     # Track coaching session progress
                     st.session_state["_coached_today"] = int(st.session_state.get("_coached_today", 0)) + 1
                     st.session_state["_last_coached_emp_id"] = emp_id
