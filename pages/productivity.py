@@ -187,7 +187,10 @@ def page_productivity():
 
     # ── DEPT GOALS ────────────────────────────────────────────────────────────
     if chosen_prod == "🎯 Dept Goals":
-        if not _plan_gate("pro", "Department Goals"):
+        try:
+            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
+        except Exception:
+            st.warning("This feature requires a Pro plan or higher.")
             return
         st.subheader("Department UPH targets")
         st.caption("Set a simple target for each department. Once targets are in place, the app can tell you who is on track and who needs help.")
@@ -307,7 +310,10 @@ def page_productivity():
 
     # ── GOAL STATUS ───────────────────────────────────────────────────────────
     elif chosen_prod == "📊 Goal Status":
-        if not _plan_gate("pro", "Goal Status"):
+        try:
+            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
+        except Exception:
+            st.warning("This feature requires a Pro plan or higher.")
             return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity()
@@ -474,7 +480,10 @@ def page_productivity():
 
     # ── TRENDS ────────────────────────────────────────────────────────────────
     elif chosen_prod == "📈 Trends":
-        if not _plan_gate("pro", "Trend Analysis"):
+        try:
+            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
+        except Exception:
+            st.warning("This feature requires a Pro plan or higher.")
             return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity()
@@ -550,7 +559,10 @@ def page_productivity():
 
     # ── ROLLING AVG ───────────────────────────────────────────────────────────
     elif chosen_prod == "📉 Rolling Avg":
-        if not _plan_gate("pro", "Rolling Averages"):
+        try:
+            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
+        except Exception:
+            st.warning("This feature requires a Pro plan or higher.")
             return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity()
@@ -719,7 +731,10 @@ def page_productivity():
                            key="dl_weekly")
 
     elif chosen_prod == "💰 Labor Cost":
-        if not _plan_gate("pro", "Labor Cost Impact"):
+        try:
+            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
+        except Exception:
+            st.warning("This feature requires a Pro plan or higher.")
             return
 
         st.subheader("Labor Cost Impact Analysis")
@@ -957,7 +972,10 @@ def page_productivity():
 
     # ── COACHING CORNER ───────────────────────────────────────────────────────────
     elif chosen_prod == "🧑‍🏫 Coaching":
-        if not _plan_gate("pro", "Coaching"):
+        try:
+            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
+        except Exception:
+            st.warning("This feature requires a Pro plan or higher.")
             return
         st.subheader("🧑‍🏫 Who Needs Coaching?")
         st.caption("Top 3 employees who need performance coaching based on trend + goal status + context.")

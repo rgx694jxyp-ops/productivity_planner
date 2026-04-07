@@ -2,7 +2,7 @@
 Centralized plan enforcement helpers for service layer.
 """
 from typing import Any
-from database import get_subscription_by_tenant
+from database import get_subscription
 
 # Example plan definitions (should match your Stripe/Supabase logic)
 PLAN_FEATURES = {
@@ -16,7 +16,7 @@ class PlanEnforcementError(Exception):
 
 def get_current_plan(tenant_id: str) -> str:
     """Return the current plan name for a tenant."""
-    sub = get_subscription_by_tenant(tenant_id)
+    sub = get_subscription(tenant_id)
     if not sub or not sub.get("plan"):
         return "starter"  # Default/fallback
     return sub["plan"]
