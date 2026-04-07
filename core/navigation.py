@@ -81,69 +81,120 @@ def render_subscription_banner() -> None:
 
 def render_sidebar() -> str:
 
-
-    # --- Top bar: app name, plan, employee count ---
-    from database import get_employee_count, get_employee_limit, get_subscription
+    # --- Restore sidebar using Streamlit's built-in sidebar and previous layout ---
     tid = st.session_state.get("tenant_id", "")
-    emp_count = get_employee_count(tid) if tid else 0
-    emp_limit = get_employee_limit(tid) if tid else 0
-    plan = "starter"
-    plan_label = "Starter"
-    if tid:
-        sub = get_subscription(tid) or {}
-        plan = sub.get("plan", "starter").capitalize()
-        plan_label = plan
-        emp_limit = sub.get("employee_limit", emp_limit)
-    emp_limit_str = "Unlimited" if emp_limit == -1 else emp_limit
-    st.markdown(
-        (
-            "<div style='padding:8px 0 16px;'>"
-            "  <div style='font-size:19px;font-weight:700;color:#fff;letter-spacing:-.02em;line-height:1.15;'>"
-            "&#128230; Productivity<br>Planner"  # 📦 as HTML entity
-            "</div>"
-            f"  <div style='margin-top:8px;font-size:13px;color:#e5e7eb;'>"
-            f"    <b>Plan:</b> <span style='color:#fff'>{plan_label}</span> &nbsp;·&nbsp;"
-            f"    <b>Employees:</b> <span style='color:#fff'>{emp_count} / {emp_limit_str}</span>"
-            "  </div>"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-    if tid:
-        sub = get_subscription(tid) or {}
-        plan = sub.get("plan", "starter").capitalize()
-        plan_label = plan
-        emp_limit = sub.get("employee_limit", emp_limit)
-    emp_limit_str = "Unlimited" if emp_limit == -1 else emp_limit
+    plan = _get_current_plan(tid)
+    with st.sidebar:
+        st.markdown(
+            """
+<div style="padding:8px 0 20px;">
+  <div style="font-size:19px;font-weight:700;color:#fff;letter-spacing:-.02em;line-height:1.15;">
+    📦 Productivity<br>Planner
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
 
-    # Navigation menu
-    nav_options = [
-        ("🏠 Dashboard", "dashboard"),
-        ("📈 Productivity", "productivity"),
-        ("👥 Employees", "employees"),
-        ("📂 Import Data", "import"),
-        ("⚙️ Settings", "settings"),
-        ("👔 Supervisor View", "supervisor"),
-        ("🧠 Coaching Intelligence", "coaching_intel"),
-        ("📋 Shift Plan", "shift_plan"),
-        ("💰 Cost Impact", "cost_impact"),
-        ("✉️ Email", "email"),
-    ]
-    page_choice = st.radio(
-        "Navigation",
-        nav_options,
-        format_func=lambda x: x[0],
-        key="sidebar_nav"
-    )
-    st.session_state["goto_page"] = page_choice[1]
+        st.divider()
+        nav_items = [
+            ("supervisor", "👔  Supervisor"),
+            ("dashboard", "📊  Dashboard"),
+            ("import", "📁  Import Data"),
+            ("employees", "👥  Employees"),
+            ("productivity", "📈  Productivity"),
+            ("shift_plan", "📋  Shift Plan"),
+            ("coaching_intel", "🧠  Coaching Intel"),
+            ("cost_impact", "💰  Cost Impact"),
+            ("email", "📧  Email Setup"),
+            ("settings", "⚙️  Settings"),
+        ]
+        nav_keys = [key for key, _ in nav_items]
+        nav_labels = {key: label for key, label in nav_items}
 
-    # --- Sidebar footer: user info and sign out ---
-    st.markdown("<hr style='margin:18px 0 10px 0;border:0;border-top:1px solid #e5e7eb;' />", unsafe_allow_html=True)
-    user_email = st.session_state.get("user_email")
-    tenant_id = st.session_state.get("tenant_id")
-    if user_email:
-        st.markdown(f"<div style='color:#374151;font-size:13px;margin-bottom:6px;'>Signed in as<br><b>{_html_mod.escape(user_email)}</b></div>", unsafe_allow_html=True)
+        goto = str(st.session_state.pop("goto_page", "") or "").lower()
+        if goto:
+            if goto in nav_keys:
+                st.session_state["_current_page_key"] = goto
+            elif "supervisor" in goto:
+                st.session_state["_current_page_key"] = "supervisor"
+            elif "dashboard" in goto:
+                st.session_state["_current_page_key"] = "dashboard"
+            elif "import" in goto:
+                st.session_state["_current_page_key"] = "import"
+            elif "employee" in goto:
+                st.session_state["_current_page_key"] = "employees"
+            elif "productivity" in goto:
+                st.session_state["_current_page_key"] = "productivity"
+            elif "shift" in goto:
+                st.session_state["_current_page_key"] = "shift_plan"
+            elif "coach" in goto or "intel" in goto:
+                st.session_state["_current_page_key"] = "coaching_intel"
+            elif "cost" in goto or "impact" in goto:
+                st.session_state["_current_page_key"] = "cost_impact"
+            elif "email" in goto:
+                st.session_state["_current_page_key"] = "email"
+            elif "setting" in goto:
+                st.session_state["_current_page_key"] = "settings"
 
-    # No Manage Subscription button in sidebar
-    # No sign out button in sidebar; sign out button should be rendered at the top of every page
-    return page_choice[1]
+        if st.session_state.get("_current_page_key") not in nav_keys:
+            st.session_state["_current_page_key"] = nav_keys[0]
+
+        page = st.radio(
+            "Navigation",
+            nav_keys,
+            format_func=lambda key: nav_labels.get(key, key.title()),
+            label_visibility="collapsed",
+            key="_current_page_key",
+        )
+
+        st.divider()
+        if st.button("↺ Refresh data", use_container_width=True, key="sb_refresh"):
+            bust_cache()
+            st.rerun()
+
+        from ui.components import toggle_simple_mode
+
+        toggle_simple_mode()
+        if st.session_state.get("simple_mode"):
+            st.caption("Simple Mode keeps the app focused on who needs attention right now.")
+
+        plan_display = plan.capitalize() if plan != "admin" else "Admin"
+        plan_color = {"starter": "#888", "pro": "#1E90FF", "business": "#FFD700", "admin": "#FF6347"}.get(plan, "#888")
+        st.markdown(
+            f'<div style="font-size:10px;color:{plan_color};font-weight:700;margin-bottom:4px;">Plan: {plan_display}</div>',
+            unsafe_allow_html=True,
+        )
+        try:
+            from database import get_employee_count, get_employee_limit
+
+            emp_count_ts = float(st.session_state.get("_emp_count_ts", 0) or 0)
+            if (time.time() - emp_count_ts) > 300 or "_emp_count_cache" not in st.session_state:
+                st.session_state["_emp_count_cache"] = get_employee_count()
+                st.session_state["_emp_limit_cache"] = get_employee_limit()
+                st.session_state["_emp_count_ts"] = time.time()
+            emp_count = st.session_state["_emp_count_cache"]
+            emp_limit = st.session_state["_emp_limit_cache"]
+            limit_str = "unlimited" if emp_limit == -1 else str(emp_limit)
+            st.markdown(
+                f'<div style="font-size:10px;color:#7FA8CC;margin-bottom:8px;">Employees: {emp_count}/{limit_str}</div>',
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            pass
+
+        user_name = st.session_state.get("user_name", "")
+        if user_name:
+            safe_name = _html_mod.escape(user_name)
+            st.markdown(
+                f'<div style="font-size:11px;color:#7FA8CC;margin-bottom:4px;">Signed in as<br><b style="color:#CBD8E8;">{safe_name}</b></div>',
+                unsafe_allow_html=True,
+            )
+        if render_sign_out_button("sidebar", type="secondary", use_container_width=True):
+            full_sign_out()
+            st.rerun()
+
+        st.markdown(
+            '<div style="font-size:10px;color:#3D5A7A;line-height:1.7;">Productivity Planner · v3.0</div>',
+            unsafe_allow_html=True,
+        )
+    return page
