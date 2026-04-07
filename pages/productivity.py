@@ -6,7 +6,7 @@ from core.dependencies import (
     _get_db_client,
     _log_app_error,
 )
-from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
+from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise, is_paid_plan as _is_paid_plan
 from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback, init_runtime
 
 try:
@@ -51,6 +51,20 @@ from services.productivity_service import (
     _build_period_report,
 )
 
+
+def _clear_targets_cache() -> None:
+    """Clear targets cache safely across different deploy states."""
+    try:
+        _raw_cached_targets.clear()
+        return
+    except Exception:
+        pass
+    try:
+        from cache import raw_cached_targets as _raw_targets
+        _raw_targets.clear()
+    except Exception:
+        pass
+
 def page_productivity():
     st.title("📈 Productivity")
     st.caption("UPH rankings, department goals, trend charts, and performance tracking.")
@@ -73,8 +87,7 @@ def page_productivity():
     # Secondary page navigation: first choose mode, then choose view.
     tenant_id = st.session_state.get("tenant_id")
     _plan_now = _get_current_plan(tenant_id)
-    _all_opts = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "💰 Labor Cost", "📋 Priority List", "🧑‍🏫 Coaching"]
-    if _plan_now in ("pro", "business", "admin"):
+    if _is_paid_plan(_plan_now):
         _monitor_opts = ["📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "📋 Priority List", "🧑‍🏫 Coaching"]
         _plan_opts = ["🎯 Dept Goals", "💰 Labor Cost"]
     else:
@@ -236,7 +249,7 @@ def page_productivity():
             for d in all_depts:
                 if d and d not in targets:
                     set_dept_target(d, 0.0)
-                    _raw_cached_targets.clear()
+                    _clear_targets_cache()
             targets = _cached_targets()
 
         dept_list  = sorted(targets.keys())
@@ -286,7 +299,7 @@ def page_productivity():
                 if c3.button("✕", key=f"rm_dept_{dept}", help="Remove department"):
                     goals_obj["dept_targets"].pop(dept, None)
                     save_goals(goals_obj)
-                    _raw_cached_targets.clear()
+                    _clear_targets_cache()
                     st.session_state.pop(seed_key, None)
                     st.session_state.pop(txt_key,  None)
                     goal_changed = True
@@ -297,7 +310,7 @@ def page_productivity():
                     for _dept, _cur, _new in pending_goal_changes:
                         set_dept_target(_dept, _new)
                         _audit("GOAL_TARGET", f"{_dept} | {_cur} → {_new}")
-                    _raw_cached_targets.clear()
+                    _clear_targets_cache()
                     goal_changed = True
 
         # Departments are added automatically from the pipeline — no manual add form

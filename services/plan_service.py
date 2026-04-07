@@ -34,3 +34,10 @@ def enforce_seat_limit(tenant_id: str, requested_count: int) -> None:
 def enforce_plan_or_raise(tenant_id: str, feature_name: str) -> None:
     if not can_access_feature(tenant_id, feature_name):
         raise PlanEnforcementError(f"Feature '{feature_name}' not available on current plan.")
+
+# Plans that unlock the full feature set (pro / business / admin / enterprise).
+_PAID_PLANS = {"pro", "business", "admin", "enterprise"}
+
+def is_paid_plan(plan_name: str) -> bool:
+    """Return True if *plan_name* grants access to paid/advanced features."""
+    return str(plan_name or "").lower() in _PAID_PLANS

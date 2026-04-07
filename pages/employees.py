@@ -8,7 +8,7 @@ from core.dependencies import (
     _log_app_error,
     require_db,
 )
-from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
+from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise, is_paid_plan as _is_paid_plan
 from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback, init_runtime
 
 init_runtime()
@@ -75,7 +75,7 @@ def page_employees():
     tenant_id = st.session_state.get("tenant_id")
     _plan = _get_current_plan(tenant_id)
     try:
-        if _plan in ("pro", "business", "admin"):
+        if _is_paid_plan(_plan):
             t1, t2, t3 = st.tabs(["Employee History", "Performance Journal", "Coaching Insights"])
             with t1:
                 _emp_history()

@@ -219,18 +219,20 @@ def page_supervisor():
     else:
         risk_list = []
         _risk_cache_all = _get_all_risk_levels(gs, history)
+
+        # Pre-fetch all flags once — avoids a DB call on every loop iteration.
+        _all_flags: list = []
+        try:
+            from goals import get_employee_flags
+            _all_flags = get_employee_flags() or []
+        except Exception:
+            pass
+        _flags_by_emp = {str(f.get("emp_id", "")): f for f in _all_flags}
+
         for emp in below_goal:
             emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
             risk_level, risk_score, risk_details = _risk_cache_all.get(emp_id, ("🟢 Low", 0, {}))
-            
-            # Get flagged info for context tags
-            flagged_info = {}
-            try:
-                from goals import get_employee_flags
-                all_flags = get_employee_flags()
-                flagged_info = next((f for f in all_flags if f.get("emp_id") == emp_id), {})
-            except Exception:
-                pass
+            flagged_info = _flags_by_emp.get(emp_id, {})
             
             risk_list.append({
                 "name": emp.get("Employee", emp.get("Employee Name", "Unknown")),

@@ -16,59 +16,15 @@ import streamlit as st
 
 from core.dependencies import require_db
 from core.runtime import _html_mod, init_runtime
+from services.cost_service import (
+    weekly_cost_impact as _weekly_cost_impact,
+    get_wage as _get_wage,
+    get_coaching_gains_for_employee as _get_coaching_gains,
+)
 
 init_runtime()
 
 _WEEKS_IN_YEAR = 52
-_DEFAULT_WAGE  = 18.0   # fallback if not set in Settings
-
-
-# ── Calculations ──────────────────────────────────────────────────────────────
-
-def _weekly_cost_impact(
-    current_uph: float,
-    target_uph: float,
-    hours_per_week: float,
-    hourly_wage: float,
-) -> dict:
-    """
-    Returns:
-      lost_units_per_hour — how many fewer units per hour vs target
-      lost_units_per_week
-      lost_labor_cost_per_week — dollar waste (paying for hours that underperform)
-      recovery_per_week — $ value recovered if employee hits target
-    """
-    if target_uph <= 0 or current_uph <= 0:
-        return {
-            "lost_uph_gap": 0.0,
-            "lost_units_per_week": 0.0,
-            "lost_labor_cost_per_week": 0.0,
-            "recovery_per_week": 0.0,
-            "additional_units_per_day": 0.0,
-        }
-
-    gap_uph           = max(target_uph - current_uph, 0.0)
-    lost_units_pw     = gap_uph * hours_per_week
-    # Cost = the labor hours wasted not producing the gap units
-    # i.e. how many extra hours you'd need AT current rate to produce target output
-    extra_hours_pw    = (lost_units_pw / current_uph) if current_uph > 0 else 0.0
-    lost_cost_pw      = extra_hours_pw * hourly_wage
-    # Alternatively: value of units not produced
-    # (use the simpler lost_cost_pw so units don't need a $/unit price)
-    return {
-        "lost_uph_gap":            round(gap_uph, 2),
-        "lost_units_per_week":     round(lost_units_pw, 0),
-        "lost_labor_cost_per_week":round(lost_cost_pw, 2),
-        "recovery_per_week":       round(lost_cost_pw, 2),
-        "additional_units_per_day":round(gap_uph * (hours_per_week / 5), 0),
-    }
-
-
-def _get_wage(settings_obj) -> float:
-    try:
-        return float(settings_obj.get("avg_hourly_wage", _DEFAULT_WAGE) or _DEFAULT_WAGE)
-    except (TypeError, ValueError):
-        return _DEFAULT_WAGE
 
 
 # ── Main page ─────────────────────────────────────────────────────────────────
@@ -129,31 +85,10 @@ def page_cost_impact():
 
         _impact = _weekly_cost_impact(_uph, _target, _hrs_pw, _wage)
 
-        # Check for coaching-driven UPH improvement from notes
-        # (any note with uph_before/uph_after for this employee)
-        _coaching_gain = 0.0
-        _coaching_action = ""
-        try:
-            from database import get_coaching_notes as _gcn
-            _emp_id = str(r.get("EmployeeID", r.get("Employee Name", "")))
-            _n = _gcn(_emp_id)
-            for _nt in (_n or []):
-                _b = _nt.get("uph_before")
-                _a = _nt.get("uph_after")
-                if _b and _a:
-                    try:
-                        _delta = float(_a) - float(_b)
-                        if _delta > 0:
-                            _imp_before = _weekly_cost_impact(float(_b), _target, _hrs_pw, _wage)
-                            _imp_after  = _weekly_cost_impact(float(_a), _target, _hrs_pw, _wage)
-                            _gain = _imp_before["lost_labor_cost_per_week"] - _imp_after["lost_labor_cost_per_week"]
-                            if _gain > _coaching_gain:
-                                _coaching_gain   = round(_gain, 2)
-                                _coaching_action = (_nt.get("action_taken") or "coaching").capitalize()
-                    except (TypeError, ValueError):
-                        pass
-        except Exception:
-            pass
+        _coaching_gain, _coaching_action = _get_coaching_gains(
+            str(r.get("EmployeeID", r.get("Employee Name", ""))),
+            _target, _hrs_pw, _wage,
+        )
 
         rows.append({
             "Name":                 _name,

@@ -20,90 +20,16 @@ import streamlit as st
 
 from core.dependencies import _cached_employees, require_db
 from core.runtime import _html_mod, init_runtime
+from services.shift_service import (
+    time_to_float as _time_to_float,
+    float_to_time as _float_to_time,
+    generate_checkpoints as _generate_checkpoints,
+    expected_at_checkpoint as _expected_at_checkpoint,
+    get_auto_baseline_minutes_per_unit as _get_auto_baseline,
+    get_dept_contributors as _dept_contributors,
+)
 
 init_runtime()
-
-# ── Constant ──────────────────────────────────────────────────────────────────
-_CHECKPOINT_INTERVAL_HRS = 2   # generate a checkpoint every N hours
-_AUTO_BASELINES_DAYS = 30      # lookback for historical average
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _time_to_float(t: str) -> float:
-    """'14:30' → 14.5"""
-    try:
-        h, m = t.split(":")
-        return int(h) + int(m) / 60
-    except Exception:
-        return 8.0
-
-
-def _float_to_time(f: float) -> str:
-    """14.5 → '14:30'"""
-    h = int(f)
-    m = int(round((f - h) * 60))
-    return f"{h:02d}:{m:02d}"
-
-
-def _generate_checkpoints(start: str, end: str) -> list[str]:
-    """Build a list of checkpoint strings between shift start and end."""
-    s = _time_to_float(start)
-    e = _time_to_float(end)
-    pts = []
-    cur = s + _CHECKPOINT_INTERVAL_HRS
-    while cur < e - 0.01:
-        pts.append(_float_to_time(cur))
-        cur += _CHECKPOINT_INTERVAL_HRS
-    pts.append(end)
-    return pts
-
-
-def _expected_at_checkpoint(volume: float, start: str, end: str, checkpoint: str) -> float:
-    """Linear interpolation: expected cumulative output at a given checkpoint."""
-    total_hrs = max(_time_to_float(end) - _time_to_float(start), 0.001)
-    elapsed   = max(_time_to_float(checkpoint) - _time_to_float(start), 0.0)
-    pct       = min(elapsed / total_hrs, 1.0)
-    return round(volume * pct)
-
-
-def _get_auto_baseline(department: str) -> float:
-    """Return average minutes-per-unit from recent UPH history for this dept."""
-    try:
-        from database import get_all_uph_history
-        rows = get_all_uph_history(days=_AUTO_BASELINES_DAYS)
-        dept_rows = [
-            r for r in rows
-            if str(r.get("department", "")).lower() == department.lower()
-            and float(r.get("uph", 0) or 0) > 0
-        ]
-        if not dept_rows:
-            return 0.0
-        avg_uph = sum(float(r["uph"]) for r in dept_rows) / len(dept_rows)
-        return round(60.0 / avg_uph, 2)   # UPH → minutes-per-unit
-    except Exception:
-        return 0.0
-
-
-def _dept_contributors(department: str, gs: list[dict]) -> list[dict]:
-    """Return employees in this dept sorted by gap (biggest laggards first)."""
-    contribs = []
-    for r in gs:
-        if str(r.get("Department", "")).lower() != department.lower():
-            continue
-        try:
-            uph    = float(r.get("Average UPH") or 0)
-            target = float(r.get("Target UPH") or 0)
-            gap    = target - uph if target > 0 else 0.0
-        except (TypeError, ValueError):
-            gap = 0.0
-        contribs.append({
-            "name": r.get("Employee Name") or r.get("EmployeeName") or "",
-            "uph":  round(float(r.get("Average UPH") or 0), 1),
-            "target": round(float(r.get("Target UPH") or 0), 1),
-            "gap": round(gap, 1),
-        })
-    return sorted(contribs, key=lambda x: x["gap"], reverse=True)
 
 
 # ── Main page ─────────────────────────────────────────────────────────────────
