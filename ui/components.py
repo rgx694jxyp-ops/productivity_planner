@@ -5,7 +5,8 @@ from datetime import datetime, date, timedelta
 import pandas as pd
 import time
 
-from utils.floor_language import _safe_float, human_confidence_message
+from utils.numeric import safe_float
+from ui.floor_language import human_confidence_message
 from domain.risk import _get_all_risk_levels
 from services.coaching_service import find_coaching_impact
 
@@ -58,7 +59,7 @@ def diagnose_upload(pending_files: list[dict]) -> dict:
                 emps.add(emp)
             
             hours = row.get("HoursWorked") or row.get("Hours") or row.get("hours")
-            if hours and _safe_float(hours, 0.0) > 0:
+            if hours and safe_float(hours, 0.0) > 0:
                 hours_count += 1
     
     # Build diagnosis

@@ -3,8 +3,10 @@
 This module preserves existing imports while implementations live in focused modules.
 """
 
-from utils.floor_language import (
-    _safe_float,
+from utils.numeric import (
+    safe_float,
+)
+from ui.floor_language import (
     human_confidence_message,
     risk_to_human_language,
     translate_to_floor_language,
@@ -46,7 +48,7 @@ from ui.coaching_components import (
 )
 
 __all__ = [
-    "_safe_float",
+    "safe_float",
     "human_confidence_message",
     "risk_to_human_language",
     "translate_to_floor_language",

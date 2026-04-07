@@ -1,7 +1,7 @@
 """Coaching service — coaching impact tracking, effectiveness analysis, and recommendations."""
 
 from datetime import datetime, date, timedelta
-from utils.floor_language import _safe_float
+from utils.numeric import safe_float
 
 
 def find_coaching_impact(emp_id: str, coaching_notes: list[dict], 
@@ -44,7 +44,7 @@ def find_coaching_impact(emp_id: str, coaching_notes: list[dict],
                       if str(h.get("emp_id")) == str(emp_id)
                       and before_date_start <= datetime.fromisoformat(h.get("work_date", "")).date() < coached_date]
         if before_rows:
-            before_uph = sum(_safe_float(h.get("uph", 0), 0.0) for h in before_rows) / len(before_rows)
+            before_uph = sum(safe_float(h.get("uph", 0), 0.0) for h in before_rows) / len(before_rows)
         
         # Calculate avg UPH after (7 days post)
         after_date_end = coached_date + timedelta(days=7)
@@ -52,7 +52,7 @@ def find_coaching_impact(emp_id: str, coaching_notes: list[dict],
                      if str(h.get("emp_id")) == str(emp_id)
                      and coached_date < datetime.fromisoformat(h.get("work_date", "")).date() <= after_date_end]
         if after_rows:
-            after_uph = sum(_safe_float(h.get("uph", 0), 0.0) for h in after_rows) / len(after_rows)
+            after_uph = sum(safe_float(h.get("uph", 0), 0.0) for h in after_rows) / len(after_rows)
     except:
         pass
     

@@ -32,7 +32,7 @@ from ui.components import (
     _render_session_context_bar,
     show_coaching_impact,
 )
-from utils.floor_language import translate_to_floor_language
+from ui.floor_language import translate_to_floor_language
 try:
     from pages.common import _build_coaching_recommendations
 except Exception:
