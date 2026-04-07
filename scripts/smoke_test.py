@@ -15,6 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PY = ROOT / "app.py"
+NAV_PY = ROOT / "core" / "navigation.py"
+ROUTER_PY = ROOT / "core" / "page_router.py"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -25,7 +27,15 @@ def _read(path: Path) -> str:
 
 def test_sidebar_key_routes() -> None:
     """Ensure key-based nav is present and routes are explicit."""
-    src = _read(APP_PY)
+    app_src = _read(APP_PY)
+    nav_src = _read(NAV_PY)
+    router_src = _read(ROUTER_PY)
+
+    # app.py should delegate navigation and dispatch to modular core files.
+    assert "from core.navigation import render_app_navigation" in app_src
+    assert "from core.page_router import dispatch_page" in app_src
+    assert "page = render_app_navigation()" in app_src
+    assert "dispatch_page(page)" in app_src
 
     required_nav_keys = [
         '("supervisor",',
@@ -33,25 +43,31 @@ def test_sidebar_key_routes() -> None:
         '("import",',
         '("employees",',
         '("productivity",',
+        '("shift_plan",',
+        '("coaching_intel",',
+        '("cost_impact",',
         '("email",',
         '("settings",',
     ]
     for token in required_nav_keys:
-        assert token in src, f"Missing sidebar nav key token: {token}"
+        assert token in nav_src, f"Missing sidebar nav key token: {token}"
 
-    assert "handlers = {" in src, "Missing route handlers map"
+    assert "handlers = {" in router_src, "Missing route handlers map"
     required_handler_keys = [
         '"supervisor": page_supervisor',
         '"dashboard": page_dashboard',
         '"import": page_import',
         '"employees": page_employees',
         '"productivity": page_productivity',
+        '"shift_plan": page_shift_plan',
+        '"coaching_intel": page_coaching_intel',
+        '"cost_impact": page_cost_impact',
         '"email": page_email',
         '"settings": page_settings',
     ]
     for token in required_handler_keys:
-        assert token in src, f"Missing route handler: {token}"
-    assert "handler = handlers.get(page, page_import)" in src, "Missing fallback handler"
+        assert token in router_src, f"Missing route handler: {token}"
+    assert "handler = handlers.get(page, page_import)" in router_src, "Missing fallback handler"
 
 
 def test_uph_batch_sanitization() -> None:

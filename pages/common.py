@@ -3,31 +3,17 @@ from datetime import datetime
 from core.dependencies import require_db
 
 
-def get_user_timezone_now():
+def get_user_timezone_now(tenant_id: str = ""):
     """Get current datetime in user's configured timezone.
     
     If timezone is configured in settings, returns timezone-aware datetime.
     Otherwise, returns server local time (naive datetime).
     """
     try:
-        from zoneinfo import ZoneInfo
-        from settings import Settings
-        
-        # Get tenant-specific settings
-        tenant_id = st.session_state.get("tenant_id", "")
-        settings = Settings(tenant_id)
-        tz_str = settings.get("timezone", "").strip()
-        
-        if tz_str:
-            try:
-                tz = ZoneInfo(tz_str)
-                return datetime.now(tz)
-            except Exception:
-                # Fall back to local time if timezone is invalid
-                return datetime.now()
-        else:
-            # Default to local time if no timezone is configured
-            return datetime.now()
+        from services.settings_service import get_tenant_local_now
+
+        resolved_tenant_id = str(tenant_id or st.session_state.get("tenant_id", "") or "")
+        return get_tenant_local_now(resolved_tenant_id)
     except Exception:
         # Fallback on any import or other errors
         return datetime.now()

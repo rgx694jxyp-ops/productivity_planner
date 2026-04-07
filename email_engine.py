@@ -3,11 +3,10 @@ email_engine.py
 ---------------
 Manages email recipients, department assignments, and scheduled sending.
 
-Storage: Supabase tenant_email_config table (DB-backed), with local JSON file as fallback.
+Storage: Supabase tenant_email_config table only.
 Actual sending uses Python's built-in smtplib — no extra libraries needed.
 """
 
-import json
 import os
 import smtplib
 import ssl
@@ -28,9 +27,6 @@ try:
     _HAS_FERNET = True
 except ImportError:
     _HAS_FERNET = False
-
-
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -69,26 +65,10 @@ def _decrypt(value: str) -> str:
     except Exception:
         return value  # return as-is if decryption fails (key changed, etc.)
 
-
-def _email_config_file(tenant_id: str = "") -> str:
-    """Return a tenant-specific email config path, falling back to the shared file."""
-    tid = (tenant_id or "").strip()
-    if not tid:
-        try:
-            import streamlit as st
-            tid = st.session_state.get("tenant_id", "")
-        except Exception:
-            tid = ""
-    if tid:
-        return os.path.join(_BASE_DIR, f"dpd_email_config_{tid}.json")
-    return os.path.join(_BASE_DIR, "dpd_email_config.json")
-
-
-# ── Config load / save (DB-first, file fallback) ────────────────────────────
+# ── Config load / save (DB only) ─────────────────────────────────────────────
 
 def load_email_config(tenant_id: str = "") -> dict:
-    """Load email config from DB, falling back to local file."""
-    # Try database first
+    """Load email config from DB only."""
     try:
         from database import load_email_config_db
         data = load_email_config_db(tenant_id)
@@ -102,37 +82,15 @@ def load_email_config(tenant_id: str = "") -> dict:
             return data
     except Exception:
         pass
-    # Fallback to file
-    ecf = _email_config_file(tenant_id)
-    if not os.path.exists(ecf):
-        return _empty_config()
-    try:
-        with open(ecf, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        data.setdefault("delivery", {
-            "mode": "smtp", "provider": "resend", "api_key": "", "from": ""
-        })
-        data.setdefault("smtp", {})
-        data.setdefault("recipients", [])
-        data.setdefault("schedules", [])
-        return data
-    except (json.JSONDecodeError, IOError):
-        return _empty_config()
+    return _empty_config()
 
 
 def save_email_config(data: dict, tenant_id: str = ""):
-    """Save email config to DB and local file."""
-    # Save to database
+    """Save email config to DB only."""
     try:
         from database import save_email_config_db
         save_email_config_db(data, tenant_id)
     except Exception:
-        pass
-    # Also save to file as backup
-    try:
-        with open(_email_config_file(tenant_id), "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except IOError:
         pass
 
 

@@ -1,92 +1,44 @@
 # --- Entitlement function ---
 def get_subscription_entitlement(tenant_id: str = "") -> dict:
-    """
-    Returns a dict describing the current subscription entitlements for the tenant.
-    {
-        "has_access": bool,
-        "access_reason": "active" | "grace_period" | "past_due_blocked" | "canceled" | ...,
-        "plan": "starter" | "pro" | "business",
-        "employee_limit": int,
-        "show_payment_banner": bool,
-        "show_pending_downgrade_banner": bool,
-    }
-    """
-    import database as _db
-    sub = _db.get_subscription(tenant_id)
-    PLAN_LIMITS = _db.PLAN_LIMITS
-    out = {
-        "has_access": False,
-        "access_reason": "none",
-        "plan": "starter",
-        "employee_limit": 0,
-        "show_payment_banner": False,
-        "show_pending_downgrade_banner": False,
-    }
-    if not sub:
-        out["access_reason"] = "no_subscription"
-        return out
-    plan = str(sub.get("plan") or "starter").lower()
-    status = str(sub.get("status") or "").lower()
-    limit = sub.get("employee_limit")
-    if limit is None or limit == 0:
-        limit = PLAN_LIMITS.get(plan, 25)
-    out["plan"] = plan
-    out["employee_limit"] = limit
-    pending_plan = sub.get("pending_plan")
-    pending_change_at = sub.get("pending_change_at")
-    period_end = sub.get("current_period_end")
-    # Access logic
-    if status in ("active", "trialing"):
-        out["has_access"] = True
-        out["access_reason"] = status
-    elif status == "past_due":
-        # 48h grace period
-        if period_end:
-            from datetime import datetime, timezone, timedelta
-            try:
-                pe = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
-                if datetime.now(timezone.utc) <= (pe + timedelta(hours=48)):
-                    out["has_access"] = True
-                    out["access_reason"] = "grace_period"
-                else:
-                    out["access_reason"] = "past_due_blocked"
-            except Exception:
-                out["access_reason"] = "past_due_blocked"
-        else:
-            out["access_reason"] = "past_due_blocked"
-        out["show_payment_banner"] = True
-    elif status in ("unpaid", "incomplete"):
-        out["access_reason"] = status
-        out["show_payment_banner"] = True
-    elif status == "canceled":
-        out["access_reason"] = "canceled"
-    else:
-        out["access_reason"] = status or "unknown"
-    # Pending downgrade banner
-    if pending_plan and pending_plan != plan:
-        out["show_pending_downgrade_banner"] = True
-    return out
+    """Legacy import path: delegate entitlement logic to services.billing_service."""
+    try:
+        from services.billing_service import get_subscription_entitlement as _svc_get_subscription_entitlement
+
+        return _svc_get_subscription_entitlement(tenant_id=tenant_id)
+    except Exception:
+        return {
+            "has_access": False,
+            "status": "none",
+            "plan": "starter",
+            "employee_limit": 0,
+            "show_payment_banner": False,
+            "show_pending_downgrade_banner": False,
+            "pending_plan": "",
+            "pending_change_at": "",
+            "access_reason": "entitlement_unavailable",
+        }
 import time
 from datetime import datetime
 
 import streamlit as st
+from core.billing_cache import clear_billing_cache
 
 
-def verify_checkout_and_activate():
+def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
     """After Stripe checkout, verify payment and create subscription in DB."""
     import requests as _req
     import database as _db
 
     _debug = []
-    get_client = _db.get_client
+    get_subscription = _db.get_subscription
+    get_tenant = _db.get_tenant
     _get_config = _db._get_config
     PLAN_LIMITS = _db.PLAN_LIMITS
-    _get_tid = getattr(_db, "get_tenant_id", lambda: st.session_state.get("tenant_id", ""))
-    _get_uid = getattr(_db, "get_user_id", lambda: st.session_state.get("user_id", ""))
+    set_tenant_stripe_customer_id = getattr(_db, "set_tenant_stripe_customer_id", lambda *_args, **_kwargs: False)
 
     stripe_key = _get_config("STRIPE_SECRET_KEY")
-    tid = _get_tid()
-    uid = _get_uid()
+    tid = str(tenant_id or "").strip()
+    uid = str(user_id or "").strip()
     if not stripe_key:
         _debug.append("no STRIPE_SECRET_KEY")
         st.session_state["_verify_debug"] = _debug
@@ -100,10 +52,9 @@ def verify_checkout_and_activate():
 
     _debug.append(f"tenant_id={tid[:8]}...")
 
-    sb = get_client()
     try:
-        t_resp = sb.table("tenants").select("stripe_customer_id").eq("id", tid).execute()
-        cust_id = t_resp.data[0].get("stripe_customer_id") if t_resp.data else None
+        tenant = get_tenant(tid, columns="stripe_customer_id") or {}
+        cust_id = tenant.get("stripe_customer_id")
     except Exception as e:
         _debug.append(f"tenant lookup err: {e}")
         st.session_state["_verify_debug"] = _debug
@@ -129,7 +80,7 @@ def verify_checkout_and_activate():
             if cust_id:
                 _debug.append(f"recovered stripe_customer_id={cust_id}")
                 try:
-                    sb.table("tenants").update({"stripe_customer_id": cust_id}).eq("id", tid).execute()
+                    set_tenant_stripe_customer_id(cust_id, tid)
                 except Exception:
                     pass
         except Exception as _ce:
@@ -218,6 +169,13 @@ def verify_checkout_and_activate():
             st.session_state["_sub_check_ts"] = time.time()
             st.session_state["_verify_debug"] = _debug
             return False
+        stripe_sub_id = str(stripe_sub.get("id") or "").strip()
+        if not stripe_sub_id:
+            _debug.append("stripe subscription id missing")
+            st.session_state["_sub_check_result"] = False
+            st.session_state["_sub_check_ts"] = time.time()
+            st.session_state["_verify_debug"] = _debug
+            return False
     except Exception as e:
         _debug.append(f"stripe API err: {e}")
         st.session_state["_verify_debug"] = _debug
@@ -267,17 +225,35 @@ def verify_checkout_and_activate():
     _sub_row = None
     while _time.time() < _poll_deadline:
         try:
-            _check = sb.table("subscriptions").select("plan, status").eq("tenant_id", tid).execute()
-            if _check.data and _check.data[0].get("status") in ("active", "trialing"):
-                _sub_row = _check.data[0]
-                break
+            _row = get_subscription(
+                tid,
+                columns="plan, status, stripe_subscription_id, current_period_end",
+                allow_live_fallback=False,
+            )
+            if _row:
+                _db_status = str(_row.get("status") or "").lower().strip()
+                _db_sub_id = str(_row.get("stripe_subscription_id") or "").strip()
+                _db_plan = str(_row.get("plan") or "").lower().strip()
+                if _db_status not in ("active", "trialing"):
+                    _debug.append(f"db status not active yet: {_db_status or 'none'}")
+                elif not _db_sub_id or _db_sub_id != stripe_sub_id:
+                    _debug.append("db subscription id not synced yet")
+                elif _db_plan and _db_plan != plan:
+                    _debug.append(f"db plan not synced yet: db={_db_plan} stripe={plan}")
+                else:
+                    _sub_row = _row
+                    break
         except Exception:
             pass
         _time.sleep(1)
 
     if _sub_row:
-        _debug.append(f"DB confirmed active: plan={_sub_row.get('plan')}")
-        st.session_state["_current_plan"] = _sub_row.get("plan", plan)
+        _debug.append(
+            "DB confirmed webhook sync: "
+            f"sub_id={_sub_row.get('stripe_subscription_id')} "
+            f"plan={_sub_row.get('plan')} status={_sub_row.get('status')}"
+        )
+        st.session_state["_current_plan"] = _sub_row.get("plan")
         st.session_state["_sub_check_result"] = True
         st.session_state["_sub_check_ts"] = _time.time()
         st.session_state["_verify_debug"] = _debug
@@ -309,24 +285,20 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
         "pro": ["Everything in Starter", "Goal setting & UPH targets", "Employee trend analysis", "Underperformer flagging & alerts", "Custom date range reports", "Coaching notes per employee"],
         "business": ["Everything in Pro", "Order & client tracking", "Submission plans & progress", "Client trend recording", "Multi-department management", "Priority email support"],
     }
+    _tenant_id = str(st.session_state.get("tenant_id", "") or "")
+    _user_id = str(st.session_state.get("user_id", "") or "")
+    _user_email = str(st.session_state.get("user_email", "") or "")
 
     _qp = st.query_params
     if _qp.get("checkout") == "success":
+        clear_billing_cache(clear_checkout_state=True)
         with st.spinner("Activating your subscription..."):
-            activated = verify_checkout_and_activate()
+            activated = verify_checkout_and_activate(_tenant_id, _user_id)
         if activated:
             st.balloons()
             st.success("Welcome! Your subscription is now active.")
             st.query_params.clear()
-            st.session_state.pop("_sub_active", None)
-            st.session_state.pop("_sub_check_result", None)
-            st.session_state.pop("_sub_check_ts", None)
-            st.session_state.pop("_current_plan", None)
-            st.session_state.pop("_current_plan_ts", None)
-            st.session_state.pop("_banner_sub", None)
-            st.session_state.pop("_banner_sub_ts", None)
-            st.session_state.pop("_checkout_url", None)
-            st.session_state.pop("_checkout_plan", None)
+            clear_billing_cache(clear_checkout_state=True)
             time.sleep(2)
             st.rerun()
         else:
@@ -337,21 +309,16 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
         st.query_params.clear()
 
     if st.button("Refresh subscription status", key="refresh_subscription_status"):
+        clear_billing_cache()
         with st.spinner("Checking latest billing status..."):
             _synced = False
             try:
-                _synced = verify_checkout_and_activate()
+                _synced = verify_checkout_and_activate(_tenant_id, _user_id)
             except Exception:
                 _synced = False
         if _synced:
             st.success("Subscription status refreshed.")
-            st.session_state.pop("_sub_active", None)
-            st.session_state.pop("_sub_check_result", None)
-            st.session_state.pop("_sub_check_ts", None)
-            st.session_state.pop("_current_plan", None)
-            st.session_state.pop("_current_plan_ts", None)
-            st.session_state.pop("_banner_sub", None)
-            st.session_state.pop("_banner_sub_ts", None)
+            clear_billing_cache()
             st.rerun()
         st.info("No subscription update found yet. Please wait a few seconds and try again.")
 
@@ -362,7 +329,7 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                 st.caption(str(_line))
 
     try:
-        existing_sub = get_subscription()
+        existing_sub = get_subscription(_tenant_id)
     except Exception:
         existing_sub = None
 
@@ -370,7 +337,7 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
     _portal_url = None
     _price_map = {}
     try:
-        _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
+        _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return", tenant_id=_tenant_id)
         _price_map = {
             "starter": _get_config("STRIPE_PRICE_STARTER") or "",
             "pro": _get_config("STRIPE_PRICE_PRO") or "",
@@ -507,6 +474,7 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
             if _is_prev and _portal_url:
                 _reactivate_url = create_billing_portal_url(
                     return_url=_app_url + "/?portal=return",
+                    tenant_id=_tenant_id,
                     target_price_id=_price_map.get(_pk, ""),
                     flow="subscription_update",
                 ) or _portal_url
@@ -516,7 +484,14 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                 _btn_type = "primary" if _is_pop else "secondary"
                 if st.button(_btn_label, use_container_width=True, type=_btn_type, key=f"btn_{_pk}"):
                     with st.spinner("Connecting to Stripe..."):
-                        url, err = create_stripe_checkout_url(_price_id, _success, _cancel)
+                        url, err = create_stripe_checkout_url(
+                            _price_id,
+                            _success,
+                            _cancel,
+                            tenant_id=_tenant_id,
+                            user_id=_user_id,
+                            user_email=_user_email,
+                        )
                     if url:
                         st.session_state["_checkout_url"] = url
                         st.session_state["_checkout_plan"] = _pi["label"]
@@ -526,6 +501,7 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                         if _portal_url:
                             _manage_url = create_billing_portal_url(
                                 return_url=_app_url + "/?portal=return",
+                                tenant_id=_tenant_id,
                                 flow="subscription_update",
                             ) or _portal_url
                             st.info("You already have an active subscription. Use the billing portal to change plans.")

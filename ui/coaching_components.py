@@ -169,13 +169,14 @@ def _render_soft_action_buttons(emp_id: str, emp_name: str, risk_level: str, con
 
             try:
                 from goals import get_active_flags, load_goals, save_goals
+                tenant_id = str(st.session_state.get("tenant_id", "") or "")
 
-                flags = get_active_flags()
+                flags = get_active_flags(tenant_id)
                 if emp_id in flags:
-                    goals_data = load_goals()
+                    goals_data = load_goals(tenant_id)
                     if emp_id in goals_data.get("flagged_employees", {}):
                         goals_data["flagged_employees"][emp_id]["context_tags"] = context_tags
-                        save_goals(goals_data)
+                        save_goals(goals_data, tenant_id)
             except Exception:
                 pass
             st.rerun()

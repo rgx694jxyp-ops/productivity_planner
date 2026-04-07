@@ -239,14 +239,14 @@ def _restore_uph_snapshot(
 def _list_recent_uploads(tenant_id: str, days: int = 7) -> list[dict]:
     try:
         from database import get_client as _db_get_client, _tq as _db_tq
-        from pages.common import get_user_timezone_now
+        from services.settings_service import get_tenant_local_now
 
         _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id:
             return []
 
         _sb = _db_get_client()
-        _since = (get_user_timezone_now() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+        _since = (get_tenant_local_now(_tenant_id) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
         _res = _db_tq(
             _sb.table("uploaded_files")
             .select("id, filename, row_count, header_mapping, is_active, created_at")
@@ -262,7 +262,6 @@ def _list_recent_uploads(tenant_id: str, days: int = 7) -> list[dict]:
 def _record_upload_event(tenant_id: str, filename: str, row_count: int, payload: dict):
     try:
         from database import get_client as _db_get_client
-        from pages.common import get_user_timezone_now  # noqa: F401 (imported for side-effect in payload)
 
         _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id:

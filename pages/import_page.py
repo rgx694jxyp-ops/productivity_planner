@@ -5,7 +5,7 @@ from core.dependencies import (
     _log_app_error,
     require_db,
 )
-from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
+from services.plan_service import evaluate_import_limit
 from core.runtime import _html_mod, date, datetime, io, math, pd, st, tempfile, time, traceback, init_runtime
 
 init_runtime()
@@ -34,6 +34,7 @@ from services.import_service import (
 
 def page_import():
     st.title("📁 Import Data")
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
 
     # Keep expander headings readable on themed backgrounds.
     st.markdown(
@@ -107,14 +108,14 @@ def page_import():
 </div>""", unsafe_allow_html=True)
 
     if step == 1:
-        _import_step1()
+        _import_step1(tenant_id)
     elif step == 2:
-        _import_step2()
+        _import_step2(tenant_id)
     elif step == 3:
-        _import_step3()
+        _import_step3(tenant_id)
 
 
-def _import_step1():
+def _import_step1(tenant_id: str):
     """Step 1 — upload files or enter lightweight production data manually."""
     st.subheader("Bring in whatever you have")
     st.caption("Upload a CSV or Excel export, or type a few rows in manually. We will help make it usable.")
@@ -178,7 +179,7 @@ def _import_step1():
 
                                     if not isinstance(_meta, dict):
                                         _meta = {}
-                                    _meta["undo_applied_at"] = get_user_timezone_now().isoformat(timespec="seconds")
+                                    _meta["undo_applied_at"] = get_user_timezone_now(tenant_id).isoformat(timespec="seconds")
                                     _meta["undo_result"] = {
                                         "restored_rows": int(_restored),
                                         "attempted_deletes": int(_attempted),
@@ -231,7 +232,7 @@ def _import_step1():
                     "Units": "Units",
                     "HoursWorked": "HoursWorked",
                 },
-                "timestamp": get_user_timezone_now().strftime("%Y-%m-%d %H:%M"),
+                "timestamp": get_user_timezone_now(tenant_id).strftime("%Y-%m-%d %H:%M"),
             }]
             st.session_state.submission_plan = None
             st.session_state.split_overrides = {}
@@ -316,7 +317,7 @@ def _import_step1():
 
         if st.button("Continue →", type="primary", use_container_width=True):
             sessions = [
-                {**p, "mapping": {}, "timestamp": get_user_timezone_now().strftime("%Y-%m-%d %H:%M")}
+                {**p, "mapping": {}, "timestamp": get_user_timezone_now(tenant_id).strftime("%Y-%m-%d %H:%M")}
                 for p in pending
             ]
             # Auto-detect columns for each file
@@ -343,27 +344,31 @@ def _import_step1():
 
             # Early employee-limit check right after file selection.
             try:
-                from database import get_employee_count, get_employee_limit
-                _limit = get_employee_limit()
-                if _limit not in (-1, 0):
-                    _existing = get_employee_count()
-                    _new_ids, _name_map = _estimate_new_employees_for_sessions(sessions)
-                    if _existing + len(_new_ids) > _limit:
-                        _slots_left = max(0, _limit - _existing)
-                        _overflow_ids = _new_ids[_slots_left:]
-                        _overflow_names = [
-                            f"{_name_map.get(_eid, _eid)} ({_eid})"
-                            for _eid in _overflow_ids[:25]
-                        ]
-                        st.error(
-                            f"Employee limit reached before import. Plan limit: {_limit}, "
-                            f"current employees: {_existing}, new employees in file: {len(_new_ids)}."
-                        )
-                        if _overflow_names:
-                            st.caption("Employees over your limit:")
-                            st.code("\n".join(_overflow_names))
-                        st.info("Upgrade your plan in Settings → Billing or reduce the file employee list.")
-                        return
+                from database import get_employee_count
+                _existing = get_employee_count()
+                _new_ids, _name_map = _estimate_new_employees_for_sessions(sessions)
+                _limit_check = evaluate_import_limit(
+                    st.session_state.get("tenant_id", ""),
+                    current_count=_existing,
+                    new_unique_count=len(_new_ids),
+                )
+                _limit = int(_limit_check.get("employee_limit", 0) or 0)
+                if not _limit_check.get("allowed", True) and _limit not in (-1, 0):
+                    _slots_left = max(0, int(_limit_check.get("slots_left", 0) or 0))
+                    _overflow_ids = _new_ids[_slots_left:]
+                    _overflow_names = [
+                        f"{_name_map.get(_eid, _eid)} ({_eid})"
+                        for _eid in _overflow_ids[:25]
+                    ]
+                    st.error(
+                        f"Employee limit reached before import. Plan limit: {_limit}, "
+                        f"current employees: {_existing}, new employees in file: {len(_new_ids)}."
+                    )
+                    if _overflow_names:
+                        st.caption("Employees over your limit:")
+                        st.code("\n".join(_overflow_names))
+                    st.info("Upgrade your plan in Settings → Billing or reduce the file employee list.")
+                    return
             except Exception:
                 pass
 
@@ -381,7 +386,7 @@ def _import_step1():
     _render_recent_uploads_panel()
 
 
-def _import_step2():
+def _import_step2(tenant_id: str):
     """Step 2 — map columns for each file."""
     sessions = st.session_state.uploaded_sessions
     if not sessions:
@@ -562,7 +567,7 @@ def _import_step2():
         col2.info("Confirm all file mappings above to continue.")
 
 
-def _import_step3():
+def _import_step3(tenant_id: str):
     """Step 3 — run the pipeline. Registers employees, calculates UPH, stores history."""
     def _undo_last_import() -> bool:
         _undo = st.session_state.get("_last_import_undo") or {}
@@ -596,7 +601,7 @@ def _import_step3():
             if _upload_id:
                 if not isinstance(_payload, dict):
                     _payload = {}
-                _payload["undo_applied_at"] = get_user_timezone_now().isoformat(timespec="seconds")
+                _payload["undo_applied_at"] = get_user_timezone_now(tenant_id).isoformat(timespec="seconds")
                 _payload["undo_result"] = {
                     "source": "last_import_button",
                     "restored_rows": int(_restored),
@@ -960,37 +965,40 @@ def _import_step3():
         if seen_emps:
             # Check employee limit before importing
             try:
-                from database import can_add_employees, get_employee_count, get_employee_limit
-                _el = get_employee_limit()
-                if _el != -1:  # not unlimited
-                    _existing = get_employee_count()
-                    _existing_ids = {
-                        str(e.get("emp_id", "")).strip()
-                        for e in (_cached_employees() or [])
-                        if str(e.get("emp_id", "")).strip()
-                    }
-                    _new_ids = [eid for eid in seen_emps.keys() if eid not in _existing_ids]
-                    _new_unique = len(_new_ids)
-                    if _existing + _new_unique > _el and _el > 0:
-                        tenant_id = st.session_state.get("tenant_id")
-                        _plan = _get_current_plan(tenant_id)
-                        _slots_left = max(0, _el - _existing)
-                        _sorted_new_ids = sorted(_new_ids)
-                        _overflow_ids = _sorted_new_ids[_slots_left:]
-                        _overflow_names = [
-                            f"{seen_emps.get(_eid, {}).get('name', _eid)} ({_eid})"
-                            for _eid in _overflow_ids[:25]
-                        ]
-                        st.error(
-                            f"Employee limit reached. Your **{_plan.capitalize()}** plan allows "
-                            f"**{_el}** employees and you have **{_existing}**. "
-                            f"This import adds **{_new_unique}** new employee(s). "
-                            f"Upgrade your plan in Settings → Subscription."
-                        )
-                        if _overflow_names:
-                            st.caption("Employees over your plan limit:")
-                            st.code("\n".join(_overflow_names))
-                        return
+                from database import get_employee_count
+                _existing = get_employee_count()
+                _existing_ids = {
+                    str(e.get("emp_id", "")).strip()
+                    for e in (_cached_employees() or [])
+                    if str(e.get("emp_id", "")).strip()
+                }
+                _new_ids = [eid for eid in seen_emps.keys() if eid not in _existing_ids]
+                _new_unique = len(_new_ids)
+                _limit_check = evaluate_import_limit(
+                    st.session_state.get("tenant_id", ""),
+                    current_count=_existing,
+                    new_unique_count=_new_unique,
+                )
+                _el = int(_limit_check.get("employee_limit", 0) or 0)
+                if not _limit_check.get("allowed", True) and _el > 0:
+                    _plan = str(_limit_check.get("plan") or "starter").lower()
+                    _slots_left = max(0, int(_limit_check.get("slots_left", 0) or 0))
+                    _sorted_new_ids = sorted(_new_ids)
+                    _overflow_ids = _sorted_new_ids[_slots_left:]
+                    _overflow_names = [
+                        f"{seen_emps.get(_eid, {}).get('name', _eid)} ({_eid})"
+                        for _eid in _overflow_ids[:25]
+                    ]
+                    st.error(
+                        f"Employee limit reached. Your **{_plan.capitalize()}** plan allows "
+                        f"**{_el}** employees and you have **{_existing}**. "
+                        f"This import adds **{_new_unique}** new employee(s). "
+                        f"Upgrade your plan in Settings → Subscription."
+                    )
+                    if _overflow_names:
+                        st.caption("Employees over your plan limit:")
+                        st.code("\n".join(_overflow_names))
+                    return
             except Exception:
                 pass  # don't block import if limit check fails
             try:
@@ -1025,7 +1033,7 @@ def _import_step3():
                 def all_mappings(self): return all_mapping
 
             ps  = _PS()
-            log = ErrorLog(tempfile.gettempdir())
+            log = ErrorLog(tempfile.gettempdir(), tenant_id=tenant_id)
 
             processed = process_data(all_rows, all_mapping, ps, log)
 
@@ -1412,7 +1420,7 @@ def _import_step3():
                             "touched_keys": _undo_touched_keys,
                             "previous_rows": _undo_previous_rows,
                         },
-                        "created_at": get_user_timezone_now().isoformat(timespec="seconds"),
+                        "created_at": get_user_timezone_now(tenant_id).isoformat(timespec="seconds"),
                     }
                     _upload_filename = ", ".join([s.get("filename", "") for s in sessions if s.get("filename")]).strip() or "Import"
                     _upload_log_id = _record_upload_event(_bg_tid, _upload_filename, _candidate_count, _upload_payload)

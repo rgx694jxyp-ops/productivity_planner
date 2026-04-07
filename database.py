@@ -188,6 +188,50 @@ def _tq(query):
     return query.eq("tenant_id", tid) if tid else query
 
 
+def _first_row(query) -> Optional[dict]:
+    try:
+        resp = query.limit(1).execute()
+        if resp.data:
+            return resp.data[0]
+    except Exception:
+        pass
+    return None
+
+
+def get_tenant(tenant_id: str = "", columns: str = "*") -> Optional[dict]:
+    """Return the tenant row for the current tenant, or None."""
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return None
+    sb = get_client()
+    return _first_row(sb.table("tenants").select(columns).eq("id", tid))
+
+
+def set_tenant_stripe_customer_id(stripe_customer_id: str, tenant_id: str = "") -> bool:
+    """Persist a Stripe customer id on the tenant row."""
+    tid = tenant_id or get_tenant_id()
+    if not tid or not stripe_customer_id:
+        return False
+    try:
+        sb = get_client()
+        sb.table("tenants").update({"stripe_customer_id": stripe_customer_id}).eq("id", tid).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _get_tenant_scoped_count(table_name: str, count_column: str, tenant_id: str = "") -> int:
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return 0
+    try:
+        sb = get_client()
+        resp = sb.table(table_name).select(count_column, count="exact").eq("tenant_id", tid).execute()
+        return int(resp.count or 0)
+    except Exception:
+        return 0
+
+
 def _finite_float(value, default: float = 0.0) -> float:
     """Return a JSON-safe finite float."""
     try:
@@ -310,10 +354,63 @@ def get_employee_numeric_id(emp_id: str) -> int | None:
     return emp.get("id") if emp else None
 
 
+def _get_existing_employee_ids(emp_ids: list[str], tenant_id: str = "") -> set[str]:
+    tid = tenant_id or get_tenant_id()
+    if not tid or not emp_ids:
+        return set()
+    try:
+        sb = get_client()
+        normalized_ids = [str(emp_id).strip() for emp_id in emp_ids if str(emp_id).strip()]
+        if not normalized_ids:
+            return set()
+        resp = sb.table("employees").select("emp_id").eq("tenant_id", tid).in_("emp_id", normalized_ids).execute()
+        return {str(row.get("emp_id", "")).strip() for row in (resp.data or []) if str(row.get("emp_id", "")).strip()}
+    except Exception:
+        return set()
+
+
+def _enforce_employee_capacity_for_ids(emp_ids: list[str], tenant_id: str = "") -> None:
+    tid = tenant_id or get_tenant_id()
+    normalized_ids = sorted({str(emp_id).strip() for emp_id in emp_ids if str(emp_id).strip()})
+    if not tid or not normalized_ids:
+        return
+
+    existing_ids = _get_existing_employee_ids(normalized_ids, tid)
+    new_count = len([emp_id for emp_id in normalized_ids if emp_id not in existing_ids])
+    if new_count <= 0:
+        return
+
+    from services.plan_service import enforce_people_limit
+
+    enforce_people_limit(
+        tenant_id=tid,
+        current_count=get_employee_count(tid),
+        additional_count=new_count,
+        limit_type="employee",
+    )
+
+
+def get_team_member_count(tenant_id: str = "") -> int:
+    return _get_tenant_scoped_count("user_profiles", "id", tenant_id)
+
+
+def _get_tenant_id_for_invite_code(invite_code: str) -> str:
+    code = str(invite_code or "").strip().lower()
+    if not code:
+        return ""
+    try:
+        sb = get_client()
+        resp = sb.table("tenants").select("id").eq("invite_code", code).limit(1).execute()
+        return str(resp.data[0].get("id") or "") if resp.data else ""
+    except Exception:
+        return ""
+
+
 def upsert_employee(emp_id: str, name: str, department: str = "",
                     shift: str = "") -> dict:
     """Insert or update a single employee record."""
     sb       = get_client()
+    tid = get_tenant_id()
     # First check with tenant filter (normal path)
     existing = get_employee(emp_id)
     if existing:
@@ -325,6 +422,7 @@ def upsert_employee(emp_id: str, name: str, department: str = "",
     # Check WITHOUT tenant filter — row may exist with NULL/different tenant_id
     r_any = sb.table("employees").select("id").eq("emp_id", emp_id).execute()
     if r_any.data:
+        _enforce_employee_capacity_for_ids([emp_id], tid)
         # Claim the orphaned row for this tenant
         update_data = {
             "name": name, "department": department, "shift": shift, "is_new": False,
@@ -333,6 +431,7 @@ def upsert_employee(emp_id: str, name: str, department: str = "",
         r = sb.table("employees").update(update_data).eq("emp_id", emp_id).execute()
         return r.data[0] if r.data else {}
 
+    _enforce_employee_capacity_for_ids([emp_id], tid)
     r = sb.table("employees").insert({
         "emp_id": emp_id, "name": name,
         "department": department, "shift": shift, "is_new": True,
@@ -356,6 +455,7 @@ def batch_upsert_employees(employees: list[dict]):
             "No tenant context found for employee sync. "
             "Please sign out and sign back in, then retry the import."
         )
+    _enforce_employee_capacity_for_ids([e.get("emp_id", "") for e in employees], _tf.get("tenant_id", ""))
     rows = [{
         "emp_id":     e["emp_id"],
         "name":       e.get("name",""),
@@ -1249,13 +1349,80 @@ def save_email_config_db(data: dict, tenant_id: str = ""):
         print(f"[Warning] Could not save email config to DB: {e}")
 
 
+# ── Coaching Follow-ups (DB-backed) ────────────────────────────────────────
+
+def add_followup_db(emp_id: str, name: str, dept: str, followup_date: str,
+                    note_preview: str = "", tenant_id: str = "") -> None:
+    """Insert or update a scheduled coaching follow-up."""
+    tid = tenant_id or get_tenant_id()
+    if not tid or not followup_date:
+        return
+    try:
+        sb = get_client()
+        sb.table("coaching_followups").upsert({
+            "tenant_id": tid,
+            "emp_id": str(emp_id),
+            "name": str(name)[:60],
+            "dept": str(dept)[:40],
+            "followup_date": str(followup_date),
+            "note_preview": str(note_preview)[:80],
+            "added_on": date.today().isoformat(),
+        }, on_conflict="tenant_id,emp_id,followup_date").execute()
+    except Exception as e:
+        print(f"[Warning] Could not save follow-up to DB: {e}")
+
+
+def get_followups_db(from_date: str = "", to_date: str = "", tenant_id: str = "") -> list[dict]:
+    """Return follow-ups for an inclusive date range."""
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return []
+    from_value = str(from_date or date.today().isoformat())
+    to_value = str(to_date or from_value)
+    try:
+        sb = get_client()
+        resp = (
+            sb.table("coaching_followups")
+            .select("emp_id, name, dept, note_preview, added_on, followup_date")
+            .eq("tenant_id", tid)
+            .gte("followup_date", from_value)
+            .lte("followup_date", to_value)
+            .order("followup_date")
+            .order("name")
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        print(f"[Warning] Could not load follow-ups from DB: {e}")
+        return []
+
+
+def remove_followup_db(emp_id: str, followup_date: str, tenant_id: str = "") -> None:
+    """Delete a scheduled coaching follow-up."""
+    tid = tenant_id or get_tenant_id()
+    if not tid or not followup_date:
+        return
+    try:
+        sb = get_client()
+        (
+            sb.table("coaching_followups")
+            .delete()
+            .eq("tenant_id", tid)
+            .eq("emp_id", str(emp_id))
+            .eq("followup_date", str(followup_date))
+            .execute()
+        )
+    except Exception as e:
+        print(f"[Warning] Could not remove follow-up from DB: {e}")
+
+
 # ── GDPR: data export & account deletion ─────────────────────────────────────
 
 _TENANT_TABLES = [
     "employees", "uph_history", "coaching_notes", "shifts",
     "uploaded_files", "clients", "orders", "order_assignments",
     "unit_submissions", "client_trends",
-    "tenant_goals", "tenant_settings", "tenant_email_config",
+    "tenant_goals", "tenant_settings", "tenant_email_config", "coaching_followups",
     "subscriptions",
 ]
 
@@ -1294,13 +1461,9 @@ def _get_live_subscription_fallback(tenant_id: str = "") -> Optional[dict]:
     except Exception:
         st = None
 
-    sb = get_client()
     cust_id = ""
-    try:
-        t_resp = sb.table("tenants").select("stripe_customer_id").eq("id", tid).execute()
-        cust_id = (t_resp.data[0].get("stripe_customer_id") if t_resp.data else "") or ""
-    except Exception:
-        cust_id = ""
+    tenant = get_tenant(tid, columns="stripe_customer_id") or {}
+    cust_id = str(tenant.get("stripe_customer_id") or "").strip()
 
     if not cust_id:
         try:
@@ -1419,19 +1582,44 @@ def _get_live_subscription_fallback(tenant_id: str = "") -> Optional[dict]:
     return out
 
 
-def get_subscription(tenant_id: str = "") -> Optional[dict]:
+def get_subscription(
+    tenant_id: str = "",
+    columns: str = "*",
+    allow_live_fallback: bool = True,
+) -> Optional[dict]:
     """Return the subscription row for the current tenant, or None."""
     sb = get_client()
     tid = tenant_id or get_tenant_id()
     if not tid:
         return None
+    row = _first_row(sb.table("subscriptions").select(columns).eq("tenant_id", tid))
+    if row:
+        return row
+    if not allow_live_fallback:
+        return None
+
+    fallback = _get_live_subscription_fallback(tid)
+    if not fallback:
+        return None
+    if columns.strip() == "*":
+        return fallback
+    requested_columns = {part.strip() for part in columns.split(",") if part.strip()}
+    return {key: value for key, value in fallback.items() if key in requested_columns}
+
+
+def update_subscription_state(updates: dict, tenant_id: str = "") -> bool:
+    """Update the mirrored subscription row for a tenant and always bump updated_at."""
+    tid = tenant_id or get_tenant_id()
+    if not tid or not updates:
+        return False
+    payload = dict(updates)
+    payload["updated_at"] = datetime.utcnow().isoformat() + "Z"
     try:
-        resp = sb.table("subscriptions").select("*").eq("tenant_id", tid).execute()
-        if resp.data:
-            return resp.data[0]
+        sb = get_client()
+        sb.table("subscriptions").update(payload).eq("tenant_id", tid).execute()
+        return True
     except Exception:
-        pass
-    return _get_live_subscription_fallback(tid)
+        return False
 
 
 def has_active_subscription(tenant_id: str = "") -> bool:
@@ -1485,33 +1673,27 @@ def get_employee_limit(tenant_id: str = "") -> int:
 
 def get_employee_count(tenant_id: str = "") -> int:
     """Return current number of employees for the tenant."""
-    sb = get_client()
-    tid = tenant_id or get_tenant_id()
-    if not tid:
-        return 0
-    try:
-        resp = sb.table("employees").select("emp_id", count="exact").eq("tenant_id", tid).execute()
-        return resp.count or 0
-    except Exception:
-        return 0
+    return _get_tenant_scoped_count("employees", "emp_id", tenant_id)
 
 
 def can_add_employees(count: int = 1, tenant_id: str = "") -> bool:
     """Check if adding `count` employees would exceed the plan limit."""
-    limit = get_employee_limit(tenant_id)
-    if limit == -1:
-        return True  # unlimited
-    if limit == 0:
-        return False  # no active plan
-    current = get_employee_count(tenant_id)
-    return (current + count) <= limit
+    from services.plan_service import evaluate_people_limit
+
+    tid = tenant_id or get_tenant_id()
+    result = evaluate_people_limit(
+        tenant_id=tid,
+        current_count=get_employee_count(tid),
+        additional_count=count,
+        limit_type="employee",
+    )
+    return bool(result.get("allowed"))
 
 
 def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
-                                tenant_id: str = "") -> tuple:
+                                tenant_id: str = "", user_id: str = "", user_email: str = "") -> tuple:
     """Create a Stripe Checkout Session. Returns (url, error_msg)."""
     import requests
-    user_id = ""
     stripe_key = _get_config("STRIPE_SECRET_KEY")
     if not stripe_key:
         return None, "STRIPE_SECRET_KEY not configured"
@@ -1520,11 +1702,7 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
     if not tid:
         return None, "No tenant_id found"
 
-    try:
-        import streamlit as st
-        user_id = st.session_state.get("user_id", "") or ""
-    except Exception:
-        user_id = ""
+    user_id = str(user_id or "").strip()
 
     # Guard: block double-subscription. If already in any live status, block checkout.
     existing_sub = get_subscription(tid)
@@ -1532,22 +1710,14 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
         return None, f"subscription_status_block:{existing_sub.get('status')}"
 
     # Get or create Stripe customer
-    sb = get_client()
-    stripe_cid = None
-    try:
-        tenant_resp = sb.table("tenants").select("stripe_customer_id, name").eq("id", tid).execute()
-        stripe_cid = (tenant_resp.data[0].get("stripe_customer_id") if tenant_resp.data else None)
-    except Exception as e:
-        return None, f"Tenant lookup failed: {e}"
+    tenant = get_tenant(tid, columns="stripe_customer_id, name")
+    if tenant is None:
+        return None, "Tenant lookup failed"
+    stripe_cid = tenant.get("stripe_customer_id")
 
     if not stripe_cid:
         # Create Stripe customer
-        email = ""
-        try:
-            import streamlit as st
-            email = st.session_state.get("user_email", "")
-        except Exception:
-            pass
+        email = str(user_email or "").strip()
         cust_resp = requests.post(
             "https://api.stripe.com/v1/customers",
             auth=(stripe_key, ""),
@@ -1556,10 +1726,7 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
         )
         if cust_resp.status_code == 200:
             stripe_cid = cust_resp.json().get("id")
-            try:
-                sb.table("tenants").update({"stripe_customer_id": stripe_cid}).eq("id", tid).execute()
-            except Exception:
-                pass
+            set_tenant_stripe_customer_id(stripe_cid, tid)
         else:
             return None, f"Stripe customer creation failed: {cust_resp.status_code} {cust_resp.text[:200]}"
 
@@ -1613,18 +1780,14 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
     if not new_price_id:
         return False, "No price_id provided"
 
-    sb = get_client()
-    try:
-        sub_resp = (
-            sb.table("subscriptions")
-            .select("stripe_subscription_id, plan, pending_plan, pending_change_at")
-            .eq("tenant_id", tid)
-            .execute()
-        )
-        sub_row = (sub_resp.data or [{}])[0]
-        stripe_sub_id = sub_row.get("stripe_subscription_id")
-    except Exception as e:
-        return False, f"Could not read subscription: {e}"
+    sub_row = get_subscription(
+        tid,
+        columns="stripe_subscription_id, plan, pending_plan, pending_change_at",
+        allow_live_fallback=False,
+    )
+    if sub_row is None:
+        return False, "Could not read subscription"
+    stripe_sub_id = sub_row.get("stripe_subscription_id")
 
     if not stripe_sub_id:
         return False, "No active subscription found"
@@ -1701,26 +1864,22 @@ def modify_subscription(new_price_id: str, tenant_id: str = "") -> tuple:
     )
 
     if modify_resp.status_code == 200:
-        try:
-            if is_upgrade:
-                sb.table("subscriptions").update(
-                    {
-                        "pending_plan": None,
-                        "pending_change_at": None,
-                        "updated_at": datetime.utcnow().isoformat() + "Z",
-                    }
-                ).eq("tenant_id", tid).execute()
-            else:
-                sb.table("subscriptions").update(
-                    {
-                        "pending_plan": _target_plan,
-                        "pending_change_at": _period_end_iso,
-                        "updated_at": datetime.utcnow().isoformat() + "Z",
-                    }
-                ).eq("tenant_id", tid).execute()
-        except Exception:
-            # Non-fatal: webhook reconciliation is the source of truth.
-            pass
+        if is_upgrade:
+            update_subscription_state(
+                {
+                    "pending_plan": None,
+                    "pending_change_at": None,
+                },
+                tid,
+            )
+        else:
+            update_subscription_state(
+                {
+                    "pending_plan": _target_plan,
+                    "pending_change_at": _period_end_iso,
+                },
+                tid,
+            )
         return True, None
 
     return False, f"Stripe modify failed ({modify_resp.status_code}): {modify_resp.text[:200]}"
@@ -1747,28 +1906,14 @@ def create_billing_portal_url(
         return None
 
     tid = tenant_id or get_tenant_id()
-    sb = get_client()
-    try:
-        resp = sb.table("tenants").select("stripe_customer_id").eq("id", tid).execute()
-        stripe_cid = resp.data[0].get("stripe_customer_id") if resp.data else None
-    except Exception:
-        return None
+    tenant = get_tenant(tid, columns="stripe_customer_id")
+    stripe_cid = tenant.get("stripe_customer_id") if tenant else None
 
     if not stripe_cid:
         return None
 
-    stripe_sub_id = ""
-    try:
-        sub_resp = (
-            sb.table("subscriptions")
-            .select("stripe_subscription_id")
-            .eq("tenant_id", tid)
-            .execute()
-        )
-        if sub_resp.data:
-            stripe_sub_id = sub_resp.data[0].get("stripe_subscription_id") or ""
-    except Exception:
-        stripe_sub_id = ""
+    sub_row = get_subscription(tid, columns="stripe_subscription_id", allow_live_fallback=False) or {}
+    stripe_sub_id = sub_row.get("stripe_subscription_id") or ""
 
     payload = {"customer": stripe_cid, "return_url": return_url}
     if flow == "payment_method_update":
@@ -1920,20 +2065,14 @@ def get_live_stripe_subscription_status(tenant_id: str = "") -> Optional[dict]:
     if not tid:
         return None
 
-    sb = get_client()
-    try:
-        resp = (
-            sb.table("subscriptions")
-            .select("stripe_customer_id, stripe_subscription_id, plan, status, employee_limit, current_period_end, pending_plan, pending_change_at")
-            .eq("tenant_id", tid)
-            .limit(1)
-            .execute()
-        )
-        row = (resp.data or [{}])[0]
-    except Exception:
-        return None
+    row = get_subscription(
+        tid,
+        columns="stripe_customer_id, stripe_subscription_id, plan, status, employee_limit, current_period_end, pending_plan, pending_change_at",
+        allow_live_fallback=False,
+    ) or {}
+    tenant = get_tenant(tid, columns="stripe_customer_id") or {}
 
-    stripe_cid = row.get("stripe_customer_id") or ""
+    stripe_cid = row.get("stripe_customer_id") or tenant.get("stripe_customer_id") or ""
     stripe_sub_id_db = row.get("stripe_subscription_id") or ""
     if not stripe_sub_id_db and not stripe_cid:
         return None
@@ -2339,8 +2478,8 @@ def get_invite_code(tenant_id: str = "") -> str:
         return ""
     try:
         sb = get_client()
-        r = sb.table("tenants").select("invite_code").eq("id", tid).execute()
-        code = (r.data[0].get("invite_code") or "") if r.data else ""
+        tenant = get_tenant(tid, columns="invite_code") or {}
+        code = str(tenant.get("invite_code") or "")
         if not code:
             # Generate via RPC
             r2 = sb.rpc("regenerate_invite_code", {"p_tenant_id": tid}).execute()
@@ -2395,6 +2534,19 @@ def join_tenant_by_invite(user_id: str, invite_code: str, user_name: str = "") -
     if not user_id or not invite_code:
         return ""
     try:
+        tid = _get_tenant_id_for_invite_code(invite_code)
+        if not tid:
+            return ""
+
+        from services.plan_service import enforce_people_limit
+
+        enforce_people_limit(
+            tenant_id=tid,
+            current_count=get_team_member_count(tid),
+            additional_count=1,
+            limit_type="invite",
+        )
+
         sb = get_client()
         r = sb.rpc("join_tenant_by_invite", {
             "p_user_id":     user_id,
@@ -2402,8 +2554,8 @@ def join_tenant_by_invite(user_id: str, invite_code: str, user_name: str = "") -
             "p_user_name":   user_name,
         }).execute()
         return str(r.data) if r.data else ""
-    except Exception:
-        return ""
+    except Exception as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def set_member_role(user_id: str, role: str, tenant_id: str = "") -> bool:

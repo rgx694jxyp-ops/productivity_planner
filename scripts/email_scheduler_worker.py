@@ -11,8 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
-import json
 import os
 import sys
 import time
@@ -24,7 +22,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from database import get_client
+from database import get_client, get_subscription
 from email_engine import (
     get_schedules_due_now,
     get_schedules,
@@ -212,20 +210,6 @@ def _run_once() -> None:
     )
 
     if not cfg_rows:
-        pattern = os.path.join(ROOT_DIR, "dpd_email_config_*.json")
-        for path in glob.glob(pattern):
-            try:
-                tenant_id = os.path.basename(path)[len("dpd_email_config_"):-len(".json")]
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                cfg_rows.append({
-                    "tenant_id": tenant_id,
-                    "schedules": data.get("schedules") or [],
-                })
-            except Exception:
-                continue
-
-    if not cfg_rows:
         _log("No tenant email configs found")
         return
 
@@ -243,16 +227,8 @@ def _run_once() -> None:
         goals = load_goals(tenant_id=tid) or {}
         targets = goals.get("dept_targets", {})
 
-        sub = (
-            sb.table("subscriptions")
-            .select("plan")
-            .eq("tenant_id", tid)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        plan = (sub[0].get("plan") if sub else "starter") or "starter"
+        sub = get_subscription(tid, columns="plan", allow_live_fallback=False) or {}
+        plan = (sub.get("plan") if sub else "starter") or "starter"
         plan = str(plan).lower()
 
         cfg = load_email_config(tenant_id=tid)

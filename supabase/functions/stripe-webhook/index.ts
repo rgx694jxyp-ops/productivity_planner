@@ -282,6 +282,78 @@ function buildSubscriptionRow(sub: any, tenantId: string, customerId: string, ex
   };
 }
 
+async function getExistingSubscriptionRow(supabase: any, tenantId: string) {
+  const { data: existingRows } = await supabase
+    .from("subscriptions")
+    .select("plan, employee_limit, pending_plan, pending_change_at, updated_at")
+    .eq("tenant_id", tenantId)
+    .limit(1);
+  return existingRows?.[0] || null;
+}
+
+async function upsertFullSubscriptionSnapshot(
+  supabase: any,
+  tenantId: string,
+  customerId: string,
+  sub: any,
+  options?: { forceStatus?: string; clearPending?: boolean; supplemental?: boolean }
+) {
+  const existing = await getExistingSubscriptionRow(supabase, tenantId);
+
+  // Detect schedule-based pending plan change (portal-initiated downgrades).
+  // Stripe creates a subscription_schedule when a customer downgrades via the
+  // customer portal. The schedule's next phase is the pending plan.
+  // Skip when explicitly clearing pending fields, supplemental invoice events,
+  // or when another pending indicator is already present.
+  let subToWrite = sub;
+  if (!options?.clearPending && !options?.supplemental && !sub.pending_update && !sub.metadata?.pending_plan) {
+    const schedulePending = await resolvePendingPlanFromSchedule(sub);
+    if (schedulePending?.plan) {
+      subToWrite = {
+        ...sub,
+        metadata: {
+          ...sub.metadata,
+          pending_plan: schedulePending.plan,
+          // ISO string so resolvePendingChangeAt can parse it directly
+          ...(schedulePending.changeAt != null
+            ? { pending_change_at: schedulePending.changeAt }
+            : {}),
+        },
+      };
+    }
+  }
+
+  const row = buildSubscriptionRow(subToWrite, tenantId, customerId, existing);
+  if (options?.forceStatus) {
+    row.status = options.forceStatus;
+  }
+  if (options?.clearPending) {
+    row.pending_plan = null;
+    row.pending_change_at = null;
+    // Subscription is fully terminated — no deferred cancellation can be pending.
+    row.cancel_at_period_end = false;
+  }
+
+  // Supplemental invoice events update payment status and period dates only.
+  // Preserve plan/limit/pending fields already written by a subscription event
+  // so that out-of-order or delayed invoice events cannot overwrite subscription
+  // state with a stale snapshot from Stripe.
+  if (options?.supplemental && existing) {
+    row.plan = existing.plan;
+    row.employee_limit = existing.employee_limit;
+    row.pending_plan = existing.pending_plan ?? null;
+    row.pending_change_at = existing.pending_change_at ?? null;
+  }
+
+  const { error } = await supabase
+    .from("subscriptions")
+    .upsert(row, { onConflict: "tenant_id" });
+  if (error) {
+    throw new Error(`subscriptions upsert snapshot failed: ${error.message} (code=${error.code})`);
+  }
+  return row;
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
@@ -310,7 +382,11 @@ Deno.serve(async (req) => {
       event_type: event.type,
     });
   if (eventInsertErr) {
-    if (eventInsertErr.code === "23505") {
+    const duplicateEvent =
+      eventInsertErr.code === "23505" ||
+      String(eventInsertErr.message || "").toLowerCase().includes("duplicate key");
+    if (duplicateEvent) {
+      console.log(`Duplicate Stripe event skipped: ${event.id} (${event.type})`);
       return new Response(JSON.stringify({ received: true, duplicate: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -347,21 +423,23 @@ Deno.serve(async (req) => {
 
         // Fetch full subscription from Stripe
         const sub = await getSubscriptionDetails(subscriptionId);
-        // Read existing row (if any)
-        const { data: existingRows } = await supabase
-          .from("subscriptions")
-          .select("plan, employee_limit, pending_plan, pending_change_at, updated_at")
-          .eq("tenant_id", tenantId)
-          .limit(1);
-        const existing = existingRows?.[0] || null;
-        const upsertRow = buildSubscriptionRow(sub, tenantId, customerId, existing);
+        if (!sub?.id || typeof sub.status !== "string" || !sub.status.trim()) {
+          throw new Error(
+            `checkout.session.completed subscription fetch returned invalid payload for ${subscriptionId}`
+          );
+        }
 
-        const { error: upsertErr } = await supabase.from("subscriptions").upsert(
-          upsertRow,
-          { onConflict: "tenant_id" }
+        // Read existing row (if any)
+        const upsertRow = await upsertFullSubscriptionSnapshot(
+          supabase,
+          tenantId,
+          customerId,
+          sub,
+          { forceStatus: sub.status }
         );
-        if (upsertErr) throw new Error(`subscriptions upsert failed: ${upsertErr.message} (code=${upsertErr.code})`);
-        console.log(`Upsert OK for tenant ${tenantId}, plan: ${upsertRow.plan}`);
+        console.log(
+          `Checkout sync upsert OK for tenant ${tenantId}, status=${upsertRow.status}, plan=${upsertRow.plan}, sub=${upsertRow.stripe_subscription_id}`
+        );
 
         // Also store customer ID on tenants table
         await supabase
@@ -370,7 +448,9 @@ Deno.serve(async (req) => {
           .eq("id", tenantId);
 
         await logSubscriptionEvent(supabase, tenantId, event.type, event.data.object);
-        console.log(`Subscription activated for tenant ${tenantId}, plan: ${upsertRow.plan}`);
+        console.log(
+          `Subscription mirrored from checkout.session.completed for tenant ${tenantId}, status=${upsertRow.status}, plan=${upsertRow.plan}`
+        );
         break;
       }
 
@@ -404,36 +484,12 @@ Deno.serve(async (req) => {
             .eq("id", tenantId);
         }
 
-        // Read existing row before upsert
-        const { data: existingRows } = await supabase
-          .from("subscriptions")
-          .select("plan, employee_limit, pending_plan, pending_change_at, updated_at")
-          .eq("tenant_id", tenantId)
-          .limit(1);
-        const existing = existingRows?.[0] || null;
-
-        // If no pending_update/metadata, check for schedule-based downgrade
-        let upsertRow;
-        if (!sub.pending_update && !sub.metadata?.pending_plan) {
-          const schedulePending = await resolvePendingPlanFromSchedule(sub);
-          if (schedulePending?.plan) {
-            // Simulate pending fields for buildSubscriptionRow
-            sub.metadata = { ...sub.metadata, pending_plan: schedulePending.plan };
-            upsertRow = buildSubscriptionRow(sub, tenantId, customerId, existing);
-            upsertRow.pending_change_at = schedulePending.changeAt;
-          } else {
-            upsertRow = buildSubscriptionRow(sub, tenantId, customerId, existing);
-          }
-        } else {
-          upsertRow = buildSubscriptionRow(sub, tenantId, customerId, existing);
-        }
-
-        const { error: upsertErr } = await supabase
-          .from("subscriptions")
-          .upsert(upsertRow, { onConflict: "tenant_id" });
-        if (upsertErr) {
-          throw new Error(`subscriptions upsert (customer.subscription.*) failed: ${upsertErr.message} (code=${upsertErr.code})`);
-        }
+        const upsertRow = await upsertFullSubscriptionSnapshot(
+          supabase,
+          tenantId,
+          customerId,
+          sub
+        );
 
         await logSubscriptionEvent(supabase, tenantId, event.type, event.data.object);
         console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${upsertRow.plan}, pending=${upsertRow.pending_plan || "none"}`);
@@ -451,19 +507,18 @@ Deno.serve(async (req) => {
           .limit(1);
 
         if (tenants?.length) {
-          await supabase
-            .from("subscriptions")
-            .update({
-              status: "canceled",
-              cancel_at_period_end: false,
-              pending_plan: null,
-              pending_change_at: null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("tenant_id", tenants[0].id);
+          const upsertRow = await upsertFullSubscriptionSnapshot(
+            supabase,
+            tenants[0].id,
+            customerId,
+            sub,
+            { forceStatus: "canceled", clearPending: true }
+          );
 
           await logSubscriptionEvent(supabase, tenants[0].id, event.type, event.data.object);
-          console.log(`Subscription canceled for tenant ${tenants[0].id}`);
+          console.log(
+            `Subscription canceled for tenant ${tenants[0].id}, status=${upsertRow.status}, plan=${upsertRow.plan}`
+          );
         }
         break;
       }
@@ -471,6 +526,12 @@ Deno.serve(async (req) => {
       case "invoice.payment_failed": {
         const invoice = event.data.object;
         const customerId = invoice.customer;
+        const subscriptionId = invoice.subscription;
+
+        if (!subscriptionId) {
+          console.log("invoice.payment_failed missing subscription id; skipping snapshot sync");
+          break;
+        }
 
         const { data: tenants } = await supabase
           .from("tenants")
@@ -479,16 +540,19 @@ Deno.serve(async (req) => {
           .limit(1);
 
         if (tenants?.length) {
-          await supabase
-            .from("subscriptions")
-            .update({
-              status: "past_due",
-              updated_at: new Date().toISOString(),
-            })
-            .eq("tenant_id", tenants[0].id);
+          const failedSub = await getSubscriptionDetails(subscriptionId);
+          const upsertRow = await upsertFullSubscriptionSnapshot(
+            supabase,
+            tenants[0].id,
+            customerId,
+            failedSub,
+            { forceStatus: failedSub?.status || "past_due", supplemental: true }
+          );
 
           await logSubscriptionEvent(supabase, tenants[0].id, event.type, event.data.object);
-          console.log(`Payment failed for tenant ${tenants[0].id}`);
+          console.log(
+            `Payment failed sync for tenant ${tenants[0].id}, status=${upsertRow.status}, plan=${upsertRow.plan}`
+          );
         }
         break;
       }
@@ -509,17 +573,13 @@ Deno.serve(async (req) => {
 
         if (tenants?.length) {
           const renewedSub = await getSubscriptionDetails(subscriptionId);
-          // Read existing row (if any)
-          const { data: existingRows } = await supabase
-            .from("subscriptions")
-            .select("plan, employee_limit, pending_plan, pending_change_at, updated_at")
-            .eq("tenant_id", tenants[0].id)
-            .limit(1);
-          const existing = existingRows?.[0] || null;
-          const upsertRow = buildSubscriptionRow(renewedSub, tenants[0].id, customerId, existing);
-          await supabase
-            .from("subscriptions")
-            .upsert(upsertRow, { onConflict: "tenant_id" });
+          const upsertRow = await upsertFullSubscriptionSnapshot(
+            supabase,
+            tenants[0].id,
+            customerId,
+            renewedSub,
+            { forceStatus: renewedSub?.status || "active", supplemental: true }
+          );
 
           await logSubscriptionEvent(supabase, tenants[0].id, event.type, event.data.object);
           console.log(`Renewal synced for tenant ${tenants[0].id}, plan: ${upsertRow.plan}`);
@@ -531,6 +591,12 @@ Deno.serve(async (req) => {
       case "invoice.payment_action_required": {
         const invoice = event.data.object;
         const customerId = invoice.customer;
+        const subscriptionId = invoice.subscription;
+
+        if (!subscriptionId) {
+          console.log("invoice.payment_action_required missing subscription id; skipping snapshot sync");
+          break;
+        }
 
         const { data: tenants } = await supabase
           .from("tenants")
@@ -539,15 +605,18 @@ Deno.serve(async (req) => {
           .limit(1);
 
         if (tenants?.length) {
-          await supabase
-            .from("subscriptions")
-            .update({
-              status: "incomplete",
-              updated_at: new Date().toISOString(),
-            })
-            .eq("tenant_id", tenants[0].id);
+          const actionSub = await getSubscriptionDetails(subscriptionId);
+          const upsertRow = await upsertFullSubscriptionSnapshot(
+            supabase,
+            tenants[0].id,
+            customerId,
+            actionSub,
+            { forceStatus: actionSub?.status || "incomplete", supplemental: true }
+          );
 
-          console.log(`Payment action required for tenant ${tenants[0].id}`);
+          console.log(
+            `Payment action required sync for tenant ${tenants[0].id}, status=${upsertRow.status}, plan=${upsertRow.plan}`
+          );
         }
         break;
       }

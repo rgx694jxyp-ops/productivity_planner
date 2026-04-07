@@ -6,7 +6,7 @@ from core.dependencies import (
     _get_db_client,
     _log_app_error,
 )
-from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise, is_paid_plan as _is_paid_plan
+from services.plan_service import PlanEnforcementError, enforce_productivity_view_access, get_productivity_navigation
 from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback, init_runtime
 
 try:
@@ -86,16 +86,10 @@ def page_productivity():
 
     # Secondary page navigation: first choose mode, then choose view.
     tenant_id = st.session_state.get("tenant_id")
-    _plan_now = _get_current_plan(tenant_id)
-    if _is_paid_plan(_plan_now):
-        _monitor_opts = ["📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "📋 Priority List", "🧑‍🏫 Coaching"]
-        _plan_opts = ["🎯 Dept Goals", "💰 Labor Cost"]
-    else:
-        # Starter tier: core weekly output + ranking-focused view.
-        _monitor_opts = ["📅 Weekly", "📋 Priority List"]
-        _plan_opts = []
-
-    _mode_options = ["Monitor"] + (["Plan"] if _plan_opts else [])
+    _nav = get_productivity_navigation(tenant_id)
+    _monitor_opts = _nav.get("monitor_options", [])
+    _plan_opts = _nav.get("plan_options", [])
+    _mode_options = _nav.get("mode_options", ["Monitor"])
     _mode_default = st.session_state.get("prod_mode", "Monitor")
     if _mode_default not in _mode_options:
         _mode_default = "Monitor"
@@ -121,6 +115,12 @@ def page_productivity():
         label_visibility="collapsed",
         key="prod_view",
     )
+
+    try:
+        enforce_productivity_view_access(tenant_id, chosen_prod)
+    except PlanEnforcementError as exc:
+        st.warning(str(exc))
+        return
 
     _render_primary_action_rail(
         st.session_state.get("goal_status", []),
@@ -152,9 +152,9 @@ def page_productivity():
             mapping  = st.session_state.get("mapping", {})
             trend_data = analyse_trends(history, mapping, weeks=tw) if history else {}
             goal_status = build_goal_status(
-                st.session_state.get("top_performers", []), targets, trend_data)
+                st.session_state.get("top_performers", []), targets, trend_data, tenant_id=tenant_id)
             ps  = _PS()
-            log = ErrorLog(tempfile.gettempdir())
+            log = ErrorLog(tempfile.gettempdir(), tenant_id=tenant_id)
             dept_report = build_department_report(
                 st.session_state.get("top_performers", []), ps, log)
             st.session_state.goal_status = goal_status
@@ -186,13 +186,13 @@ def page_productivity():
         try:
             _fresh_td      = st.session_state.get("trend_data", {})
             _fresh_gs      = build_goal_status(
-                st.session_state.top_performers, _fresh_targets, _fresh_td)
+                st.session_state.top_performers, _fresh_targets, _fresh_td, tenant_id=tenant_id)
             st.session_state.goal_status = _fresh_gs
             st.session_state["_last_applied_targets"] = dict(_fresh_targets)
             # Only rebuild dept_report for live data — archived version is already correct
             if not st.session_state.get("_archived_loaded"):
                 _ps2  = _PS()
-                _log2 = ErrorLog(tempfile.gettempdir())
+                _log2 = ErrorLog(tempfile.gettempdir(), tenant_id=tenant_id)
                 st.session_state.dept_report = build_department_report(
                     st.session_state.top_performers, _ps2, _log2)
         except Exception:
@@ -200,11 +200,6 @@ def page_productivity():
 
     # ── DEPT GOALS ────────────────────────────────────────────────────────────
     if chosen_prod == "🎯 Dept Goals":
-        try:
-            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
-        except Exception:
-            st.warning("This feature requires a Pro plan or higher.")
-            return
         st.subheader("Department UPH targets")
         st.caption("Set a simple target for each department. Once targets are in place, the app can tell you who is on track and who needs help.")
         st.caption("Trend window and Top/Bottom % only affect ranking/highlighting views.")
@@ -323,11 +318,6 @@ def page_productivity():
 
     # ── GOAL STATUS ───────────────────────────────────────────────────────────
     elif chosen_prod == "📊 Goal Status":
-        try:
-            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
-        except Exception:
-            st.warning("This feature requires a Pro plan or higher.")
-            return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity(st.session_state)
         gs = st.session_state.get("goal_status", [])
@@ -336,7 +326,7 @@ def page_productivity():
             try:
                 gs = build_goal_status(
                     st.session_state.top_performers, _cached_targets(),
-                    st.session_state.get("trend_data", {}))
+                    st.session_state.get("trend_data", {}), tenant_id=tenant_id)
                 st.session_state.goal_status = gs
             except Exception:
                 pass
@@ -427,7 +417,7 @@ def page_productivity():
                     idx    = emp_labels.index(sel_emp)
                     emp    = filtered[idx]
                     emp_id = str(emp.get("EmployeeID", emp.get("Employee Name","")))
-                    flag_employee(emp_id, emp.get("Employee Name",""), emp.get("Department",""), reason.strip())
+                    flag_employee(emp_id, emp.get("Employee Name",""), emp.get("Department",""), reason.strip(), tenant_id=tenant_id)
                     _audit("FLAG", f"{emp.get('Employee Name','')} | dept={emp.get('Department','')} | reason={reason.strip()}")
                     _raw_cached_active_flags.clear()
                     _raw_cached_all_coaching_notes.clear()
@@ -477,7 +467,7 @@ def page_productivity():
                             _bi = emp_labels.index(lbl)
                             _be = filtered[_bi]
                             _beid = str(_be.get("EmployeeID", _be.get("Employee Name","")))
-                            flag_employee(_beid, _be.get("Employee Name",""), _be.get("Department",""), bulk_reason.strip())
+                            flag_employee(_beid, _be.get("Employee Name",""), _be.get("Department",""), bulk_reason.strip(), tenant_id=tenant_id)
                         _raw_cached_active_flags.clear(); _raw_cached_all_coaching_notes.clear(); _raw_cached_coaching_notes_for.clear()
                         st.toast(f"✓ {len(bulk_sel)} employee(s) flagged", icon="🚩"); st.rerun()
                 if bc2.button("✓ Unflag all selected", type="secondary", use_container_width=True, key="bulk_unflag_btn"):
@@ -487,17 +477,12 @@ def page_productivity():
                             _be = filtered[_bi]
                             _beid = str(_be.get("EmployeeID", _be.get("Employee Name","")))
                             if _beid in active_flag_ids:
-                                unflag_employee(_beid)
+                                unflag_employee(_beid, tenant_id=tenant_id)
                         _raw_cached_active_flags.clear()
                         st.toast(f"✓ {len(bulk_sel)} employee(s) unflagged", icon="✅"); st.rerun()
 
     # ── TRENDS ────────────────────────────────────────────────────────────────
     elif chosen_prod == "📈 Trends":
-        try:
-            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
-        except Exception:
-            st.warning("This feature requires a Pro plan or higher.")
-            return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity(st.session_state)
         trends = st.session_state.dept_trends
@@ -572,11 +557,6 @@ def page_productivity():
 
     # ── ROLLING AVG ───────────────────────────────────────────────────────────
     elif chosen_prod == "📉 Rolling Avg":
-        try:
-            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
-        except Exception:
-            st.warning("This feature requires a Pro plan or higher.")
-            return
         if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
             _build_archived_productivity(st.session_state)
         rolling = st.session_state.get("employee_rolling_avg", [])
@@ -744,12 +724,6 @@ def page_productivity():
                            key="dl_weekly")
 
     elif chosen_prod == "💰 Labor Cost":
-        try:
-            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
-        except Exception:
-            st.warning("This feature requires a Pro plan or higher.")
-            return
-
         st.subheader("Labor Cost Impact Analysis")
         st.caption("See the dollar impact of employee performance vs targets. Enter your average hourly wage to calculate.")
 
@@ -985,11 +959,6 @@ def page_productivity():
 
     # ── COACHING CORNER ───────────────────────────────────────────────────────────
     elif chosen_prod == "🧑‍🏫 Coaching":
-        try:
-            enforce_plan_or_raise(st.session_state.get("tenant_id"), "advanced")
-        except Exception:
-            st.warning("This feature requires a Pro plan or higher.")
-            return
         st.subheader("🧑‍🏫 Who Needs Coaching?")
         st.caption("Top 3 employees who need performance coaching based on trend + goal status + context.")
 
@@ -1018,7 +987,7 @@ def page_productivity():
             return
 
         # Load active flags and their context tags
-        active_flags_data = get_active_flags()
+        active_flags_data = get_active_flags(tenant_id)
 
         # Score and rank all candidates
         scored = []
@@ -1185,10 +1154,10 @@ def page_productivity():
                         if emp['emp_id'] in flags:
                             flags[emp['emp_id']]["context_tags"] = selected_context
                             # Save back to goals
-                            goals_data = load_goals()
+                            goals_data = load_goals(tenant_id)
                             if emp['emp_id'] in goals_data["flagged_employees"]:
                                 goals_data["flagged_employees"][emp['emp_id']]["context_tags"] = selected_context
-                                save_goals(goals_data)
+                                save_goals(goals_data, tenant_id)
                             st.success("✓ Context tags updated")
                             st.rerun()
                     except Exception as e:
@@ -1203,7 +1172,7 @@ def page_productivity():
                 if note_text:
                     if st.button(f"Log note", key=f"coach_save_{emp['emp_id']}", use_container_width=True):
                         try:
-                            add_note(emp['emp_id'], note_text)
+                            add_note(emp['emp_id'], note_text, tenant_id=tenant_id)
                             st.success(f"✅ Note saved for {emp['employee']}")
                             st.rerun()
                         except Exception as e:
@@ -1230,7 +1199,7 @@ def page_productivity():
                 if is_flagged:
                     if flag_col1.button(f"🚩 Unflag", key=f"unflag_{emp['emp_id']}", use_container_width=True):
                         try:
-                            unflag_employee(emp['emp_id'])
+                            unflag_employee(emp['emp_id'], tenant_id=tenant_id)
                             st.success(f"✓ {emp['employee']} unflagged")
                             st.rerun()
                         except Exception as e:
@@ -1239,12 +1208,12 @@ def page_productivity():
                     if flag_col1.button(f"🚩 Flag for tracking", key=f"flag_{emp['emp_id']}", use_container_width=True):
                         try:
                             flag_employee(emp['emp_id'], emp['employee'], emp['department'],
-                                         reason="Coaching priority: " + ", ".join(emp["reasons"][:2]))
+                                         reason="Coaching priority: " + ", ".join(emp["reasons"][:2]), tenant_id=tenant_id)
                             # Save context tags with the flag
-                            goals_data = load_goals()
+                            goals_data = load_goals(tenant_id)
                             if emp['emp_id'] in goals_data["flagged_employees"]:
                                 goals_data["flagged_employees"][emp['emp_id']]["context_tags"] = selected_context
-                                save_goals(goals_data)
+                                save_goals(goals_data, tenant_id)
                             st.success(f"✓ {emp['employee']} flagged for tracking")
                             st.rerun()
                         except Exception as e:

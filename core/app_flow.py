@@ -7,6 +7,7 @@ from core.dependencies import (
     restore_session_from_cookies,
     verify_checkout_and_activate,
 )
+from core.billing_cache import BILLING_CACHE_TTL_SECONDS, clear_billing_cache
 from core.runtime import st, time, traceback
 from services.email_service import EMAIL_SCHEDULER_ENABLED, email_log, run_page_render_email_check, start_email_thread
 from ui.landing import show_landing_page, track_landing_event
@@ -91,22 +92,12 @@ def sync_billing_portal_return() -> None:
         return
 
     st.query_params.clear()
-    for key in (
-        "_sub_active",
-        "_sub_check_result",
-        "_sub_check_ts",
-        "_banner_sub",
-        "_banner_sub_ts",
-        "_current_plan",
-        "_current_plan_ts",
-        "_portal_synced_plan",
-    ):
-        st.session_state.pop(key, None)
-
-    bust_cache()
+    clear_billing_cache(clear_portal_feedback=True)
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
+    user_id = str(st.session_state.get("user_id", "") or "")
     with st.spinner("Refreshing your subscription…"):
         try:
-            synced_ok = verify_checkout_and_activate()
+            synced_ok = verify_checkout_and_activate(tenant_id, user_id)
         except Exception:
             synced_ok = False
 
@@ -114,7 +105,7 @@ def sync_billing_portal_return() -> None:
         try:
             from database import get_subscription
 
-            new_sub = get_subscription()
+            new_sub = get_subscription(tenant_id)
             if new_sub:
                 st.session_state["_portal_synced_plan"] = new_sub.get("plan", "").capitalize()
         except Exception:
@@ -134,6 +125,8 @@ def enforce_subscription_access() -> bool:
     except Exception:
         pass
 
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
+    user_id = str(st.session_state.get("user_id", "") or "")
     user_email = st.session_state.get("user_email", "").lower()
     if user_email and user_email in admin_emails:
         st.session_state["_sub_active"] = True
@@ -141,15 +134,20 @@ def enforce_subscription_access() -> bool:
 
     sub_check_ts = float(st.session_state.get("_sub_check_ts", 0) or 0)
     sub_cached = st.session_state.get("_sub_check_result")
-    # Avoid frequent entitlement lookups on every page switch; refresh every 3 minutes.
-    cache_ttl = 180
+    # Keep access changes responsive without hammering billing lookups.
+    cache_ttl = BILLING_CACHE_TTL_SECONDS
     if sub_cached is None or (time.time() - sub_check_ts) > cache_ttl:
         try:
-            from billing import get_subscription_entitlement
+            from services.billing_service import get_subscription_entitlement
 
-            entitlement = get_subscription_entitlement()
+            entitlement = get_subscription_entitlement(
+                tenant_id=tenant_id,
+                user_email=user_email,
+            )
             sub_cached = entitlement["has_access"]
             st.session_state["_sub_entitlement"] = entitlement
+            st.session_state["_billing_entitlement"] = entitlement
+            st.session_state["_billing_entitlement_ts"] = time.time()
         except Exception:
             sub_cached = True
         st.session_state["_sub_check_result"] = sub_cached
@@ -160,11 +158,12 @@ def enforce_subscription_access() -> bool:
         return True
 
     try:
-        stripe_sync_ok = verify_checkout_and_activate()
+        stripe_sync_ok = verify_checkout_and_activate(tenant_id, user_id)
     except Exception:
         stripe_sync_ok = False
 
     if stripe_sync_ok:
+        clear_billing_cache()
         st.session_state["_sub_active"] = True
         st.rerun()
 

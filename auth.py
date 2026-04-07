@@ -441,7 +441,11 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
                                     st.markdown("</div>", unsafe_allow_html=True)
                                     return
                             except Exception as _inv_err:
-                                st.error(f"Could not join team: {_inv_err}")
+                                _msg = str(_inv_err or "").strip()
+                                if "team seats" in _msg.lower() or "plan '" in _msg.lower():
+                                    st.error(_msg)
+                                else:
+                                    st.error(f"Could not join team: {_inv_err}")
                                 st.markdown("</div>", unsafe_allow_html=True)
                                 return
                         else:

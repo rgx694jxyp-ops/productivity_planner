@@ -20,25 +20,19 @@ from error_log import ErrorLog
 
 # ── File names ───────────────────────────────────────────────────────────────
 
-def _tenant_suffix() -> str:
+def _tenant_suffix(tenant_id: str = "") -> str:
     """Return tenant_id suffix for file isolation."""
-    try:
-        import streamlit as st
-        tid = st.session_state.get("tenant_id", "")
-        if tid:
-            return f"_{tid}"
-    except Exception:
-        pass
-    return ""
+    tid = str(tenant_id or "").strip()
+    return f"_{tid}" if tid else ""
 
 
 class HistoryManager:
 
-    def __init__(self, output_dir: str, settings: Settings, error_log: ErrorLog):
+    def __init__(self, output_dir: str, settings: Settings, error_log: ErrorLog, tenant_id: str = ""):
         self._dir      = output_dir
         self._settings = settings
         self._log      = error_log
-        _sfx = _tenant_suffix()
+        _sfx = _tenant_suffix(tenant_id)
         self._hist_path = os.path.join(output_dir, f"dpd_historical_data{_sfx}.csv")
         self._arch_path = os.path.join(output_dir, f"dpd_historical_archive{_sfx}.csv")
 

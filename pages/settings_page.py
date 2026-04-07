@@ -1,12 +1,12 @@
 from core.dependencies import (
-    _bust_cache,
     _full_sign_out,
     _log_app_error,
     _render_sign_out_button,
     _set_auth_cookies,
     _tenant_log_path,
 )
-from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
+from core.billing_cache import clear_billing_cache
+from services.plan_service import can_manage_team
 from core.runtime import datetime, json, re, st, time, traceback, init_runtime
 from services.settings_service import (
     escape_html,
@@ -251,11 +251,7 @@ def page_settings():
                                     _chg = request_plan_change(_target_price, _tid_local)
                                 if _chg.get("success"):
                                     st.success("Upgrade submitted. Access and billing should refresh shortly.")
-                                    st.session_state.pop("_sub_check_result", None)
-                                    st.session_state.pop("_sub_check_ts", None)
-                                    st.session_state.pop("_current_plan", None)
-                                    st.session_state.pop("_current_plan_ts", None)
-                                    _bust_cache()
+                                    clear_billing_cache()
                                     st.rerun()
                                 else:
                                     st.error(_chg.get("error") or "Could not change plan.")
@@ -284,7 +280,7 @@ def page_settings():
             )
             _tid_team = st.session_state.get("tenant_id", "")
             _my_role = get_my_role(_tid_team)
-            _is_admin = (_my_role == "admin" or _get_current_plan(_tid_team) == "admin")
+            _is_admin = can_manage_team(_tid_team, _my_role)
 
             # ── Invite link ────────────────────────────────────────────────────
             _inv_code = get_invite_code(_tid_team)

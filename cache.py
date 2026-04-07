@@ -20,7 +20,7 @@ def raw_cached_employees(_tid_key: str = ""):
 def raw_cached_targets(_tid_key: str = "") -> dict:
     try:
         from goals import get_all_targets
-        return get_all_targets()
+        return get_all_targets(_tid_key)
     except Exception:
         return {}
 
@@ -29,7 +29,7 @@ def raw_cached_targets(_tid_key: str = "") -> dict:
 def raw_cached_active_flags(_tid_key: str = "") -> dict:
     try:
         from goals import get_active_flags
-        return get_active_flags()
+        return get_active_flags(_tid_key)
     except Exception:
         return {}
 

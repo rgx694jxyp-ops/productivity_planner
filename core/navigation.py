@@ -1,8 +1,9 @@
 def plan_gate(min_plan: str, feature_name: str) -> bool:
-    tid = st.session_state.get("tenant_id", "")
-    plan = _get_current_plan(tid)
-    plan_ranks = {"starter": 1, "pro": 2, "business": 3, "admin": 99}
-    if plan_ranks.get(plan, 1) >= plan_ranks.get(min_plan, 1):
+    entitlement = _get_entitlement_cached()
+    plan = str(entitlement.get("plan") or "starter").lower()
+    from services.plan_service import compare_plan_names
+
+    if compare_plan_names(plan, min_plan):
         return True
     st.info(f"{feature_name} is available on **{min_plan.capitalize()}** and above.")
     st.caption("Upgrade in Settings → Subscription to unlock this feature.")
@@ -10,37 +11,44 @@ def plan_gate(min_plan: str, feature_name: str) -> bool:
 
 # For legacy compatibility in productivity.py
 _plan_gate = plan_gate
+from core.billing_cache import BILLING_CACHE_TTL_SECONDS
 from core.dependencies import bust_cache, full_sign_out, render_sign_out_button
 from core.runtime import _html_mod, datetime, st, time
-from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
 
-def plan_rank(plan: str) -> int:
-    return {"starter": 1, "pro": 2, "business": 3, "admin": 99}.get((plan or "").lower(), 1)
+
+def _get_entitlement_cached(ttl_seconds: int = BILLING_CACHE_TTL_SECONDS) -> dict:
+    cached = st.session_state.get("_billing_entitlement")
+    cached_ts = float(st.session_state.get("_billing_entitlement_ts", 0) or 0)
+    if cached and (time.time() - cached_ts) <= ttl_seconds:
+        return cached
+
+    try:
+        from services.billing_service import get_subscription_entitlement
+
+        entitlement = get_subscription_entitlement(
+            tenant_id=st.session_state.get("tenant_id", ""),
+            user_email=st.session_state.get("user_email", ""),
+        )
+    except Exception:
+        entitlement = {}
+
+    st.session_state["_billing_entitlement"] = entitlement
+    st.session_state["_billing_entitlement_ts"] = time.time()
+    return entitlement
 
 def render_subscription_banner() -> None:
-    cached_sub = st.session_state.get("_banner_sub")
-    cached_ts = float(st.session_state.get("_banner_sub_ts", 0) or 0)
-    if cached_sub is None or (time.time() - cached_ts) > 300:
-        try:
-            from database import get_employee_count, get_employee_limit, get_subscription
-            tid = st.session_state.get("tenant_id", "")
-            cached_sub = get_subscription(tid) or {}
-            st.session_state["_banner_sub"] = cached_sub
-            st.session_state["_banner_sub_ts"] = time.time()
-            st.session_state["_banner_emp_count"] = get_employee_count(tid)
-            st.session_state["_banner_emp_limit"] = get_employee_limit(tid)
-        except Exception:
-            return
-
-    if not cached_sub:
+    entitlement = _get_entitlement_cached()
+    if not entitlement:
         return
 
-    plan = cached_sub.get("plan", "").lower()
-    status = cached_sub.get("status", "")
-    period_end = cached_sub.get("current_period_end", "")
-    cancel_at = cached_sub.get("cancel_at_period_end", False)
-    emp_count = st.session_state.get("_banner_emp_count", 0)
-    emp_limit = st.session_state.get("_banner_emp_limit", 0)
+    plan = str(entitlement.get("plan") or "").lower()
+    status = str(entitlement.get("status") or "")
+    period_end = str(entitlement.get("current_period_end") or "")
+    cancel_at = bool(entitlement.get("cancel_at_period_end"))
+    emp_count = int(entitlement.get("employee_count") or 0)
+    emp_limit = int(entitlement.get("employee_limit") or 0)
+    pending_plan = str(entitlement.get("pending_plan") or "").strip().lower()
+    pending_change_at = str(entitlement.get("pending_change_at") or "").strip()
 
     if not plan or status not in ("active", "trialing", "past_due"):
         return
@@ -81,7 +89,20 @@ def render_subscription_banner() -> None:
     plan_part = f'<span style="font-weight:700;color:{color};font-size:13px;">Plan: {plan.capitalize()}</span>'
     date_part = f'<span style="{date_style};font-size:13px;">{date_label}</span>' if date_label else ""
     emp_part = f'<span style="color:#374151;font-size:13px;">{emp_str} employees</span>'
-    parts = [part for part in [plan_part, date_part, emp_part] if part]
+    pending_part = ""
+    if entitlement.get("show_pending_downgrade_banner") and pending_plan:
+        pending_dt = ""
+        if pending_change_at:
+            try:
+                pending_dt = datetime.fromisoformat(pending_change_at.replace("Z", "+00:00")).strftime("%b %-d")
+            except Exception:
+                pending_dt = ""
+        pending_text = f"Pending downgrade to {pending_plan.capitalize()}"
+        if pending_dt:
+            pending_text = f"{pending_text} on {pending_dt}"
+        pending_part = f'<span style="color:#b45309;font-weight:600;font-size:13px;">{pending_text}</span>'
+
+    parts = [part for part in [plan_part, date_part, pending_part, emp_part] if part]
     separator = '<span style="color:#d1d5db;">  ·  </span>'
 
     st.markdown(
@@ -99,8 +120,8 @@ def render_app_navigation() -> str:
 def render_sidebar() -> str:
 
     # --- Restore sidebar using Streamlit's built-in sidebar and previous layout ---
-    tid = st.session_state.get("tenant_id", "")
-    plan = _get_current_plan(tid)
+    entitlement = _get_entitlement_cached()
+    plan = str(entitlement.get("plan") or "starter").lower()
     with st.sidebar:
         st.markdown(
             """
@@ -182,15 +203,8 @@ def render_sidebar() -> str:
             unsafe_allow_html=True,
         )
         try:
-            from database import get_employee_count, get_employee_limit
-
-            emp_count_ts = float(st.session_state.get("_emp_count_ts", 0) or 0)
-            if (time.time() - emp_count_ts) > 300 or "_emp_count_cache" not in st.session_state:
-                st.session_state["_emp_count_cache"] = get_employee_count()
-                st.session_state["_emp_limit_cache"] = get_employee_limit()
-                st.session_state["_emp_count_ts"] = time.time()
-            emp_count = st.session_state["_emp_count_cache"]
-            emp_limit = st.session_state["_emp_limit_cache"]
+            emp_count = int(entitlement.get("employee_count") or 0)
+            emp_limit = int(entitlement.get("employee_limit") or 0)
             limit_str = "unlimited" if emp_limit == -1 else str(emp_limit)
             st.markdown(
                 f'<div style="font-size:10px;color:#7FA8CC;margin-bottom:8px;">Employees: {emp_count}/{limit_str}</div>',

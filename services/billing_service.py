@@ -5,6 +5,100 @@ from datetime import datetime
 from services.settings_service import format_iso_date_human, get_plan_alternatives, get_plan_constants
 
 
+def get_subscription_entitlement(tenant_id: str = "", user_email: str = "") -> dict:
+    """Return a single subscription/access truth object for all billing gates and UI."""
+    out = {
+        "has_access": False,
+        "status": "none",
+        "plan": "starter",
+        "employee_limit": 0,
+        "show_payment_banner": False,
+        "show_pending_downgrade_banner": False,
+        "pending_plan": "",
+        "pending_change_at": "",
+        "access_reason": "none",
+        # Optional convenience fields for shared UI widgets.
+        "employee_count": 0,
+        "cancel_at_period_end": False,
+        "current_period_end": "",
+    }
+
+    try:
+        from database import PLAN_LIMITS, get_employee_count, get_subscription
+    except Exception as exc:
+        out["access_reason"] = f"billing_dependencies_unavailable:{exc}"
+        return out
+
+    try:
+        sub = get_subscription(tenant_id) or {}
+        if not sub:
+            out["access_reason"] = "no_subscription"
+            return out
+
+        plan = str(sub.get("plan") or "starter").lower()
+        status = str(sub.get("status") or "none").lower()
+        pending_plan = str(sub.get("pending_plan") or "").strip().lower()
+        pending_change_at = str(sub.get("pending_change_at") or "").strip()
+        period_end = str(sub.get("current_period_end") or "").strip()
+        cancel_at_period_end = bool(sub.get("cancel_at_period_end"))
+
+        try:
+            limit = int(sub.get("employee_limit", 0) or 0)
+        except Exception:
+            limit = 0
+        if limit in (0, None):
+            limit = int(PLAN_LIMITS.get(plan, 25) or 25)
+
+        out["plan"] = plan
+        out["status"] = status
+        out["employee_limit"] = limit
+        out["pending_plan"] = pending_plan
+        out["pending_change_at"] = pending_change_at
+        out["cancel_at_period_end"] = cancel_at_period_end
+        out["current_period_end"] = period_end
+
+        try:
+            out["employee_count"] = int(get_employee_count(tenant_id) or 0)
+        except Exception:
+            out["employee_count"] = 0
+
+        if status in ("active", "trialing"):
+            out["has_access"] = True
+            out["access_reason"] = status
+        elif status == "past_due":
+            out["show_payment_banner"] = True
+            if period_end:
+                try:
+                    from datetime import datetime as _dt, timedelta, timezone
+
+                    pe = _dt.fromisoformat(period_end.replace("Z", "+00:00"))
+                    if _dt.now(timezone.utc) <= (pe + timedelta(hours=48)):
+                        out["has_access"] = True
+                        out["access_reason"] = "grace_period"
+                    else:
+                        out["access_reason"] = "past_due_blocked"
+                except Exception:
+                    out["access_reason"] = "past_due_blocked"
+            else:
+                out["access_reason"] = "past_due_blocked"
+        elif status in ("unpaid", "incomplete"):
+            out["show_payment_banner"] = True
+            out["access_reason"] = status
+        elif status == "canceled":
+            out["access_reason"] = "canceled"
+        else:
+            out["access_reason"] = status or "unknown"
+
+        rank = {"starter": 1, "pro": 2, "business": 3, "admin": 99, "enterprise": 100}
+        if pending_plan and pending_plan != plan and rank.get(pending_plan, 0) < rank.get(plan, 0):
+            out["show_pending_downgrade_banner"] = True
+
+        return out
+    except Exception as exc:
+        out["access_reason"] = f"entitlement_error:{exc}"
+        return out
+
+
 def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
     """Load subscription + derived billing state for the Settings Billing tab."""
     try:

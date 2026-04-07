@@ -2,27 +2,10 @@
 settings.py
 -----------
 All user-configurable values.
-Storage: Supabase tenant_settings table (DB-backed), with local JSON file as fallback.
+Storage: Supabase tenant_settings table only.
 """
 
-import json
 import os
-
-
-# ── The file that stores everything the user can tweak ──────────────────────
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-def _settings_file() -> str:
-    """Return a tenant-specific settings path, falling back to the shared file."""
-    try:
-        import streamlit as st
-        tid = st.session_state.get("tenant_id", "")
-        if tid:
-            return os.path.join(_BASE_DIR, f"dpd_settings_{tid}.json")
-    except Exception:
-        pass
-    return os.path.join(_BASE_DIR, "dpd_settings.json")
 
 DEFAULTS = {
     # Column mapping: field name -> CSV header the user selected
@@ -131,7 +114,6 @@ class Settings:
     # ── Internal helpers ────────────────────────────────────────────────────
 
     def _load(self) -> dict:
-        # Try database first
         try:
             from database import load_settings_db
             stored = load_settings_db(self._tenant_id)
@@ -144,33 +126,11 @@ class Settings:
                 return merged
         except Exception:
             pass
-        # Fallback to file
-        sf = _settings_file()
-        if not os.path.exists(sf):
-            return dict(DEFAULTS)
-        try:
-            with open(sf, "r", encoding="utf-8") as f:
-                stored = json.load(f)
-            merged = dict(DEFAULTS)
-            merged.update(stored)
-            if "mapping" in DEFAULTS and "mapping" in stored:
-                merged["mapping"] = dict(DEFAULTS["mapping"])
-                merged["mapping"].update(stored.get("mapping", {}))
-            return merged
-        except (json.JSONDecodeError, IOError):
-            print("[Warning] Settings file is corrupted — using defaults.")
-            return dict(DEFAULTS)
+        return dict(DEFAULTS)
 
     def _save(self):
-        # Save to database
         try:
             from database import save_settings_db
             save_settings_db(self._data, self._tenant_id)
         except Exception:
-            pass
-        # Also save to file as backup
-        try:
-            with open(_settings_file(), "w", encoding="utf-8") as f:
-                json.dump(self._data, f, indent=2)
-        except IOError:
             pass

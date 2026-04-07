@@ -7,13 +7,6 @@ Each pipeline run appends to the same file — never overwrites old runs.
 
 import csv
 import os
-from datetime import datetime
-
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    ZoneInfo = None
-
 
 # ── Issue categories (mirrors the VBA colour-coding logic) ──────────────────
 CATEGORY_COLOURS = {
@@ -31,53 +24,30 @@ CATEGORY_COLOURS = {
 }
 
 
-def _tenant_suffix() -> str:
-    try:
-        import streamlit as st
-        tid = st.session_state.get("tenant_id", "")
-        if tid:
-            return f"_{tid}"
-    except Exception:
-        pass
-    return ""
+def _tenant_suffix(tenant_id: str = "") -> str:
+    tid = str(tenant_id or "").strip()
+    return f"_{tid}" if tid else ""
 
 
-def _get_user_timezone_string() -> str:
-    """Get the user's configured timezone, or empty string for server local time."""
-    try:
-        import streamlit as st
-        from settings import Settings
-        
-        tenant_id = st.session_state.get("tenant_id", "")
-        settings = Settings(tenant_id)
-        return settings.get("timezone", "").strip()
-    except Exception:
-        return ""
-
-
-def _get_now_timestamp() -> str:
+def _get_now_timestamp(tenant_id: str = "") -> str:
     """Get current timestamp in user's timezone (if configured) in ISO format."""
-    tz_str = _get_user_timezone_string()
-    now = None
-    
-    if tz_str and ZoneInfo:
-        try:
-            tz = ZoneInfo(tz_str)
-            now = datetime.now(tz)
-        except Exception:
-            now = datetime.now()
-    else:
-        now = datetime.now()
-    
-    return now.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        from services.settings_service import get_tenant_local_now
+
+        return get_tenant_local_now(tenant_id).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        from datetime import datetime
+
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class ErrorLog:
     """Collects issues during a pipeline run and writes them to CSV at the end."""
 
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, tenant_id: str = ""):
         self._records: list[dict] = []
-        _sfx = _tenant_suffix()
+        self._tenant_id = str(tenant_id or "").strip()
+        _sfx = _tenant_suffix(self._tenant_id)
         self._log_path = os.path.join(output_dir, f"dpd_error_log{_sfx}.csv")
 
     # ── Public API ──────────────────────────────────────────────────────────
@@ -85,7 +55,7 @@ class ErrorLog:
     def log(self, step: str, row_num: int, issue_type: str, detail: str, raw_value: str = ""):
         """Record one issue.  row_num=0 means it's not row-specific."""
         self._records.append({
-            "Timestamp":  _get_now_timestamp(),
+            "Timestamp":  _get_now_timestamp(self._tenant_id),
             "Step":       step,
             "Row #":      row_num if row_num > 0 else "",
             "Issue Type": issue_type,

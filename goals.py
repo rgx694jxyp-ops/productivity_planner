@@ -15,29 +15,17 @@ except ImportError:
     ZoneInfo = None
 
 
-def _get_user_timezone_now() -> datetime:
+def _get_user_timezone_now(tenant_id: str = "") -> datetime:
     """Get current datetime in user's configured timezone.
     
     If timezone is configured in settings, returns timezone-aware datetime.
     Otherwise, returns server local time (naive datetime).
     """
-    tz_str = ""
     try:
-        from settings import Settings
-        import streamlit as st
-        tenant_id = st.session_state.get("tenant_id", "")
-        settings = Settings(tenant_id)
-        tz_str = settings.get("timezone", "").strip()
+        from services.settings_service import get_tenant_local_now
+
+        return get_tenant_local_now(tenant_id)
     except Exception:
-        pass
-    
-    if tz_str and ZoneInfo:
-        try:
-            tz = ZoneInfo(tz_str)
-            return datetime.now(tz)
-        except Exception:
-            return datetime.now()
-    else:
         return datetime.now()
 
 
@@ -85,38 +73,38 @@ def save_goals(data: dict, tenant_id: str = ""):
         pass
 
 
-def set_dept_target(dept: str, target_uph: float):
-    data = load_goals()
+def set_dept_target(dept: str, target_uph: float, tenant_id: str = ""):
+    data = load_goals(tenant_id)
     data["dept_targets"][dept] = target_uph
-    save_goals(data)
+    save_goals(data, tenant_id)
 
 
-def get_dept_target(dept: str) -> float:
-    data = load_goals()
+def get_dept_target(dept: str, tenant_id: str = "") -> float:
+    data = load_goals(tenant_id)
     return float(data["dept_targets"].get(dept, 0) or 0)
 
 
-def get_all_targets() -> dict[str, float]:
-    return dict(load_goals().get("dept_targets", {}))
+def get_all_targets(tenant_id: str = "") -> dict[str, float]:
+    return dict(load_goals(tenant_id).get("dept_targets", {}))
 
 
 # ── Employee flagging ──��───────────────────────────���──────────────────────────
 
 def flag_employee(emp_id: str, emp_name: str, dept: str, reason: str = "",
-                  flag_type: str = "followup"):
+                  flag_type: str = "followup", tenant_id: str = ""):
     """Flag an employee for performance tracking and log to coaching notes.
 
     flag_type: "followup" (🚩 Follow-up) | "performance" (⚠️ Performance Issue)
     Idempotent — re-flagging updates the type and reason.
     """
-    data = load_goals()
+    data = load_goals(tenant_id)
     already_active = (emp_id in data["flagged_employees"]
                       and data["flagged_employees"][emp_id].get("active"))
     if emp_id not in data["flagged_employees"]:
         data["flagged_employees"][emp_id] = {
             "name":         emp_name,
             "dept":         dept,
-            "flagged_on":   _get_user_timezone_now().strftime("%Y-%m-%d"),
+            "flagged_on":   _get_user_timezone_now(tenant_id).strftime("%Y-%m-%d"),
             "reason":       reason,
             "flag_type":    flag_type,
             "notes":        [],
@@ -130,7 +118,7 @@ def flag_employee(emp_id: str, emp_name: str, dept: str, reason: str = "",
             data["flagged_employees"][emp_id]["reason"] = reason
         if "context_tags" not in data["flagged_employees"][emp_id]:
             data["flagged_employees"][emp_id]["context_tags"] = []
-    save_goals(data)
+    save_goals(data, tenant_id)
     # Auto-log to coaching notes so the flag always appears in the coaching tab
     if not already_active:
         try:
@@ -142,31 +130,31 @@ def flag_employee(emp_id: str, emp_name: str, dept: str, reason: str = "",
             pass   # non-critical — flag is still saved
 
 
-def unflag_employee(emp_id: str):
-    data = load_goals()
+def unflag_employee(emp_id: str, tenant_id: str = ""):
+    data = load_goals(tenant_id)
     if emp_id in data["flagged_employees"]:
         data["flagged_employees"][emp_id]["active"] = False
-        save_goals(data)
+        save_goals(data, tenant_id)
 
 
-def add_note(emp_id: str, note_text: str):
+def add_note(emp_id: str, note_text: str, tenant_id: str = ""):
     """Append a timestamped note to a flagged employee's record."""
-    data = load_goals()
+    data = load_goals(tenant_id)
     if emp_id not in data["flagged_employees"]:
         return
     data["flagged_employees"][emp_id]["notes"].append({
-        "date": _get_user_timezone_now().strftime("%Y-%m-%d %H:%M"),
+        "date": _get_user_timezone_now(tenant_id).strftime("%Y-%m-%d %H:%M"),
         "text": note_text.strip(),
     })
-    save_goals(data)
+    save_goals(data, tenant_id)
 
 
-def get_flagged_employees() -> dict:
-    return load_goals().get("flagged_employees", {})
+def get_flagged_employees(tenant_id: str = "") -> dict:
+    return load_goals(tenant_id).get("flagged_employees", {})
 
 
-def get_active_flags() -> dict:
-    return {k: v for k, v in get_flagged_employees().items() if v.get("active")}
+def get_active_flags(tenant_id: str = "") -> dict:
+    return {k: v for k, v in get_flagged_employees(tenant_id).items() if v.get("active")}
 
 
 # ── Trend analysis ───��────────────────────────────────────────────────────────
@@ -263,6 +251,7 @@ def build_goal_status(
     ranked:       list[dict],
     dept_targets: dict[str, float],
     trend_data:   dict[str, dict],
+    tenant_id:    str = "",
 ) -> list[dict]:
     """
     Combine ranked employees with their goal status and trend.
@@ -273,7 +262,7 @@ def build_goal_status(
         change_pct:   float
         flagged:      bool
     """
-    active_flags = get_active_flags()
+    active_flags = get_active_flags(tenant_id)
     results      = []
 
     for emp in ranked:

@@ -8,7 +8,7 @@ from core.dependencies import (
     _log_app_error,
     require_db,
 )
-from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise, is_paid_plan as _is_paid_plan
+from services.plan_service import get_available_employee_views
 from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback, init_runtime
 
 init_runtime()
@@ -53,6 +53,7 @@ def _normalize_label_text(value, max_len: int = 64) -> str:
 def page_employees():
     st.title("👥 Employees")
     if not require_db(): return
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
 
     # Apply requested view switch before employees_view_tab widget is instantiated.
     _pending_emp_view = st.session_state.pop("_employees_set_view", None)
@@ -78,48 +79,28 @@ def page_employees():
             if _status:
                 st.caption(f"Status: {_status}")
 
-    tenant_id = st.session_state.get("tenant_id")
-    _plan = _get_current_plan(tenant_id)
     try:
+        tenant_id = st.session_state.get("tenant_id")
+        _views = get_available_employee_views(tenant_id)
         _default_view = st.session_state.get("emp_view", "Performance Journal")
-        if _is_paid_plan(_plan):
-            _views = ["Employee History", "Performance Journal", "Coaching Insights"]
-            if _default_view not in _views:
-                _default_view = "Performance Journal"
-            if "employees_view_tab" not in st.session_state or st.session_state.get("employees_view_tab") not in _views:
-                st.session_state["employees_view_tab"] = _default_view
-            _selected_view = st.radio(
-                "Employees view",
-                _views,
-                horizontal=True,
-                key="employees_view_tab",
-                label_visibility="collapsed",
-            )
-            st.session_state["emp_view"] = _selected_view
-            if _selected_view == "Employee History":
-                _emp_history()
-            elif _selected_view == "Performance Journal":
-                _emp_coaching()
-            else:
-                _emp_ai_coaching()
+        if _default_view not in _views:
+            _default_view = "Performance Journal"
+        if "employees_view_tab" not in st.session_state or st.session_state.get("employees_view_tab") not in _views:
+            st.session_state["employees_view_tab"] = _default_view
+        _selected_view = st.radio(
+            "Employees view",
+            _views,
+            horizontal=True,
+            key="employees_view_tab",
+            label_visibility="collapsed",
+        )
+        st.session_state["emp_view"] = _selected_view
+        if _selected_view == "Employee History":
+            _emp_history()
+        elif _selected_view == "Performance Journal":
+            _emp_coaching()
         else:
-            _views = ["Employee History", "Performance Journal"]
-            if _default_view not in _views:
-                _default_view = "Performance Journal"
-            if "employees_view_tab" not in st.session_state or st.session_state.get("employees_view_tab") not in _views:
-                st.session_state["employees_view_tab"] = _default_view
-            _selected_view = st.radio(
-                "Employees view",
-                _views,
-                horizontal=True,
-                key="employees_view_tab",
-                label_visibility="collapsed",
-            )
-            st.session_state["emp_view"] = _selected_view
-            if _selected_view == "Employee History":
-                _emp_history()
-            else:
-                _emp_coaching()
+            _emp_ai_coaching()
     except Exception as e:
         st.error(f"Error: {e}")
         _log_app_error("employees", f"Employee page error: {e}", detail=traceback.format_exc())
@@ -488,7 +469,7 @@ def _emp_coaching():
                 fc1.warning(f"{_flag_emoji} **{_flag_label}** · Flagged since {flag_info.get('flagged_on','')}")
                 if fc2.button("Remove", key="cn_unflag", type="secondary", use_container_width=True):
                     from goals import unflag_employee
-                    unflag_employee(emp_id)
+                    unflag_employee(emp_id, tenant_id=tenant_id)
                     _raw_cached_active_flags.clear()
                     for r in st.session_state.get("goal_status", []):
                         if str(r.get("EmployeeID","")) == str(emp_id):
@@ -628,7 +609,7 @@ def _emp_coaching():
                     if st.button("Apply flag", key="cn_flag_btn", type="secondary"):
                         from goals import flag_employee
                         _ft_mapped = "followup" if "Follow-up" in _new_flag_type else "performance"
-                        flag_employee(emp_id, emp_name, emp_dept, _ft_reason, flag_type=_ft_mapped)
+                        flag_employee(emp_id, emp_name, emp_dept, _ft_reason, flag_type=_ft_mapped, tenant_id=tenant_id)
                         _raw_cached_active_flags.clear()
                         for r in st.session_state.get("goal_status", []):
                             if str(r.get("EmployeeID","")) == str(emp_id):
