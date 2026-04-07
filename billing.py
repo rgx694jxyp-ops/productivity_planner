@@ -1,3 +1,71 @@
+# --- Entitlement function ---
+def get_subscription_entitlement(tenant_id: str = "") -> dict:
+    """
+    Returns a dict describing the current subscription entitlements for the tenant.
+    {
+        "has_access": bool,
+        "access_reason": "active" | "grace_period" | "past_due_blocked" | "canceled" | ...,
+        "plan": "starter" | "pro" | "business",
+        "employee_limit": int,
+        "show_payment_banner": bool,
+        "show_pending_downgrade_banner": bool,
+    }
+    """
+    import database as _db
+    sub = _db.get_subscription(tenant_id)
+    PLAN_LIMITS = _db.PLAN_LIMITS
+    out = {
+        "has_access": False,
+        "access_reason": "none",
+        "plan": "starter",
+        "employee_limit": 0,
+        "show_payment_banner": False,
+        "show_pending_downgrade_banner": False,
+    }
+    if not sub:
+        out["access_reason"] = "no_subscription"
+        return out
+    plan = str(sub.get("plan") or "starter").lower()
+    status = str(sub.get("status") or "").lower()
+    limit = sub.get("employee_limit")
+    if limit is None or limit == 0:
+        limit = PLAN_LIMITS.get(plan, 25)
+    out["plan"] = plan
+    out["employee_limit"] = limit
+    pending_plan = sub.get("pending_plan")
+    pending_change_at = sub.get("pending_change_at")
+    period_end = sub.get("current_period_end")
+    # Access logic
+    if status in ("active", "trialing"):
+        out["has_access"] = True
+        out["access_reason"] = status
+    elif status == "past_due":
+        # 48h grace period
+        if period_end:
+            from datetime import datetime, timezone, timedelta
+            try:
+                pe = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) <= (pe + timedelta(hours=48)):
+                    out["has_access"] = True
+                    out["access_reason"] = "grace_period"
+                else:
+                    out["access_reason"] = "past_due_blocked"
+            except Exception:
+                out["access_reason"] = "past_due_blocked"
+        else:
+            out["access_reason"] = "past_due_blocked"
+        out["show_payment_banner"] = True
+    elif status in ("unpaid", "incomplete"):
+        out["access_reason"] = status
+        out["show_payment_banner"] = True
+    elif status == "canceled":
+        out["access_reason"] = "canceled"
+    else:
+        out["access_reason"] = status or "unknown"
+    # Pending downgrade banner
+    if pending_plan and pending_plan != plan:
+        out["show_pending_downgrade_banner"] = True
+    return out
 import time
 from datetime import datetime
 
@@ -215,12 +283,11 @@ def verify_checkout_and_activate():
         st.session_state["_verify_debug"] = _debug
         return True
 
-    _debug.append("DB row not yet active after polling — Stripe subscription is active, granting access")
-    st.session_state["_current_plan"] = plan
-    st.session_state["_sub_check_result"] = True
+    _debug.append("DB row not yet active after polling — waiting for webhook-confirmed activation")
+    st.session_state["_sub_check_result"] = False
     st.session_state["_sub_check_ts"] = _time.time()
     st.session_state["_verify_debug"] = _debug
-    return True
+    return False
 
 
 def subscription_page(render_sign_out_button_cb, full_sign_out_cb):

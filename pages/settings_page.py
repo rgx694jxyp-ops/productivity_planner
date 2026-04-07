@@ -6,7 +6,7 @@ from core.dependencies import (
     _set_auth_cookies,
     _tenant_log_path,
 )
-from core.navigation import _get_current_plan
+from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
 from core.runtime import datetime, json, re, st, time, traceback, init_runtime
 from services.settings_service import (
     escape_html,

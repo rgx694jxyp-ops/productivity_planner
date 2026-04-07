@@ -1526,11 +1526,10 @@ def create_stripe_checkout_url(price_id: str, success_url: str, cancel_url: str,
     except Exception:
         user_id = ""
 
-    # Guard: block double-subscription. If already active/trialing, caller
-    # should redirect to the billing portal instead of creating a new checkout.
+    # Guard: block double-subscription. If already in any live status, block checkout.
     existing_sub = get_subscription(tid)
-    if existing_sub and existing_sub.get("status") in ("active", "trialing"):
-        return None, "active_subscription"
+    if existing_sub and existing_sub.get("status") in ("active", "trialing", "past_due", "unpaid", "incomplete"):
+        return None, f"subscription_status_block:{existing_sub.get('status')}"
 
     # Get or create Stripe customer
     sb = get_client()

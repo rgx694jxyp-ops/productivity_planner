@@ -1,72 +1,16 @@
 from core.dependencies import bust_cache, full_sign_out, render_sign_out_button
 from core.runtime import _html_mod, datetime, st, time
-
-
-def get_current_plan() -> str:
-    user_email = st.session_state.get("user_email", "").lower()
-    try:
-        admin_emails = [
-            email.strip().lower()
-            for email in st.secrets.get("ADMIN_EMAILS", "").split(",")
-            if email.strip()
-        ]
-        if user_email in admin_emails:
-            return "admin"
-    except Exception:
-        pass
-
-    cached_plan = st.session_state.get("_current_plan")
-    cached_ts = float(st.session_state.get("_current_plan_ts", 0) or 0)
-    if cached_plan and (time.time() - cached_ts) < 300:
-        return cached_plan
-    try:
-        from database import get_subscription
-
-        sub = get_subscription()
-        plan = sub.get("plan", "starter") if sub else "starter"
-        st.session_state["_current_plan"] = plan
-        st.session_state["_current_plan_ts"] = time.time()
-        return plan
-    except Exception:
-        return "starter"
-
-
+from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
 
 def plan_rank(plan: str) -> int:
     return {"starter": 1, "pro": 2, "business": 3, "admin": 99}.get((plan or "").lower(), 1)
 
-
-def has_plan(min_plan: str) -> bool:
-    return plan_rank(get_current_plan()) >= plan_rank(min_plan)
-
-
-def plan_gate(min_plan: str, feature_name: str) -> bool:
-    if has_plan(min_plan):
-        return True
-    st.info(f"{feature_name} is available on **{min_plan.capitalize()}** and above.")
-    st.caption("Upgrade in Settings → Subscription to unlock this feature.")
-    return False
-
-
 def render_subscription_banner() -> None:
-    email = st.session_state.get("user_email", "").lower()
-    try:
-        admins = [
-            entry.strip().lower()
-            for entry in st.secrets.get("ADMIN_EMAILS", "").split(",")
-            if entry.strip()
-        ]
-        if email and email in admins:
-            return
-    except Exception:
-        pass
-
     cached_sub = st.session_state.get("_banner_sub")
     cached_ts = float(st.session_state.get("_banner_sub_ts", 0) or 0)
     if cached_sub is None or (time.time() - cached_ts) > 300:
         try:
             from database import get_employee_count, get_employee_limit, get_subscription
-
             tid = st.session_state.get("tenant_id", "")
             cached_sub = get_subscription(tid) or {}
             st.session_state["_banner_sub"] = cached_sub
@@ -135,9 +79,8 @@ def render_subscription_banner() -> None:
         unsafe_allow_html=True,
     )
 
-
 def render_sidebar() -> str:
-    plan = get_current_plan()
+    plan = _get_current_plan(st.session_state.get("tenant_id"))
     with st.sidebar:
         st.markdown(
             """
@@ -148,111 +91,3 @@ def render_sidebar() -> str:
 </div>""",
             unsafe_allow_html=True,
         )
-
-        st.divider()
-        nav_items = [
-            ("supervisor", "👔  Supervisor"),
-            ("dashboard", "📊  Dashboard"),
-            ("import", "📁  Import Data"),
-            ("employees", "👥  Employees"),
-            ("productivity", "📈  Productivity"),
-            ("shift_plan", "📋  Shift Plan"),
-            ("coaching_intel", "🧠  Coaching Intel"),
-            ("cost_impact", "💰  Cost Impact"),
-            ("email", "📧  Email Setup"),
-            ("settings", "⚙️  Settings"),
-        ]
-        nav_keys = [key for key, _ in nav_items]
-        nav_labels = {key: label for key, label in nav_items}
-
-        goto = str(st.session_state.pop("goto_page", "") or "").lower()
-        if goto:
-            if goto in nav_keys:
-                st.session_state["_current_page_key"] = goto
-            elif "supervisor" in goto:
-                st.session_state["_current_page_key"] = "supervisor"
-            elif "dashboard" in goto:
-                st.session_state["_current_page_key"] = "dashboard"
-            elif "import" in goto:
-                st.session_state["_current_page_key"] = "import"
-            elif "employee" in goto:
-                st.session_state["_current_page_key"] = "employees"
-            elif "productivity" in goto:
-                st.session_state["_current_page_key"] = "productivity"
-            elif "shift" in goto:
-                st.session_state["_current_page_key"] = "shift_plan"
-            elif "coach" in goto or "intel" in goto:
-                st.session_state["_current_page_key"] = "coaching_intel"
-            elif "cost" in goto or "impact" in goto:
-                st.session_state["_current_page_key"] = "cost_impact"
-            elif "email" in goto:
-                st.session_state["_current_page_key"] = "email"
-            elif "setting" in goto:
-                st.session_state["_current_page_key"] = "settings"
-
-        if st.session_state.get("_current_page_key") not in nav_keys:
-            st.session_state["_current_page_key"] = nav_keys[0]
-
-        page = st.radio(
-            "Navigation",
-            nav_keys,
-            format_func=lambda key: nav_labels.get(key, key.title()),
-            label_visibility="collapsed",
-            key="_current_page_key",
-        )
-
-        st.divider()
-        if st.button("↺ Refresh data", use_container_width=True, key="sb_refresh"):
-            bust_cache()
-            st.rerun()
-
-        from ui.components import toggle_simple_mode
-
-        toggle_simple_mode()
-        if st.session_state.get("simple_mode"):
-            st.caption("Simple Mode keeps the app focused on who needs attention right now.")
-
-        plan_display = plan.capitalize() if plan != "admin" else "Admin"
-        plan_color = {"starter": "#888", "pro": "#1E90FF", "business": "#FFD700", "admin": "#FF6347"}.get(plan, "#888")
-        st.markdown(
-            f'<div style="font-size:10px;color:{plan_color};font-weight:700;margin-bottom:4px;">Plan: {plan_display}</div>',
-            unsafe_allow_html=True,
-        )
-        try:
-            from database import get_employee_count, get_employee_limit
-
-            emp_count_ts = float(st.session_state.get("_emp_count_ts", 0) or 0)
-            if (time.time() - emp_count_ts) > 300 or "_emp_count_cache" not in st.session_state:
-                st.session_state["_emp_count_cache"] = get_employee_count()
-                st.session_state["_emp_limit_cache"] = get_employee_limit()
-                st.session_state["_emp_count_ts"] = time.time()
-            emp_count = st.session_state["_emp_count_cache"]
-            emp_limit = st.session_state["_emp_limit_cache"]
-            limit_str = "unlimited" if emp_limit == -1 else str(emp_limit)
-            st.markdown(
-                f'<div style="font-size:10px;color:#7FA8CC;margin-bottom:8px;">Employees: {emp_count}/{limit_str}</div>',
-                unsafe_allow_html=True,
-            )
-        except Exception:
-            pass
-
-        user_name = st.session_state.get("user_name", "")
-        if user_name:
-            safe_name = _html_mod.escape(user_name)
-            st.markdown(
-                f'<div style="font-size:11px;color:#7FA8CC;margin-bottom:4px;">Signed in as<br><b style="color:#CBD8E8;">{safe_name}</b></div>',
-                unsafe_allow_html=True,
-            )
-        if render_sign_out_button("sidebar", type="secondary", use_container_width=True):
-            full_sign_out()
-            st.rerun()
-
-        st.markdown(
-            '<div style="font-size:10px;color:#3D5A7A;line-height:1.7;">Productivity Planner · v3.0</div>',
-            unsafe_allow_html=True,
-        )
-    return page
-
-
-_get_current_plan = get_current_plan
-_plan_gate = plan_gate

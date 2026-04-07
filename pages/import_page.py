@@ -5,7 +5,7 @@ from core.dependencies import (
     _log_app_error,
     require_db,
 )
-from core.navigation import _get_current_plan
+from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
 from core.runtime import _html_mod, date, datetime, io, math, pd, st, tempfile, time, traceback, init_runtime
 
 init_runtime()
@@ -968,7 +968,8 @@ def _import_step3():
                     _new_ids = [eid for eid in seen_emps.keys() if eid not in _existing_ids]
                     _new_unique = len(_new_ids)
                     if _existing + _new_unique > _el and _el > 0:
-                        _plan = _get_current_plan()
+                        tenant_id = st.session_state.get("tenant_id")
+                        _plan = _get_current_plan(tenant_id)
                         _slots_left = max(0, _el - _existing)
                         _sorted_new_ids = sorted(_new_ids)
                         _overflow_ids = _sorted_new_ids[_slots_left:]

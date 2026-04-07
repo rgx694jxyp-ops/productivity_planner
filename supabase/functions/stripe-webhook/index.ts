@@ -212,14 +212,74 @@ async function logSubscriptionEvent(
   rawObj: any
 ): Promise<void> {
   try {
-    await supabase.from("subscription_events").insert({
+    const { error } = await supabase.from("subscription_events").insert({
       tenant_id: tenantId || null,
       event_type: eventType,
       raw_json: rawObj ?? null,
     });
-  } catch (_) {
-    // Non-fatal — never block webhook response
+    if (error) {
+      console.error("Failed to insert subscription event", {
+        tenantId,
+        eventType,
+        error: error.message,
+        code: error.code,
+      });
+    }
+  } catch (err) {
+    console.error("Exception during subscription event insert", {
+      tenantId,
+      eventType,
+      error: err?.message || err,
+    });
   }
+}
+
+// Helper to build the full mirrored subscription row
+function buildSubscriptionRow(sub: any, tenantId: string, customerId: string, existing?: any) {
+  let currentPlan = resolvePlan(sub);
+  let currentLimit = PLAN_LIMITS[currentPlan] ?? 25;
+
+  let pendingPlan: string | null = null;
+  let pendingChangeAt: string | null = null;
+
+  // Handle pending update (Stripe's pending_update or metadata)
+  if (sub.pending_update?.subscription_items?.[0]?.price?.id) {
+    const pendingPriceId = sub.pending_update.subscription_items[0].price.id;
+    pendingPlan = PRICE_PLAN_MAP[pendingPriceId] || null;
+    const expiresAt = sub.pending_update.expires_at;
+    pendingChangeAt = expiresAt ? new Date(expiresAt * 1000).toISOString() : null;
+  } else if (sub.metadata?.pending_plan) {
+    pendingPlan = sub.metadata.pending_plan;
+    pendingChangeAt = resolvePendingChangeAt(sub);
+  }
+
+  // Portal-initiated downgrade via schedule
+  // (This is handled in the event handler, but can be added here if needed)
+
+  // Preserve current access until the pending change applies
+  if (pendingPlan && existing?.plan && pendingChangeAt && !hasPendingChangeElapsed(pendingChangeAt)) {
+    currentPlan = existing.plan;
+    currentLimit = existing.employee_limit;
+  }
+
+  // Always clear pending fields if not present
+  if (!pendingPlan) pendingPlan = null;
+  if (!pendingChangeAt) pendingChangeAt = null;
+
+  return {
+    tenant_id: tenantId,
+    stripe_customer_id: customerId,
+    stripe_subscription_id: sub.id,
+    plan: currentPlan,
+    status: sub.status,
+    employee_limit: currentLimit,
+    current_period_start: getPeriodStart(sub),
+    current_period_end: getPeriodEnd(sub),
+    cancel_at_period_end: !!sub.cancel_at_period_end,
+    pending_plan: pendingPlan,
+    pending_change_at: pendingChangeAt,
+    updated_at: new Date().toISOString(),
+  };
 }
 
 Deno.serve(async (req) => {
@@ -241,6 +301,23 @@ Deno.serve(async (req) => {
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
   });
+
+  // Webhook idempotency: insert event_id, return early if duplicate
+  const { error: eventInsertErr } = await supabase
+    .from("stripe_webhook_events")
+    .insert({
+      event_id: event.id,
+      event_type: event.type,
+    });
+  if (eventInsertErr) {
+    if (eventInsertErr.code === "23505") {
+      return new Response(JSON.stringify({ received: true, duplicate: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`event log insert failed: ${eventInsertErr.message}`);
+  }
 
   try {
     console.log(`Processing event: ${event.type}, supa_url=${SUPABASE_URL?.slice(0, 30)}, key_len=${SUPABASE_SERVICE_ROLE_KEY?.length}`);
@@ -270,34 +347,21 @@ Deno.serve(async (req) => {
 
         // Fetch full subscription from Stripe
         const sub = await getSubscriptionDetails(subscriptionId);
-        const plan = resolvePlan(sub);
-        const limit = PLAN_LIMITS[plan] ?? 25;
-
-        // Upsert subscription — omit user_id from webhook write to avoid FK constraint
-        // violations (the userId comes from session metadata, not guaranteed to be a
-        // confirmed auth.users row at webhook time). The RLS SELECT policy uses
-        // tenant_id via user_profiles as the primary lookup anyway.
-        const upsertRow: Record<string, unknown> = {
-          tenant_id: tenantId,
-          stripe_customer_id: customerId,
-          stripe_subscription_id: subscriptionId,
-          plan: plan,
-          status: sub.status || "active",
-          employee_limit: limit,
-          current_period_start: getPeriodStart(sub),
-          current_period_end: getPeriodEnd(sub),
-          cancel_at_period_end: sub.cancel_at_period_end || false,
-          pending_plan: null,
-          pending_change_at: null,
-          updated_at: new Date().toISOString(),
-        };
+        // Read existing row (if any)
+        const { data: existingRows } = await supabase
+          .from("subscriptions")
+          .select("plan, employee_limit, pending_plan, pending_change_at, updated_at")
+          .eq("tenant_id", tenantId)
+          .limit(1);
+        const existing = existingRows?.[0] || null;
+        const upsertRow = buildSubscriptionRow(sub, tenantId, customerId, existing);
 
         const { error: upsertErr } = await supabase.from("subscriptions").upsert(
           upsertRow,
           { onConflict: "tenant_id" }
         );
         if (upsertErr) throw new Error(`subscriptions upsert failed: ${upsertErr.message} (code=${upsertErr.code})`);
-        console.log(`Upsert OK for tenant ${tenantId}, plan: ${plan}`);
+        console.log(`Upsert OK for tenant ${tenantId}, plan: ${upsertRow.plan}`);
 
         // Also store customer ID on tenants table
         await supabase
@@ -306,7 +370,7 @@ Deno.serve(async (req) => {
           .eq("id", tenantId);
 
         await logSubscriptionEvent(supabase, tenantId, event.type, event.data.object);
-        console.log(`Subscription activated for tenant ${tenantId}, plan: ${plan}`);
+        console.log(`Subscription activated for tenant ${tenantId}, plan: ${upsertRow.plan}`);
         break;
       }
 
@@ -314,9 +378,6 @@ Deno.serve(async (req) => {
       case "customer.subscription.updated": {
         const sub = event.data.object;
         const customerId = sub.customer;
-        let plan = resolvePlan(sub);
-        let limit = PLAN_LIMITS[plan] ?? 25;
-
         // Find tenant by stripe_customer_id (primary path)
         const { data: tenants } = await supabase
           .from("tenants")
@@ -327,8 +388,6 @@ Deno.serve(async (req) => {
         let tenantId = tenants?.length ? tenants[0].id : null;
 
         // Fallback: recover tenant from Stripe metadata if customer lookup fails.
-        // This covers cases where checkout completed but tenants.stripe_customer_id
-        // was not yet backfilled at the moment this event arrived.
         if (!tenantId) {
           tenantId =
             sub.metadata?.tenant_id ||
@@ -338,7 +397,6 @@ Deno.serve(async (req) => {
             console.error(`No tenant found for Stripe customer ${customerId} and no tenant_id metadata on subscription ${sub.id}`);
             break;
           }
-
           // Self-heal: backfill customer id on tenant for future events.
           await supabase
             .from("tenants")
@@ -346,64 +404,29 @@ Deno.serve(async (req) => {
             .eq("id", tenantId);
         }
 
-        // If Stripe has a pending update (common for end-of-period downgrades),
-        // keep current access until pending_change_at passes.
-        const hasPendingUpdate = !!sub.pending_update;
-        const pendingPlanFromStripe = resolvePendingPlan(sub);
-        let pendingPlan: string | null = null;
-        let pendingChangeAt: string | null = null;
-
-        const { data: curRows } = await supabase
+        // Read existing row before upsert
+        const { data: existingRows } = await supabase
           .from("subscriptions")
-          .select("plan, employee_limit, pending_plan, pending_change_at")
+          .select("plan, employee_limit, pending_plan, pending_change_at, updated_at")
           .eq("tenant_id", tenantId)
           .limit(1);
-        const existing = curRows?.[0] || null;
-        const existingPendingPlan = existing?.pending_plan || null;
-        const existingPendingChangeAt = existing?.pending_change_at || null;
+        const existing = existingRows?.[0] || null;
 
-        if (existingPendingPlan && !hasPendingChangeElapsed(existingPendingChangeAt)) {
-          if (existing?.plan) plan = existing.plan;
-          if (typeof existing?.employee_limit === "number") limit = existing.employee_limit;
-          pendingPlan = existingPendingPlan;
-          pendingChangeAt = existingPendingChangeAt;
-        } else if (hasPendingUpdate || !!sub.metadata?.pending_plan) {
-          pendingPlan = pendingPlanFromStripe || existingPendingPlan || null;
-          pendingChangeAt = resolvePendingChangeAt(sub) || existingPendingChangeAt;
-          // Preserve current app access until the pending change date.
-          if (pendingPlan && pendingChangeAt && !hasPendingChangeElapsed(pendingChangeAt)) {
-            if (existing?.plan) plan = existing.plan;
-            if (typeof existing?.employee_limit === "number") limit = existing.employee_limit;
-          }
-        } else {
-          // No pending_update and no metadata flag — check for a subscription schedule.
-          // Stripe portal-initiated downgrades attach a schedule instead of pending_update.
+        // If no pending_update/metadata, check for schedule-based downgrade
+        let upsertRow;
+        if (!sub.pending_update && !sub.metadata?.pending_plan) {
           const schedulePending = await resolvePendingPlanFromSchedule(sub);
           if (schedulePending?.plan) {
-            pendingPlan = schedulePending.plan;
-            pendingChangeAt = schedulePending.changeAt;
-            // Preserve current plan access until the scheduled change date.
-            if (!hasPendingChangeElapsed(pendingChangeAt)) {
-              if (existing?.plan) plan = existing.plan;
-              if (typeof existing?.employee_limit === "number") limit = existing.employee_limit;
-            }
+            // Simulate pending fields for buildSubscriptionRow
+            sub.metadata = { ...sub.metadata, pending_plan: schedulePending.plan };
+            upsertRow = buildSubscriptionRow(sub, tenantId, customerId, existing);
+            upsertRow.pending_change_at = schedulePending.changeAt;
+          } else {
+            upsertRow = buildSubscriptionRow(sub, tenantId, customerId, existing);
           }
+        } else {
+          upsertRow = buildSubscriptionRow(sub, tenantId, customerId, existing);
         }
-
-        const upsertRow: Record<string, unknown> = {
-          tenant_id: tenantId,
-          stripe_customer_id: customerId,
-          stripe_subscription_id: sub.id,
-          plan: plan,
-          status: sub.status,
-          employee_limit: limit,
-          current_period_start: getPeriodStart(sub),
-          current_period_end: getPeriodEnd(sub),
-          cancel_at_period_end: sub.cancel_at_period_end || false,
-          pending_plan: pendingPlan,
-          pending_change_at: pendingChangeAt,
-          updated_at: new Date().toISOString(),
-        };
 
         const { error: upsertErr } = await supabase
           .from("subscriptions")
@@ -413,7 +436,7 @@ Deno.serve(async (req) => {
         }
 
         await logSubscriptionEvent(supabase, tenantId, event.type, event.data.object);
-        console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${plan}, pending=${pendingPlan || "none"}`);
+        console.log(`Subscription updated for tenant ${tenantId}: ${sub.status}, plan: ${upsertRow.plan}, pending=${upsertRow.pending_plan || "none"}`);
         break;
       }
 
@@ -432,6 +455,7 @@ Deno.serve(async (req) => {
             .from("subscriptions")
             .update({
               status: "canceled",
+              cancel_at_period_end: false,
               pending_plan: null,
               pending_change_at: null,
               updated_at: new Date().toISOString(),
@@ -485,25 +509,20 @@ Deno.serve(async (req) => {
 
         if (tenants?.length) {
           const renewedSub = await getSubscriptionDetails(subscriptionId);
-          const plan = resolvePlan(renewedSub);
-          const limit = PLAN_LIMITS[plan] ?? 25;
+          // Read existing row (if any)
+          const { data: existingRows } = await supabase
+            .from("subscriptions")
+            .select("plan, employee_limit, pending_plan, pending_change_at, updated_at")
+            .eq("tenant_id", tenants[0].id)
+            .limit(1);
+          const existing = existingRows?.[0] || null;
+          const upsertRow = buildSubscriptionRow(renewedSub, tenants[0].id, customerId, existing);
           await supabase
             .from("subscriptions")
-            .update({
-              status: "active",
-              plan: plan,
-              employee_limit: limit,
-              current_period_start: getPeriodStart(renewedSub),
-              current_period_end: getPeriodEnd(renewedSub),
-              cancel_at_period_end: renewedSub.cancel_at_period_end || false,
-              pending_plan: null,
-              pending_change_at: null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("tenant_id", tenants[0].id);
+            .upsert(upsertRow, { onConflict: "tenant_id" });
 
           await logSubscriptionEvent(supabase, tenants[0].id, event.type, event.data.object);
-          console.log(`Renewal synced for tenant ${tenants[0].id}, plan: ${plan}`);
+          console.log(`Renewal synced for tenant ${tenants[0].id}, plan: ${upsertRow.plan}`);
         }
         break;
       }

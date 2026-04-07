@@ -129,11 +129,14 @@ def _enforce_subscription() -> bool:
 
     sub_check_ts = float(st.session_state.get("_sub_check_ts", 0) or 0)
     sub_cached = st.session_state.get("_sub_check_result")
-    if sub_cached is None or (time.time() - sub_check_ts) > 300:
+    # Lower cache TTL: 30s for normal usage
+    CACHE_TTL = 30
+    if sub_cached is None or (time.time() - sub_check_ts) > CACHE_TTL:
         try:
-            from database import has_active_subscription
-
-            sub_cached = has_active_subscription()
+            from billing import get_subscription_entitlement
+            ent = get_subscription_entitlement()
+            sub_cached = ent["has_access"]
+            st.session_state["_sub_entitlement"] = ent
         except Exception:
             sub_cached = True
         st.session_state["_sub_check_result"] = sub_cached
@@ -152,7 +155,6 @@ def _enforce_subscription() -> bool:
         st.rerun()
 
     from core.dependencies import show_subscription_page
-
     show_subscription_page()
     return False
 

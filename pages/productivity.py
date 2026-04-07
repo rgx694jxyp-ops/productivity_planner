@@ -6,7 +6,7 @@ from core.dependencies import (
     _get_db_client,
     _log_app_error,
 )
-from core.navigation import _get_current_plan, _plan_gate
+from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
 from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback, init_runtime
 
 try:
@@ -71,7 +71,8 @@ def page_productivity():
         st.error(f"Productivity module error: {e}"); return
 
     # Secondary page navigation: first choose mode, then choose view.
-    _plan_now = _get_current_plan()
+    tenant_id = st.session_state.get("tenant_id")
+    _plan_now = _get_current_plan(tenant_id)
     _all_opts = ["🎯 Dept Goals", "📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "💰 Labor Cost", "📋 Priority List", "🧑‍🏫 Coaching"]
     if _plan_now in ("pro", "business", "admin"):
         _monitor_opts = ["📊 Goal Status", "📈 Trends", "📉 Rolling Avg", "📅 Weekly", "📋 Priority List", "🧑‍🏫 Coaching"]

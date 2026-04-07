@@ -8,7 +8,7 @@ from core.dependencies import (
     _log_app_error,
     require_db,
 )
-from core.navigation import _get_current_plan
+from services.plan_service import get_current_plan as _get_current_plan, can_access_feature, enforce_plan_or_raise
 from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback, init_runtime
 
 init_runtime()
@@ -72,7 +72,8 @@ def page_employees():
             if _status:
                 st.caption(f"Status: {_status}")
 
-    _plan = _get_current_plan()
+    tenant_id = st.session_state.get("tenant_id")
+    _plan = _get_current_plan(tenant_id)
     try:
         if _plan in ("pro", "business", "admin"):
             t1, t2, t3 = st.tabs(["Employee History", "Performance Journal", "Coaching Insights"])
