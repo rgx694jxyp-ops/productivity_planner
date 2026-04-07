@@ -80,47 +80,70 @@ def render_subscription_banner() -> None:
     )
 
 def render_sidebar() -> str:
-        plan = _get_current_plan(st.session_state.get("tenant_id"))
-        with st.sidebar:
-                st.markdown(
-                        """
-<div style="padding:8px 0 20px;">
-    <div style="font-size:19px;font-weight:700;color:#fff;letter-spacing:-.02em;line-height:1.15;">
-        📦 Productivity<br>Planner
-    </div>
-</div>""",
-                        unsafe_allow_html=True,
-                )
-                # Robust navigation menu with page keys for routing
-                nav_options = [
-                    ("🏠 Dashboard", "dashboard"),
-                    ("📈 Productivity", "productivity"),
-                    ("👥 Employees", "employees"),
-                    ("📂 Import Data", "import"),
-                    ("⚙️ Settings", "settings"),
-                    ("👔 Supervisor View", "supervisor"),
-                    ("🧠 Coaching Intelligence", "coaching_intel"),
-                    ("📋 Shift Plan", "shift_plan"),
-                    ("💰 Cost Impact", "cost_impact"),
-                    ("✉️ Email", "email"),
-                ]
-                page_choice = st.radio(
-                    "Navigation",
-                    nav_options,
-                    format_func=lambda x: x[0],
-                    key="sidebar_nav"
-                )
-                st.session_state["goto_page"] = page_choice[1]
-                return page_choice[1]
 
-# --- Sidebar footer: user info and sign out ---
-        st.markdown("<hr style='margin:18px 0 10px 0;border:0;border-top:1px solid #e5e7eb;' />", unsafe_allow_html=True)
-        user_email = st.session_state.get("user_email")
-        if user_email:
-            st.markdown(f"<div style='color:#374151;font-size:13px;margin-bottom:6px;'>Signed in as<br><b>{_html_mod.escape(user_email)}</b></div>", unsafe_allow_html=True)
 
-        from auth import render_sign_out_button
-        from core.dependencies import full_sign_out
-        if render_sign_out_button("sidebar", use_container_width=True):
-            full_sign_out()
-            st.rerun()
+    # --- Top bar: app name, plan, employee count ---
+    from database import get_employee_count, get_employee_limit, get_subscription
+    tid = st.session_state.get("tenant_id", "")
+    emp_count = get_employee_count(tid) if tid else 0
+    emp_limit = get_employee_limit(tid) if tid else 0
+    plan = "starter"
+    plan_label = "Starter"
+    if tid:
+        sub = get_subscription(tid) or {}
+        plan = sub.get("plan", "starter").capitalize()
+        plan_label = plan
+        emp_limit = sub.get("employee_limit", emp_limit)
+    emp_limit_str = "Unlimited" if emp_limit == -1 else emp_limit
+    st.markdown(
+        (
+            "<div style='padding:8px 0 16px;'>"
+            "  <div style='font-size:19px;font-weight:700;color:#fff;letter-spacing:-.02em;line-height:1.15;'>"
+            "&#128230; Productivity<br>Planner"  # 📦 as HTML entity
+            "</div>"
+            f"  <div style='margin-top:8px;font-size:13px;color:#e5e7eb;'>"
+            f"    <b>Plan:</b> <span style='color:#fff'>{plan_label}</span> &nbsp;·&nbsp;"
+            f"    <b>Employees:</b> <span style='color:#fff'>{emp_count} / {emp_limit_str}</span>"
+            "  </div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+    if tid:
+        sub = get_subscription(tid) or {}
+        plan = sub.get("plan", "starter").capitalize()
+        plan_label = plan
+        emp_limit = sub.get("employee_limit", emp_limit)
+    emp_limit_str = "Unlimited" if emp_limit == -1 else emp_limit
+
+    # Navigation menu
+    nav_options = [
+        ("🏠 Dashboard", "dashboard"),
+        ("📈 Productivity", "productivity"),
+        ("👥 Employees", "employees"),
+        ("📂 Import Data", "import"),
+        ("⚙️ Settings", "settings"),
+        ("👔 Supervisor View", "supervisor"),
+        ("🧠 Coaching Intelligence", "coaching_intel"),
+        ("📋 Shift Plan", "shift_plan"),
+        ("💰 Cost Impact", "cost_impact"),
+        ("✉️ Email", "email"),
+    ]
+    page_choice = st.radio(
+        "Navigation",
+        nav_options,
+        format_func=lambda x: x[0],
+        key="sidebar_nav"
+    )
+    st.session_state["goto_page"] = page_choice[1]
+
+    # --- Sidebar footer: user info and sign out ---
+    st.markdown("<hr style='margin:18px 0 10px 0;border:0;border-top:1px solid #e5e7eb;' />", unsafe_allow_html=True)
+    user_email = st.session_state.get("user_email")
+    tenant_id = st.session_state.get("tenant_id")
+    if user_email:
+        st.markdown(f"<div style='color:#374151;font-size:13px;margin-bottom:6px;'>Signed in as<br><b>{_html_mod.escape(user_email)}</b></div>", unsafe_allow_html=True)
+
+    # No Manage Subscription button in sidebar
+    # No sign out button in sidebar; sign out button should be rendered at the top of every page
+    return page_choice[1]
