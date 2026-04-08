@@ -1545,7 +1545,7 @@ def _import_step3(tenant_id: str):
                 _gs_after, _history_after = _load_goal_status_history("Refreshing performance signals…")
 
                 # Generate actions from latest signals and normalize open statuses.
-                from services.action_service import run_all_triggers as _run_all_triggers, refresh_action_statuses as _refresh_action_statuses
+                from services.action_lifecycle_service import run_all_triggers as _run_all_triggers, refresh_action_statuses as _refresh_action_statuses
 
                 _trigger_summary = _run_all_triggers(
                     history=_history_after or [],

@@ -3,6 +3,8 @@ import time
 
 import streamlit as st
 
+from services.app_logging import log_error, log_warn, sanitize_text
+
 
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 900
@@ -17,7 +19,7 @@ def _show_safe_error(message: str, *, next_steps: str = "", technical_detail: st
         st.info(next_steps)
     if technical_detail:
         with st.expander("Technical details", expanded=False):
-            st.code(str(technical_detail))
+            st.code(sanitize_text(technical_detail))
 
 
 def _auth_redirect_url() -> str:
@@ -153,7 +155,13 @@ def restore_session_from_cookies() -> bool:
         st.session_state["user_id"] = _user.id
         set_auth_cookies(_new_at, _new_rt)
         return True
-    except Exception:
+    except Exception as error:
+        log_warn(
+            "auth_restore_session_failed",
+            "Restoring auth session from cookies failed.",
+            context={"has_session_cookie": bool(st.context.cookies.get("dpd_at", ""))},
+            error=error,
+        )
         return False
 
 
@@ -170,13 +178,24 @@ def full_sign_out(bust_cache_cb):
             _sb = _sc(_SURL, _SKEY)
             _sb.auth.set_session(_at, _rt)
             _sb.auth.sign_out()
-    except Exception:
+    except Exception as error:
+        log_warn(
+            "auth_sign_out_revoke_failed",
+            "Supabase sign-out revoke failed; continuing with local sign-out.",
+            context={"has_access_token": bool(_at), "has_refresh_token": bool(_rt)},
+            error=error,
+        )
         pass  # best-effort; cookie and state clearing below always runs
     bust_cache_cb()
     st.session_state["_logout_requested"] = True
     try:
         st.query_params["logout"] = "1"
-    except Exception:
+    except Exception as error:
+        log_warn(
+            "auth_logout_query_param_cleanup_failed",
+            "Failed to set logout query parameter during sign-out.",
+            error=error,
+        )
         pass
     clear_auth_cookies()
 

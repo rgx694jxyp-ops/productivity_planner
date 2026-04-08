@@ -15,7 +15,8 @@ def email_log(msg: str) -> None:
 
 
 def run_scheduled_reports_for_tenant(tenant_id: str, force_now: bool = False, schedule_names: list[str] | None = None) -> list[dict]:
-    from database import get_client as sched_client, get_subscription
+    from repositories._common import get_client as sched_client
+    from repositories.billing_repo import get_subscription
     from email_engine import (
         get_schedules,
         get_schedules_due_now,

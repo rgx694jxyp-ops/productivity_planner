@@ -156,7 +156,13 @@ def enforce_subscription_access() -> bool:
             st.session_state["_sub_entitlement"] = entitlement
             st.session_state["_billing_entitlement"] = entitlement
             st.session_state["_billing_entitlement_ts"] = time.time()
-        except Exception:
+        except Exception as error:
+            log_app_error(
+                "subscription_enforcement",
+                "Subscription entitlement lookup failed; falling back to allow access.",
+                detail=str(error),
+                severity="warning",
+            )
             sub_cached = True
         st.session_state["_sub_check_result"] = sub_cached
         st.session_state["_sub_check_ts"] = time.time()
@@ -167,7 +173,13 @@ def enforce_subscription_access() -> bool:
 
     try:
         stripe_sync_ok = verify_checkout_and_activate(tenant_id, user_id)
-    except Exception:
+    except Exception as error:
+        log_app_error(
+            "subscription_enforcement",
+            "Checkout verification failed during subscription enforcement.",
+            detail=str(error),
+            severity="warning",
+        )
         stripe_sync_ok = False
 
     if stripe_sync_ok:

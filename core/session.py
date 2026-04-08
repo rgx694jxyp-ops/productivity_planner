@@ -4,7 +4,7 @@ from core.runtime import st
 
 
 SESSION_DEFAULTS = {
-    "_current_page_key": "supervisor",  # Default landing page: Today
+    "_current_page_key": "today",  # Default landing page: Today
     "uploaded_sessions": [],
     "submission_plan": None,
     "split_overrides": {},

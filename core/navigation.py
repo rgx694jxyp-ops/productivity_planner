@@ -133,16 +133,10 @@ def render_sidebar() -> str:
 
         st.divider()
         nav_items = [
-            ("supervisor", "✅  Today"),
-            ("employees", "👥  Employees"),
-            ("productivity", "📈  Context / Analysis"),
-            ("dashboard", "📊  Performance Context"),
-            ("import", "📁  Import Data"),
+            ("today", "✅  Today"),
+            ("team", "👥  Team"),
+            ("import", "📁  Import"),
             ("settings", "⚙️  Settings"),
-            ("shift_plan", "📋  Shift Plan"),
-            ("coaching_intel", "🧠  Actions"),
-            ("cost_impact", "💰  Cost Impact"),
-            ("email", "📧  Email Setup"),
         ]
         nav_keys = [key for key, _ in nav_items]
         nav_labels = {key: label for key, label in nav_items}
@@ -151,24 +145,16 @@ def render_sidebar() -> str:
         if goto:
             if goto in nav_keys:
                 st.session_state["_current_page_key"] = goto
-            elif "supervisor" in goto:
-                st.session_state["_current_page_key"] = "supervisor"
-            elif "dashboard" in goto:
-                st.session_state["_current_page_key"] = "dashboard"
+            elif "today" in goto or "supervisor" in goto:
+                st.session_state["_current_page_key"] = "today"
             elif "import" in goto:
                 st.session_state["_current_page_key"] = "import"
-            elif "employee" in goto:
-                st.session_state["_current_page_key"] = "employees"
-            elif "productivity" in goto:
-                st.session_state["_current_page_key"] = "productivity"
-            elif "shift" in goto:
-                st.session_state["_current_page_key"] = "shift_plan"
-            elif "coach" in goto or "intel" in goto:
-                st.session_state["_current_page_key"] = "coaching_intel"
-            elif "cost" in goto or "impact" in goto:
-                st.session_state["_current_page_key"] = "cost_impact"
-            elif "email" in goto:
-                st.session_state["_current_page_key"] = "email"
+            elif "employee" in goto or "team" in goto:
+                st.session_state["_current_page_key"] = "team"
+            elif any(token in goto for token in ["dashboard", "productivity", "shift", "coach", "intel", "cost", "impact"]):
+                st.session_state["_current_page_key"] = "today"
+            elif "email" in goto or "billing" in goto or "subscription" in goto:
+                st.session_state["_current_page_key"] = "settings"
             elif "setting" in goto:
                 st.session_state["_current_page_key"] = "settings"
 

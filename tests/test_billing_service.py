@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from types import ModuleType
 
+import repositories.billing_repo as billing_repo_module
+
 from services import billing_service
 
 
@@ -65,3 +67,12 @@ def test_get_subscription_entitlement_unpaid_blocked(monkeypatch):
     assert out["has_access"] is False
     assert out["show_payment_banner"] is True
     assert out["access_reason"] == "unpaid"
+
+
+def test_get_subscription_entitlement_hides_raw_exception_details(monkeypatch):
+    monkeypatch.setattr(billing_repo_module, "get_subscription", lambda tenant_id: (_ for _ in ()).throw(RuntimeError("access_token=abc123")))
+
+    out = billing_service.get_subscription_entitlement("tenant-z")
+
+    assert out["has_access"] is False
+    assert out["access_reason"] == "entitlement_error"

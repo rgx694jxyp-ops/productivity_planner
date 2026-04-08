@@ -61,7 +61,7 @@ def get_auto_baseline_minutes_per_unit(department: str) -> float:
     UPH history (last 30 days).  Returns 0.0 when no data is available.
     """
     try:
-        from database import get_all_uph_history
+        from repositories.import_repo import get_all_uph_history
         rows = get_all_uph_history(days=_AUTO_BASELINES_DAYS)
         dept_rows = [
             r for r in rows

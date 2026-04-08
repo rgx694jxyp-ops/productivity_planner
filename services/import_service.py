@@ -94,7 +94,7 @@ def _build_emp_code_maps() -> tuple[dict, dict, dict]:
       rowid_to_code:         {rowid_str: emp_code}
     """
     try:
-        from database import get_employees as _db_get_employees
+        from repositories.employees_repo import get_employees as _db_get_employees
 
         _rows = _db_get_employees() or []
         _code_to_all = {}
@@ -142,7 +142,7 @@ def _restore_uph_snapshot(
     touched_keys is a backwards-compatible fallback for uploads that predate
     new_row_ids. Each key is [emp_id, work_date, department].
     """
-    from database import get_client as _db_get_client
+    from repositories._common import get_client as _db_get_client
 
     _sb = _db_get_client()
     _tn = str(tenant_id or "")
@@ -235,7 +235,7 @@ def _restore_uph_snapshot(
 
 def _list_recent_uploads(tenant_id: str, days: int = 7) -> list[dict]:
     try:
-        from database import get_client as _db_get_client, _tq as _db_tq
+        from repositories._common import get_client as _db_get_client, tenant_query as _db_tq
         from services.settings_service import get_tenant_local_now
 
         _tenant_id = str(tenant_id or "").strip()
@@ -258,7 +258,7 @@ def _list_recent_uploads(tenant_id: str, days: int = 7) -> list[dict]:
 
 def _record_upload_event(tenant_id: str, filename: str, row_count: int, payload: dict):
     try:
-        from database import get_client as _db_get_client
+        from repositories._common import get_client as _db_get_client
 
         _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id:
@@ -280,7 +280,7 @@ def _record_upload_event(tenant_id: str, filename: str, row_count: int, payload:
 
 def _deactivate_upload(tenant_id: str, upload_id, payload: dict | None = None) -> None:
     try:
-        from database import get_client as _db_get_client, _tq as _db_tq
+        from repositories._common import get_client as _db_get_client, tenant_query as _db_tq
 
         _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id:
@@ -296,7 +296,7 @@ def _deactivate_upload(tenant_id: str, upload_id, payload: dict | None = None) -
 
 def _get_upload_by_id(tenant_id: str, upload_id):
     try:
-        from database import get_client as _db_get_client, _tq as _db_tq
+        from repositories._common import get_client as _db_get_client, tenant_query as _db_tq
 
         _tenant_id = str(tenant_id or "").strip()
         if not _tenant_id or not upload_id:
@@ -319,7 +319,7 @@ def _get_upload_by_id(tenant_id: str, upload_id):
 
 def _estimate_new_employees_for_sessions(sessions: list[dict]) -> tuple[list[str], dict[str, str]]:
     """Return (new_employee_ids, id_to_name) inferred from uploaded sessions."""
-    from database import get_employees as _get_employees
+    from repositories.employees_repo import get_employees as _get_employees
     from data_loader import auto_detect as _auto_detect
 
     _existing_ids = {

@@ -1,6 +1,9 @@
 import json
 
 from core.runtime import datetime, st, time
+from services.app_logging import log_error as _log_error_event
+from services.app_logging import log_info as _log_info_event
+from services.app_logging import sanitize_text
 
 try:
     from database import get_client as get_db_client
@@ -103,19 +106,28 @@ def audit(action: str, detail: str = "") -> None:
 
 
 def log_app_error(category: str, message: str, detail: str = "", severity: str = "error") -> None:
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
+    user_email = str(st.session_state.get("user_email", "") or "")
+    _log_error_event(
+        category,
+        message,
+        tenant_id=tenant_id,
+        user_email=user_email,
+        context={"severity": severity, "detail": detail},
+    )
     try:
         from database import log_error
 
-        user_email = st.session_state.get("user_email", "")
         log_error(
             category=category,
             message=message,
             detail=detail,
             user_email=user_email,
+            tenant_id=tenant_id,
             severity=severity,
         )
     except Exception:
-        print(f"[APP_ERROR] [{severity}] [{category}] {message}")
+        print(f"[APP_ERROR] [{severity}] [{category}] {sanitize_text(message)}")
 
 
 def show_user_error(
@@ -150,17 +162,26 @@ def log_operational_event(
     user_email: str = "",
 ) -> None:
     """Write a JSONL operations event for production diagnostics."""
-    payload = {
-        "ts": get_audit_timestamp(),
-        "event_type": str(event_type or "unknown"),
-        "status": str(status or "info"),
-        "detail": str(detail or ""),
-        "tenant_id": str(tenant_id or st.session_state.get("tenant_id", "") or ""),
-        "user_email": str(user_email or st.session_state.get("user_email", "") or ""),
-        "context": context or {},
-    }
+    resolved_tenant_id = str(tenant_id or st.session_state.get("tenant_id", "") or "")
+    resolved_user_email = str(user_email or st.session_state.get("user_email", "") or "")
+    _log_info_event(
+        event_type,
+        detail or event_type,
+        tenant_id=resolved_tenant_id,
+        user_email=resolved_user_email,
+        context={"status": status, "context": context or {}},
+    )
 
     try:
+        payload = {
+            "ts": get_audit_timestamp(),
+            "event_type": str(event_type or "unknown"),
+            "status": str(status or "info"),
+            "detail": str(detail or ""),
+            "tenant_id": resolved_tenant_id,
+            "user_email": resolved_user_email,
+            "context": context or {},
+        }
         with open(tenant_log_path("dpd_ops"), "a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
     except Exception:

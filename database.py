@@ -199,25 +199,17 @@ def _first_row(query) -> Optional[dict]:
 
 
 def get_tenant(tenant_id: str = "", columns: str = "*") -> Optional[dict]:
-    """Return the tenant row for the current tenant, or None."""
-    tid = tenant_id or get_tenant_id()
-    if not tid:
-        return None
-    sb = get_client()
-    return _first_row(sb.table("tenants").select(columns).eq("id", tid))
+    """Compatibility wrapper: delegated to repositories.tenant_repo.get_tenant."""
+    from repositories.tenant_repo import get_tenant as _repo_get_tenant
+
+    return _repo_get_tenant(tenant_id=tenant_id, columns=columns)
 
 
 def set_tenant_stripe_customer_id(stripe_customer_id: str, tenant_id: str = "") -> bool:
-    """Persist a Stripe customer id on the tenant row."""
-    tid = tenant_id or get_tenant_id()
-    if not tid or not stripe_customer_id:
-        return False
-    try:
-        sb = get_client()
-        sb.table("tenants").update({"stripe_customer_id": stripe_customer_id}).eq("id", tid).execute()
-        return True
-    except Exception:
-        return False
+    """Compatibility wrapper: delegated to repositories.tenant_repo."""
+    from repositories.tenant_repo import set_tenant_stripe_customer_id as _repo_set_stripe_cid
+
+    return _repo_set_stripe_cid(stripe_customer_id=stripe_customer_id, tenant_id=tenant_id)
 
 
 def _get_tenant_scoped_count(table_name: str, count_column: str, tenant_id: str = "") -> int:
@@ -337,9 +329,10 @@ def add_units_to_order(order_id: str, units: float):
 # ── Employees ─────────────────────────────────────────────────────────────────
 
 def get_employees() -> list[dict]:
-    sb = get_client()
-    r  = _tq(sb.table("employees").select("*")).order("name").execute()
-    return r.data or []
+    """Compatibility wrapper: delegated to repositories.employees_repo.get_employees."""
+    from repositories.employees_repo import get_employees as _repo_get_employees
+
+    return _repo_get_employees()
 
 
 def get_employee(emp_id: str) -> dict | None:
@@ -714,145 +707,10 @@ def store_uph_history(emp_id: str, work_date: str, uph: float,
 
 
 def batch_store_uph_history(records: list[dict]):
-    """
-    Insert UPH history records in bulk (500 per chunk).
-    Fails loudly if any row cannot resolve emp_id to employees.id.
-    """
-    if not records:
-        return
+    """Compatibility wrapper: delegated to repositories.import_repo.batch_store_uph_history."""
+    from repositories.import_repo import batch_store_uph_history as _repo_batch_store_uph_history
 
-    # uph_history.emp_id is a bigint FK to employees.id. Imports often carry external
-    # employee codes (e.g. E001), so translate them to numeric ids before upsert.
-    _resolver_available = True
-    try:
-        _emp_rows = get_employees() or []
-    except Exception:
-        _emp_rows = []
-        _resolver_available = False
-    _emp_code_to_id = {}
-    _emp_id_to_id = {}
-    for _e in _emp_rows:
-        _rid = _e.get("id")
-        _code = _e.get("emp_id")
-        if _rid is None:
-            continue
-        try:
-            _rid_int = int(_rid)
-        except Exception:
-            continue
-        _emp_id_to_id[str(_rid_int)] = _rid_int
-        if _code not in (None, ""):
-            _emp_code_to_id[str(_code).strip()] = _rid_int
-
-    _normalized_records = []
-    _skipped_unresolved = 0
-    _unresolved_examples = []
-    for _r in records:
-        _raw_emp = _r.get("emp_id")
-        _emp_fk = None
-        if _raw_emp not in (None, ""):
-            _raw_str = str(_raw_emp).strip()
-            try:
-                _emp_fk = int(_raw_str)
-            except Exception:
-                _emp_fk = _emp_code_to_id.get(_raw_str) or _emp_id_to_id.get(_raw_str)
-        if _emp_fk is None:
-            if _resolver_available:
-                _skipped_unresolved += 1
-                if len(_unresolved_examples) < 10:
-                    _unresolved_examples.append({
-                        "emp_id": str(_raw_emp or "").strip(),
-                        "work_date": str(_r.get("work_date", "") or ""),
-                        "department": str(_r.get("department", "") or ""),
-                    })
-                continue
-            # Fallback for non-queryable/mocked environments: preserve original value.
-            _normalized_records.append(_r)
-            continue
-        _normalized_records.append({**_r, "emp_id": _emp_fk})
-
-    if _skipped_unresolved:
-        _examples_str = ", ".join([
-            f"{_x['emp_id']}@{_x['work_date']}"
-            for _x in _unresolved_examples
-            if _x.get("emp_id") or _x.get("work_date")
-        ])
-        log_error(
-            "uph_history",
-            f"Blocked import: {_skipped_unresolved} UPH row(s) have unresolved employee IDs",
-            detail=f"examples={_unresolved_examples}",
-            severity="error",
-        )
-        raise ValueError(
-            "UPH history write blocked: "
-            f"{_skipped_unresolved} row(s) have unresolved employee IDs. "
-            f"Example(s): {_examples_str or 'see error log for details'}."
-        )
-
-    records = _normalized_records
-    if not records:
-        return
-
-    def _json_safe_value(v):
-        if isinstance(v, float):
-            return v if math.isfinite(v) else 0.0
-        if isinstance(v, list):
-            return [_json_safe_value(x) for x in v]
-        if isinstance(v, dict):
-            return {k: _json_safe_value(val) for k, val in v.items()}
-        return v
-
-    sb  = get_client()
-    # Only inject tenant_id if not already present in the records
-    if not records[0].get("tenant_id"):
-        _tf = _tenant_fields()
-        if _tf:
-            records = [{**r, **_tf} for r in records]
-
-    for i in range(0, len(records), 500):
-        chunk = records[i:i+500]
-        safe_chunk = []
-        for r in chunk:
-            try:
-                uph_val = float(r.get("uph", 0) or 0)
-            except (TypeError, ValueError):
-                uph_val = 0.0
-            if not math.isfinite(uph_val):
-                uph_val = 0.0
-
-            try:
-                units_val = float(r.get("units", 0) or 0)
-            except (TypeError, ValueError):
-                units_val = 0.0
-            if not math.isfinite(units_val):
-                units_val = 0.0
-
-            try:
-                hours_val = float(r.get("hours_worked", 0) or 0)
-            except (TypeError, ValueError):
-                hours_val = 0.0
-            if not math.isfinite(hours_val):
-                hours_val = 0.0
-
-            safe_chunk.append({
-                **r,
-                "uph": uph_val,
-                "units": units_val,
-                "hours_worked": hours_val,
-            })
-        safe_chunk = [_json_safe_value(r) for r in safe_chunk]
-        try:
-            # Fail fast with a clear error if anything non-JSON-safe remains.
-            json.dumps(safe_chunk, allow_nan=False)
-            sb.table("uph_history").upsert(
-                safe_chunk,
-                on_conflict="tenant_id,emp_id,work_date,department",
-            ).execute()
-        except Exception as _e:
-            log_error("uph_history", f"UPH batch upsert failed: {_e}",
-                      detail=f"chunk_size={len(safe_chunk)}, sample={safe_chunk[0] if safe_chunk else 'empty'}",
-                      severity="error")
-            raise
+    return _repo_batch_store_uph_history(records)
 
 
 def delete_duplicate_uph_history():
@@ -917,26 +775,10 @@ def get_uph_history(emp_id: str, days: int = 90) -> list[dict]:
 
 
 def get_all_uph_history(days: int = 30) -> list[dict]:
-    """All UPH history records. Paginates to get past Supabase 1000-row default cap."""
-    from datetime import timedelta
-    sb     = get_client()
-    all_rows = []
-    page_size = 1000
-    offset    = 0
-    while True:
-        q = _tq(sb.table("uph_history").select(
-            "emp_id, work_date, uph, units, hours_worked, department"
-        )).order("work_date", desc=False).range(offset, offset + page_size - 1)
-        if days > 0:
-            cutoff = (date.today() - timedelta(days=days)).isoformat()
-            q = q.gte("work_date", cutoff)
-        r = q.execute()
-        batch = r.data or []
-        all_rows.extend(batch)
-        if len(batch) < page_size:
-            break
-        offset += page_size
-    return all_rows
+    """Compatibility wrapper: delegated to repositories.import_repo.get_all_uph_history."""
+    from repositories.import_repo import get_all_uph_history as _repo_get_all_uph_history
+
+    return _repo_get_all_uph_history(days=days)
 
 
 def get_avg_uph(emp_id: str, days: int = 30) -> float | None:
@@ -1428,53 +1270,29 @@ def log_action_event(
     next_follow_up_at: str | None = None,
     tenant_id: str = "",
 ) -> dict:
-    """Append one immutable event to action_events. Never raises — failures are logged as warnings."""
-    tid = tenant_id or get_tenant_id()
-    if not tid or not action_id:
-        return {}
-    payload: dict = {
-        "tenant_id": tid,
-        "action_id": action_id,
-        "employee_id": str(employee_id or ""),
-        "event_type": str(event_type or "")[:80],
-        "performed_by": str(performed_by or "")[:120],
-        "notes": str(notes or "")[:2000],
-    }
-    if outcome is not None:
-        payload["outcome"] = str(outcome)[:40]
-    if next_follow_up_at:
-        payload["next_follow_up_at"] = str(next_follow_up_at)[:30]
-    try:
-        sb = get_client()
-        result = sb.table("action_events").insert(payload).execute()
-        return result.data[0] if result.data else {}
-    except Exception as e:
-        print(f"[Warning] Could not log action event: {e}")
-        return {}
+    """Compatibility wrapper: delegated to repositories.action_events_repo."""
+    from repositories.action_events_repo import log_action_event as _repo_log_action_event
+
+    return _repo_log_action_event(
+        action_id=action_id,
+        event_type=event_type,
+        employee_id=employee_id,
+        performed_by=performed_by,
+        notes=notes,
+        outcome=outcome,
+        next_follow_up_at=next_follow_up_at,
+        tenant_id=tenant_id,
+    )
 
 
 def list_action_events(
     action_id: str,
     tenant_id: str = "",
 ) -> list[dict]:
-    """Return all events for a given action, oldest first."""
-    tid = tenant_id or get_tenant_id()
-    if not tid or not action_id:
-        return []
-    try:
-        sb = get_client()
-        result = (
-            sb.table("action_events")
-            .select("*")
-            .eq("tenant_id", tid)
-            .eq("action_id", action_id)
-            .order("event_at", desc=False)
-            .execute()
-        )
-        return result.data or []
-    except Exception as e:
-        print(f"[Warning] Could not list action events: {e}")
-        return []
+    """Compatibility wrapper: delegated to repositories.action_events_repo."""
+    from repositories.action_events_repo import list_action_events as _repo_list_action_events
+
+    return _repo_list_action_events(action_id=action_id, tenant_id=tenant_id)
 
 
 def create_action(
@@ -1493,49 +1311,25 @@ def create_action(
     priority: str = "medium",
     tenant_id: str = "",
 ) -> dict:
-    tid = tenant_id or get_tenant_id()
-    if not tid or not employee_id:
-        return {}
-    now = datetime.utcnow().isoformat() + "Z"
-    payload = {
-        "tenant_id": tid,
-        "employee_id": str(employee_id),
-        "employee_name": str(employee_name or "")[:120],
-        "department": str(department or "")[:80],
-        "issue_type": str(issue_type or "")[:80],
-        "trigger_summary": str(trigger_summary or "")[:500],
-        "action_type": str(action_type or "")[:80],
-        "success_metric": str(success_metric or "")[:250],
-        "follow_up_due_at": str(follow_up_due_at or "")[:10] or None,
-        "note": str(note or "")[:2000],
-        "created_by": str(created_by or "")[:120],
-        "baseline_uph": baseline_uph,
-        "latest_uph": latest_uph,
-        "priority": str(priority or "medium")[:20],
-        "status": "new",
-        "last_event_at": now,
-    }
-    try:
-        sb = get_client()
-        result = sb.table("actions").insert(payload).execute()
-        row = result.data[0] if result.data else {}
-        if row.get("id"):
-            log_action_event(
-                action_id=str(row["id"]),
-                event_type="created",
-                employee_id=str(employee_id),
-                performed_by=created_by,
-                notes=str(note or trigger_summary or "")[:500],
-                outcome="not_applicable",
-                next_follow_up_at=payload["follow_up_due_at"],
-                tenant_id=tid,
-            )
-        if payload["follow_up_due_at"]:
-            add_followup_db(employee_id, employee_name, department, payload["follow_up_due_at"], trigger_summary[:80], tenant_id=tid)
-        return row
-    except Exception as e:
-        print(f"[Warning] Could not create action: {e}")
-        return {}
+    """Compatibility wrapper: delegated to repositories.actions_repo.create_action."""
+    from repositories.actions_repo import create_action as _repo_create_action
+
+    return _repo_create_action(
+        employee_id=employee_id,
+        employee_name=employee_name,
+        department=department,
+        issue_type=issue_type,
+        trigger_summary=trigger_summary,
+        action_type=action_type,
+        success_metric=success_metric,
+        follow_up_due_at=follow_up_due_at,
+        note=note,
+        created_by=created_by,
+        baseline_uph=baseline_uph,
+        latest_uph=latest_uph,
+        priority=priority,
+        tenant_id=tenant_id,
+    )
 
 
 def list_actions(
@@ -1543,94 +1337,17 @@ def list_actions(
     statuses: list[str] | None = None,
     employee_id: str = "",
 ) -> list[dict]:
-    tid = tenant_id or get_tenant_id()
-    if not tid:
-        return []
-    try:
-        sb = get_client()
-        query = (
-            sb.table("actions")
-            .select("*")
-            .eq("tenant_id", tid)
-            .order("last_event_at", desc=True)
-        )
-        if employee_id:
-            query = query.eq("employee_id", str(employee_id))
-        if statuses:
-            normalized = [str(status or "").lower() for status in statuses if str(status or "").strip()]
-            if normalized:
-                query = query.in_("status", normalized)
-        result = query.execute()
-        return result.data or []
-    except Exception as e:
-        print(f"[Warning] Could not list actions: {e}")
-        return []
+    """Compatibility wrapper: delegated to repositories.actions_repo.list_actions."""
+    from repositories.actions_repo import list_actions as _repo_list_actions
+
+    return _repo_list_actions(tenant_id=tenant_id, statuses=statuses, employee_id=employee_id)
 
 
 def update_action(action_id: str, updates: dict, tenant_id: str = "") -> dict:
-    tid = tenant_id or get_tenant_id()
-    if not tid or not action_id:
-        return {}
+    """Compatibility wrapper: delegated to repositories.actions_repo.update_action."""
+    from repositories.actions_repo import update_action as _repo_update_action
 
-    now = datetime.utcnow().isoformat() + "Z"
-    patch = dict(updates or {})
-    patch["last_event_at"] = now
-    status = str(patch.get("status") or "").lower()
-    if status == "resolved" and not patch.get("resolved_at"):
-        patch["resolved_at"] = now
-    if status == "escalated" and not patch.get("escalated_at"):
-        patch["escalated_at"] = now
-
-    try:
-        current_rows = list_actions(tenant_id=tid)
-        current = next((row for row in current_rows if str(row.get("id")) == str(action_id)), {})
-        sb = get_client()
-        result = (
-            sb.table("actions")
-            .update(patch)
-            .eq("tenant_id", tid)
-            .eq("id", action_id)
-            .execute()
-        )
-
-        due = str(patch.get("follow_up_due_at") or current.get("follow_up_due_at") or "")[:10]
-        emp_code = str(current.get("employee_id") or "")
-        emp_name = str(current.get("employee_name") or "")
-        dept = str(current.get("department") or "")
-        summary = str(current.get("trigger_summary") or "")
-
-        # Map status transitions to event types
-        _status_to_event = {
-            "resolved": "resolved",
-            "escalated": "escalated",
-            "deprioritized": "deprioritized",
-            "in_progress": "coached",
-            "follow_up_due": "follow_up_logged",
-        }
-        event_type = _status_to_event.get(status) or ("follow_up_logged" if patch.get("follow_up_due_at") else "coached")
-        note_text = str(patch.get("note") or patch.get("resolution_note") or "")
-        outcome_val = str(patch.get("resolution_type") or "") or None
-        log_action_event(
-            action_id=str(action_id),
-            event_type=event_type,
-            employee_id=emp_code,
-            performed_by=str(patch.get("created_by") or ""),
-            notes=note_text,
-            outcome=outcome_val,
-            next_follow_up_at=due or None,
-            tenant_id=tid,
-        )
-
-        if status == "resolved":
-            if due and emp_code:
-                remove_followup_db(emp_code, due, tenant_id=tid)
-        elif due and emp_code:
-            add_followup_db(emp_code, emp_name, dept, due, summary[:80], tenant_id=tid)
-
-        return result.data[0] if result.data else {}
-    except Exception as e:
-        print(f"[Warning] Could not update action: {e}")
-        return {}
+    return _repo_update_action(action_id=action_id, updates=updates, tenant_id=tenant_id)
 
 
 # ── GDPR: data export & account deletion ─────────────────────────────────────
@@ -1804,39 +1521,21 @@ def get_subscription(
     columns: str = "*",
     allow_live_fallback: bool = True,
 ) -> Optional[dict]:
-    """Return the subscription row for the current tenant, or None."""
-    sb = get_client()
-    tid = tenant_id or get_tenant_id()
-    if not tid:
-        return None
-    row = _first_row(sb.table("subscriptions").select(columns).eq("tenant_id", tid))
-    if row:
-        return row
-    if not allow_live_fallback:
-        return None
+    """Compatibility wrapper: delegated to repositories.billing_repo.get_subscription."""
+    from repositories.billing_repo import get_subscription as _repo_get_subscription
 
-    fallback = _get_live_subscription_fallback(tid)
-    if not fallback:
-        return None
-    if columns.strip() == "*":
-        return fallback
-    requested_columns = {part.strip() for part in columns.split(",") if part.strip()}
-    return {key: value for key, value in fallback.items() if key in requested_columns}
+    return _repo_get_subscription(
+        tenant_id=tenant_id,
+        columns=columns,
+        allow_live_fallback=allow_live_fallback,
+    )
 
 
 def update_subscription_state(updates: dict, tenant_id: str = "") -> bool:
-    """Update the mirrored subscription row for a tenant and always bump updated_at."""
-    tid = tenant_id or get_tenant_id()
-    if not tid or not updates:
-        return False
-    payload = dict(updates)
-    payload["updated_at"] = datetime.utcnow().isoformat() + "Z"
-    try:
-        sb = get_client()
-        sb.table("subscriptions").update(payload).eq("tenant_id", tid).execute()
-        return True
-    except Exception:
-        return False
+    """Compatibility wrapper: delegated to repositories.billing_repo.update_subscription_state."""
+    from repositories.billing_repo import update_subscription_state as _repo_update_subscription_state
+
+    return _repo_update_subscription_state(updates=updates, tenant_id=tenant_id)
 
 
 def has_active_subscription(tenant_id: str = "") -> bool:
@@ -1889,8 +1588,10 @@ def get_employee_limit(tenant_id: str = "") -> int:
 
 
 def get_employee_count(tenant_id: str = "") -> int:
-    """Return current number of employees for the tenant."""
-    return _get_tenant_scoped_count("employees", "emp_id", tenant_id)
+    """Compatibility wrapper: delegated to repositories.employees_repo.get_employee_count."""
+    from repositories.employees_repo import get_employee_count as _repo_get_employee_count
+
+    return _repo_get_employee_count(tenant_id=tenant_id)
 
 
 def can_add_employees(count: int = 1, tenant_id: str = "") -> bool:

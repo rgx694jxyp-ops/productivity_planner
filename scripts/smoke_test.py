@@ -39,15 +39,9 @@ def test_sidebar_key_routes() -> None:
     assert "dispatch_page(page)" in app_src
 
     required_nav_keys = [
-        '("supervisor",',
-        '("dashboard",',
+        '("today",',
+        '("team",',
         '("import",',
-        '("employees",',
-        '("productivity",',
-        '("shift_plan",',
-        '("coaching_intel",',
-        '("cost_impact",',
-        '("email",',
         '("settings",',
     ]
     for token in required_nav_keys:
@@ -55,7 +49,9 @@ def test_sidebar_key_routes() -> None:
 
     assert "handlers = {" in router_src, "Missing route handlers map"
     required_handler_keys = [
-        '"supervisor": page_supervisor',
+        '"today": page_today',
+        '"team": page_employees',
+        '"supervisor": page_today',
         '"dashboard": page_dashboard',
         '"import": page_import',
         '"employees": page_employees',
@@ -68,7 +64,7 @@ def test_sidebar_key_routes() -> None:
     ]
     for token in required_handler_keys:
         assert token in router_src, f"Missing route handler: {token}"
-    assert "handler = handlers.get(page, page_import)" in router_src, "Missing fallback handler"
+    assert "handler = handlers.get(page, page_today)" in router_src, "Missing fallback handler"
 
 
 def test_uph_batch_sanitization() -> None:

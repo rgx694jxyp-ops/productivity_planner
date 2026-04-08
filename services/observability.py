@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
 from pathlib import Path
+
+from services.app_logging import log_error as _log_error
+from services.app_logging import log_info as _log_info
 
 
 def _repo_root() -> Path:
@@ -27,7 +28,14 @@ def log_app_error(
     user_email: str = "",
     tenant_id: str = "",
 ) -> None:
-    """Persist app errors when DB is available; otherwise emit a stderr-safe fallback."""
+    """Persist app errors while keeping a file-based fallback for service failures."""
+    _log_error(
+        category,
+        message,
+        tenant_id=tenant_id,
+        user_email=user_email,
+        context={"severity": severity, "detail": detail},
+    )
     try:
         from database import log_error
 
@@ -40,7 +48,7 @@ def log_app_error(
             tenant_id=str(tenant_id or ""),
         )
     except Exception:
-        print(f"[APP_ERROR] [{severity}] [{category}] {message}")
+        pass
 
 
 def log_operational_event(
@@ -52,20 +60,11 @@ def log_operational_event(
     tenant_id: str = "",
     user_email: str = "",
 ) -> None:
-    """Write JSONL operational events without relying on session state."""
-    payload = {
-        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "event_type": str(event_type or "unknown"),
-        "status": str(status or "info"),
-        "detail": str(detail or ""),
-        "tenant_id": str(tenant_id or ""),
-        "user_email": str(user_email or ""),
-        "context": context or {},
-    }
-
-    try:
-        path = tenant_log_path("dpd_ops", tenant_id=str(tenant_id or ""))
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
+    """Write operational events through the shared structured logger."""
+    _log_info(
+        event_type,
+        detail or event_type,
+        tenant_id=tenant_id,
+        user_email=user_email,
+        context={"status": status, "context": context or {}},
+    )

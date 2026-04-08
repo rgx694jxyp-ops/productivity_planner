@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from services.app_logging import log_error, log_warn
 from services.settings_service import format_iso_date_human, get_plan_alternatives, get_plan_constants
 from services.observability import log_operational_event
 
@@ -25,9 +26,17 @@ def get_subscription_entitlement(tenant_id: str = "", user_email: str = "") -> d
     }
 
     try:
-        from database import PLAN_LIMITS, get_employee_count, get_subscription
+        from repositories.billing_repo import get_employee_count, get_plan_limits, get_subscription
     except Exception as exc:
-        out["access_reason"] = f"billing_dependencies_unavailable:{exc}"
+        out["access_reason"] = "billing_dependencies_unavailable"
+        log_error(
+            "billing_entitlement_dependencies_unavailable",
+            "Billing entitlement dependencies could not be loaded.",
+            tenant_id=tenant_id,
+            user_email=user_email,
+            context={},
+            error=exc,
+        )
         return out
 
     try:
@@ -48,7 +57,7 @@ def get_subscription_entitlement(tenant_id: str = "", user_email: str = "") -> d
         except Exception:
             limit = 0
         if limit in (0, None):
-            limit = int(PLAN_LIMITS.get(plan, 25) or 25)
+            limit = int(get_plan_limits().get(plan, 25) or 25)
 
         out["plan"] = plan
         out["status"] = status
@@ -96,24 +105,39 @@ def get_subscription_entitlement(tenant_id: str = "", user_email: str = "") -> d
 
         return out
     except Exception as exc:
-        out["access_reason"] = f"entitlement_error:{exc}"
+        out["access_reason"] = "entitlement_error"
+        log_error(
+            "billing_entitlement_failed",
+            "Billing entitlement evaluation failed.",
+            tenant_id=tenant_id,
+            user_email=user_email,
+            context={"status": out.get("status", "none"), "plan": out.get("plan", "starter")},
+            error=exc,
+        )
         return out
 
 
 def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
     """Load subscription + derived billing state for the Settings Billing tab."""
     try:
-        from database import (
-            _get_config,
+        from repositories.billing_repo import (
             create_billing_portal_url,
+            get_config,
             get_employee_count,
             get_subscription,
         )
     except Exception as exc:
+        log_error(
+            "billing_dashboard_dependencies_unavailable",
+            "Billing dashboard dependencies could not be loaded.",
+            tenant_id=tenant_id,
+            context={"app_origin": app_origin},
+            error=exc,
+        )
         return {
             "success": False,
             "data": None,
-            "error": f"Billing dependencies unavailable: {exc}",
+            "error": "Billing is temporarily unavailable. Please try again shortly.",
             "warnings": [],
         }
 
@@ -145,9 +169,9 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
         manage_plan_url = portal_url
 
         price_map = {
-            "starter": _get_config("STRIPE_PRICE_STARTER") or "",
-            "pro": _get_config("STRIPE_PRICE_PRO") or "",
-            "business": _get_config("STRIPE_PRICE_BUSINESS") or "",
+            "starter": get_config("STRIPE_PRICE_STARTER") or "",
+            "pro": get_config("STRIPE_PRICE_PRO") or "",
+            "business": get_config("STRIPE_PRICE_BUSINESS") or "",
         }
 
         pending_plan = str(sub.get("pending_plan") or "").strip().lower()
@@ -165,7 +189,7 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
         # have not been reconciled yet, read live Stripe pending_update state.
         if not pending_plan:
             try:
-                from database import get_live_stripe_subscription_status
+                from repositories.billing_repo import get_live_stripe_subscription_status
 
                 live = get_live_stripe_subscription_status(tenant_id) or {}
                 live_pending = str(live.get("pending_plan") or "").strip().lower()
@@ -225,10 +249,17 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
             "warnings": [],
         }
     except Exception as exc:
+        log_error(
+            "billing_dashboard_failed",
+            "Billing dashboard load failed.",
+            tenant_id=tenant_id,
+            context={"app_origin": app_origin},
+            error=exc,
+        )
         return {
             "success": False,
             "data": None,
-            "error": str(exc),
+            "error": "Billing information could not be loaded right now. Please try again shortly.",
             "warnings": [],
         }
 
@@ -236,14 +267,14 @@ def get_billing_dashboard(tenant_id: str, app_origin: str) -> dict:
 def request_plan_change(target_price: str, tenant_id: str) -> dict:
     """Request plan change in Stripe and normalize return shape."""
     try:
-        from database import _get_config, get_subscription, modify_subscription
+        from repositories.billing_repo import get_config, get_subscription, modify_subscription
         # Block in-app downgrades; upgrades remain immediate.
         sub = get_subscription(tenant_id) or {}
         current_plan = str(sub.get("plan", "starter") or "starter").lower()
         price_to_plan = {
-            _get_config("STRIPE_PRICE_STARTER") or "": "starter",
-            _get_config("STRIPE_PRICE_PRO") or "": "pro",
-            _get_config("STRIPE_PRICE_BUSINESS") or "": "business",
+            get_config("STRIPE_PRICE_STARTER") or "": "starter",
+            get_config("STRIPE_PRICE_PRO") or "": "pro",
+            get_config("STRIPE_PRICE_BUSINESS") or "": "business",
         }
         target_plan = price_to_plan.get(target_price, "")
         log_operational_event(
@@ -284,6 +315,13 @@ def request_plan_change(target_price: str, tenant_id: str) -> dict:
             "warnings": [],
         }
     except Exception as exc:
+        log_error(
+            "billing_plan_change_failed",
+            "Plan change request failed.",
+            tenant_id=tenant_id,
+            context={"target_price": target_price},
+            error=exc,
+        )
         try:
             log_operational_event(
                 "billing_plan_change",
@@ -297,6 +335,6 @@ def request_plan_change(target_price: str, tenant_id: str) -> dict:
         return {
             "success": False,
             "data": None,
-            "error": str(exc),
+            "error": "We could not update the plan right now. Please try again shortly.",
             "warnings": [],
         }

@@ -19,11 +19,8 @@ from services.employee_service import (
     load_employee_history_workflow,
     parse_history_range,
 )
-from services.action_service import (
-    get_employee_actions,
-    get_employee_action_timeline,
-    log_coaching_lifecycle_entry,
-)
+from services.action_lifecycle_service import log_coaching_lifecycle_entry
+from services.action_query_service import get_employee_action_timeline, get_employee_actions
 from services.employees_service import _build_archived_productivity
 from database import add_coaching_note, archive_coaching_notes, delete_coaching_note
 from export_manager import export_employee

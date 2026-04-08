@@ -15,6 +15,8 @@ def dispatch_page(page: str) -> None:
     from pages.today import page_today
 
     handlers = {
+        "today": page_today,
+        "team": page_employees,
         "supervisor": page_today,
         "dashboard": page_dashboard,
         "import": page_import,
@@ -26,7 +28,7 @@ def dispatch_page(page: str) -> None:
         "email": page_email,
         "settings": page_settings,
     }
-    handler = handlers.get(page, page_import)
+    handler = handlers.get(page, page_today)
 
     try:
         handler()

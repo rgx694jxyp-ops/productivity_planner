@@ -1,6 +1,8 @@
 from datetime import date
 
 from services import import_service
+from services.import_pipeline.models import ImportPreviewResult, ImportSummary, MappingReview
+from services.import_pipeline import orchestrator
 
 
 def test_sanitize_employee_name_flags_suspicious_input():
@@ -51,3 +53,24 @@ def test_import_fingerprint_stable_with_row_order_changes():
 
     assert fp_a
     assert fp_a == fp_b
+
+
+def test_confirm_import_returns_safe_error_message(monkeypatch):
+    preview = ImportPreviewResult(
+        success=True,
+        can_import=True,
+        summary=ImportSummary(total_rows=1, valid_rows=1),
+        mapping_review=MappingReview(),
+        candidate_rows=[{"emp_id": "E1"}],
+        invalid_issues=[],
+        fingerprint="abc",
+        message="Ready",
+    )
+
+    monkeypatch.setattr(orchestrator, "persist_import_rows", lambda rows, tenant_id: (_ for _ in ()).throw(RuntimeError("password=secret")))
+
+    result = orchestrator.confirm_import(preview, tenant_id="tenant-a", upload_name="batch.csv")
+
+    assert result.success is False
+    assert result.issues[0].message == "Import failed while saving data."
+    assert "password=secret" not in result.message
