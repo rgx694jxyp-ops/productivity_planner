@@ -1416,58 +1416,132 @@ def remove_followup_db(emp_id: str, followup_date: str, tenant_id: str = "") -> 
         print(f"[Warning] Could not remove follow-up from DB: {e}")
 
 
-# ── Supervisor Actions (DB-backed) ──────────────────────────────────────────
+# ── Actions (DB-backed) ──────────────────────────────────────────
 
-def create_supervisor_action(
-    emp_id: str,
+def log_action_event(
+    action_id: str,
+    event_type: str,
+    employee_id: str,
+    performed_by: str = "",
+    notes: str = "",
+    outcome: str | None = None,
+    next_follow_up_at: str | None = None,
+    tenant_id: str = "",
+) -> dict:
+    """Append one immutable event to action_events. Never raises — failures are logged as warnings."""
+    tid = tenant_id or get_tenant_id()
+    if not tid or not action_id:
+        return {}
+    payload: dict = {
+        "tenant_id": tid,
+        "action_id": action_id,
+        "employee_id": str(employee_id or ""),
+        "event_type": str(event_type or "")[:80],
+        "performed_by": str(performed_by or "")[:120],
+        "notes": str(notes or "")[:2000],
+    }
+    if outcome is not None:
+        payload["outcome"] = str(outcome)[:40]
+    if next_follow_up_at:
+        payload["next_follow_up_at"] = str(next_follow_up_at)[:30]
+    try:
+        sb = get_client()
+        result = sb.table("action_events").insert(payload).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[Warning] Could not log action event: {e}")
+        return {}
+
+
+def list_action_events(
+    action_id: str,
+    tenant_id: str = "",
+) -> list[dict]:
+    """Return all events for a given action, oldest first."""
+    tid = tenant_id or get_tenant_id()
+    if not tid or not action_id:
+        return []
+    try:
+        sb = get_client()
+        result = (
+            sb.table("action_events")
+            .select("*")
+            .eq("tenant_id", tid)
+            .eq("action_id", action_id)
+            .order("event_at", desc=False)
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        print(f"[Warning] Could not list action events: {e}")
+        return []
+
+
+def create_action(
+    employee_id: str,
     employee_name: str,
     department: str,
     issue_type: str,
-    reason: str,
+    trigger_summary: str,
     action_type: str,
     success_metric: str,
-    due_date: str,
+    follow_up_due_at: str,
     note: str = "",
     created_by: str = "",
     baseline_uph: float = 0.0,
     latest_uph: float = 0.0,
+    priority: str = "medium",
     tenant_id: str = "",
 ) -> dict:
     tid = tenant_id or get_tenant_id()
-    if not tid or not emp_id:
+    if not tid or not employee_id:
         return {}
+    now = datetime.utcnow().isoformat() + "Z"
     payload = {
         "tenant_id": tid,
-        "emp_id": str(emp_id),
+        "employee_id": str(employee_id),
         "employee_name": str(employee_name or "")[:120],
         "department": str(department or "")[:80],
         "issue_type": str(issue_type or "")[:80],
-        "reason": str(reason or "")[:500],
+        "trigger_summary": str(trigger_summary or "")[:500],
         "action_type": str(action_type or "")[:80],
         "success_metric": str(success_metric or "")[:250],
-        "due_date": str(due_date or "")[:10] or None,
+        "follow_up_due_at": str(follow_up_due_at or "")[:10] or None,
         "note": str(note or "")[:2000],
         "created_by": str(created_by or "")[:120],
         "baseline_uph": baseline_uph,
         "latest_uph": latest_uph,
+        "priority": str(priority or "medium")[:20],
         "status": "new",
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "last_event_at": now,
     }
     try:
         sb = get_client()
-        result = sb.table("supervisor_actions").insert(payload).execute()
-        if payload["due_date"]:
-            add_followup_db(emp_id, employee_name, department, payload["due_date"], reason[:80], tenant_id=tid)
-        return result.data[0] if result.data else {}
+        result = sb.table("actions").insert(payload).execute()
+        row = result.data[0] if result.data else {}
+        if row.get("id"):
+            log_action_event(
+                action_id=str(row["id"]),
+                event_type="created",
+                employee_id=str(employee_id),
+                performed_by=created_by,
+                notes=str(note or trigger_summary or "")[:500],
+                outcome="not_applicable",
+                next_follow_up_at=payload["follow_up_due_at"],
+                tenant_id=tid,
+            )
+        if payload["follow_up_due_at"]:
+            add_followup_db(employee_id, employee_name, department, payload["follow_up_due_at"], trigger_summary[:80], tenant_id=tid)
+        return row
     except Exception as e:
-        print(f"[Warning] Could not create supervisor action: {e}")
+        print(f"[Warning] Could not create action: {e}")
         return {}
 
 
-def list_supervisor_actions(
+def list_actions(
     tenant_id: str = "",
     statuses: list[str] | None = None,
-    emp_id: str = "",
+    employee_id: str = "",
 ) -> list[dict]:
     tid = tenant_id or get_tenant_id()
     if not tid:
@@ -1475,13 +1549,13 @@ def list_supervisor_actions(
     try:
         sb = get_client()
         query = (
-            sb.table("supervisor_actions")
+            sb.table("actions")
             .select("*")
             .eq("tenant_id", tid)
-            .order("created_at", desc=True)
+            .order("last_event_at", desc=True)
         )
-        if emp_id:
-            query = query.eq("emp_id", str(emp_id))
+        if employee_id:
+            query = query.eq("employee_id", str(employee_id))
         if statuses:
             normalized = [str(status or "").lower() for status in statuses if str(status or "").strip()]
             if normalized:
@@ -1489,49 +1563,73 @@ def list_supervisor_actions(
         result = query.execute()
         return result.data or []
     except Exception as e:
-        print(f"[Warning] Could not list supervisor actions: {e}")
+        print(f"[Warning] Could not list actions: {e}")
         return []
 
 
-def update_supervisor_action(action_id: str, updates: dict, tenant_id: str = "") -> dict:
+def update_action(action_id: str, updates: dict, tenant_id: str = "") -> dict:
     tid = tenant_id or get_tenant_id()
     if not tid or not action_id:
         return {}
 
+    now = datetime.utcnow().isoformat() + "Z"
     patch = dict(updates or {})
-    patch["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    patch["last_event_at"] = now
     status = str(patch.get("status") or "").lower()
-    if status == "closed" and not patch.get("completed_at"):
-        patch["completed_at"] = datetime.utcnow().isoformat() + "Z"
+    if status == "resolved" and not patch.get("resolved_at"):
+        patch["resolved_at"] = now
     if status == "escalated" and not patch.get("escalated_at"):
-        patch["escalated_at"] = datetime.utcnow().isoformat() + "Z"
+        patch["escalated_at"] = now
 
     try:
-        current_rows = list_supervisor_actions(tenant_id=tid)
+        current_rows = list_actions(tenant_id=tid)
         current = next((row for row in current_rows if str(row.get("id")) == str(action_id)), {})
         sb = get_client()
         result = (
-            sb.table("supervisor_actions")
+            sb.table("actions")
             .update(patch)
             .eq("tenant_id", tid)
             .eq("id", action_id)
             .execute()
         )
 
-        due_date = str(patch.get("due_date") or current.get("due_date") or "")[:10]
-        emp_code = str(current.get("emp_id") or "")
+        due = str(patch.get("follow_up_due_at") or current.get("follow_up_due_at") or "")[:10]
+        emp_code = str(current.get("employee_id") or "")
         emp_name = str(current.get("employee_name") or "")
         dept = str(current.get("department") or "")
-        reason = str(current.get("reason") or "")
-        if status == "closed":
-            if due_date and emp_code:
-                remove_followup_db(emp_code, due_date, tenant_id=tid)
-        elif due_date and emp_code:
-            add_followup_db(emp_code, emp_name, dept, due_date, reason[:80], tenant_id=tid)
+        summary = str(current.get("trigger_summary") or "")
+
+        # Map status transitions to event types
+        _status_to_event = {
+            "resolved": "resolved",
+            "escalated": "escalated",
+            "deprioritized": "deprioritized",
+            "in_progress": "coached",
+            "follow_up_due": "follow_up_logged",
+        }
+        event_type = _status_to_event.get(status) or ("follow_up_logged" if patch.get("follow_up_due_at") else "coached")
+        note_text = str(patch.get("note") or patch.get("resolution_note") or "")
+        outcome_val = str(patch.get("resolution_type") or "") or None
+        log_action_event(
+            action_id=str(action_id),
+            event_type=event_type,
+            employee_id=emp_code,
+            performed_by=str(patch.get("created_by") or ""),
+            notes=note_text,
+            outcome=outcome_val,
+            next_follow_up_at=due or None,
+            tenant_id=tid,
+        )
+
+        if status == "resolved":
+            if due and emp_code:
+                remove_followup_db(emp_code, due, tenant_id=tid)
+        elif due and emp_code:
+            add_followup_db(emp_code, emp_name, dept, due, summary[:80], tenant_id=tid)
 
         return result.data[0] if result.data else {}
     except Exception as e:
-        print(f"[Warning] Could not update supervisor action: {e}")
+        print(f"[Warning] Could not update action: {e}")
         return {}
 
 
@@ -1541,7 +1639,7 @@ _TENANT_TABLES = [
     "employees", "uph_history", "coaching_notes", "shifts",
     "uploaded_files", "clients", "orders", "order_assignments",
     "unit_submissions", "client_trends",
-    "tenant_goals", "tenant_settings", "tenant_email_config", "coaching_followups", "supervisor_actions",
+    "tenant_goals", "tenant_settings", "tenant_email_config", "coaching_followups", "actions", "action_events",
     "subscriptions",
 ]
 

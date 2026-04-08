@@ -1,6 +1,6 @@
 from datetime import date
 
-from services.supervisor_execution_service import build_today_screen_payload
+from services.action_service import build_today_screen_payload
 
 
 def test_generated_action_created_for_unhandled_below_goal_streak():
@@ -25,7 +25,7 @@ def test_generated_action_created_for_unhandled_below_goal_streak():
 
     assert payload["summary"]["open_actions"] == 1
     assert payload["action_queue"][0]["source"] == "generated"
-    assert "no action logged" in payload["action_queue"][0]["reason"].lower()
+    assert "no action logged" in payload["action_queue"][0]["trigger_summary"].lower()
 
 
 
@@ -33,12 +33,12 @@ def test_overdue_action_is_prioritized_and_counted():
     actions = [
         {
             "id": 1,
-            "emp_id": "E1",
+            "employee_id": "E1",
             "employee_name": "Alex",
             "department": "Pack",
-            "reason": "Follow up on prior coaching",
+            "trigger_summary": "Follow up on prior coaching",
             "status": "in_progress",
-            "due_date": "2026-04-01",
+            "follow_up_due_at": "2026-04-01",
             "created_at": "2026-03-30T00:00:00Z",
         }
     ]
@@ -54,20 +54,20 @@ def test_repeat_offenders_detect_multiple_failed_cycles():
     actions = [
         {
             "id": 1,
-            "emp_id": "E1",
+            "employee_id": "E1",
             "employee_name": "Alex",
             "department": "Pack",
-            "status": "closed",
-            "outcome": "no_change",
+            "status": "resolved",
+            "resolution_type": "no_change",
             "created_at": "2026-03-01T00:00:00Z",
         },
         {
             "id": 2,
-            "emp_id": "E1",
+            "employee_id": "E1",
             "employee_name": "Alex",
             "department": "Pack",
-            "status": "closed",
-            "outcome": "worse",
+            "status": "resolved",
+            "resolution_type": "worse",
             "created_at": "2026-03-10T00:00:00Z",
         },
     ]

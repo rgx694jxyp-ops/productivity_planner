@@ -31,10 +31,10 @@ init_runtime()
 # ── Main page ─────────────────────────────────────────────────────────────────
 
 def page_coaching_intel():
-    st.title("🧠 Coaching Intelligence")
+    st.title("🧠 Actions")
     st.caption(
-        "Turn coaching notes into patterns. "
-        "See what's actually happening across your floor and what's working."
+        "Coaching interventions, patterns across your team, and what's working. "
+        "Track your actions and their outcomes."
     )
 
     if not require_db():

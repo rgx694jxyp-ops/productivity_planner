@@ -19,6 +19,11 @@ from services.employee_service import (
     load_employee_history_workflow,
     parse_history_range,
 )
+from services.action_service import (
+    get_employee_actions,
+    get_employee_action_timeline,
+    log_coaching_lifecycle_entry,
+)
 from services.employees_service import _build_archived_productivity
 from database import add_coaching_note, archive_coaching_notes, delete_coaching_note
 from export_manager import export_employee
@@ -478,6 +483,122 @@ def _emp_coaching():
             
             st.divider()
 
+            # ── Action decision history (new primary profile context) ─────────
+            st.subheader("🧭 Action Decision History")
+            _emp_actions = get_employee_actions(emp_id, tenant_id=tenant_id)
+            _open_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"new", "in_progress", "follow_up_due", "overdue", "escalated"}]
+            _closed_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"resolved", "deprioritized", "transferred"}]
+
+            _improved_actions = sum(1 for a in _emp_actions if str(a.get("resolution_type") or "").startswith("improved"))
+            _recognition_actions = [
+                a for a in _emp_actions
+                if str(a.get("issue_type") or "") == "high_performer_ignored"
+                or str(a.get("action_type") or "") in {"development_touchpoint", "recognition"}
+            ]
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Open Actions", len(_open_emp_actions))
+            m2.metric("Total Action History", len(_emp_actions))
+            m3.metric("Improved Outcomes", _improved_actions)
+            m4.metric("Recognition/Development", len(_recognition_actions))
+
+            if _open_emp_actions:
+                with st.expander(f"Open actions ({len(_open_emp_actions)})", expanded=True):
+                    for _a in _open_emp_actions:
+                        _rid = str(_a.get("id") or "")
+                        _due = str(_a.get("follow_up_due_at") or "")[:10]
+                        _status = str(_a.get("_runtime_status") or _a.get("status") or "new").replace("_", " ").title()
+                        _next_step = str(_a.get("action_type") or "").replace("_", " ").title() or "Follow up"
+                        st.markdown(f"**#{_rid}** · {_status}")
+                        st.caption(
+                            f"Issue: {str(_a.get('issue_type') or '').replace('_', ' ')} | "
+                            f"Trigger: {str(_a.get('trigger_summary') or '')[:120]}"
+                        )
+                        st.caption(
+                            f"Due: {_due or '—'} | Recommended next step: {_next_step}"
+                        )
+                        st.divider()
+            else:
+                st.caption("No open actions for this employee.")
+
+            # What has been tried (interventions + events)
+            _timeline = get_employee_action_timeline(emp_id, tenant_id=tenant_id)
+            _tried_interventions = sorted({
+                str(a.get("action_type") or "").replace("_", " ").title()
+                for a in _emp_actions if str(a.get("action_type") or "").strip()
+            })
+            _tried_events = sorted({
+                str(ev.get("event_type") or "").replace("_", " ").title()
+                for ev in _timeline if str(ev.get("event_type") or "").strip()
+            })
+
+            with st.expander("What has been tried", expanded=False):
+                if not _tried_interventions and not _tried_events:
+                    st.caption("No prior interventions recorded yet.")
+                else:
+                    if _tried_interventions:
+                        st.markdown("**Interventions used**")
+                        st.caption(" · ".join(_tried_interventions))
+                    if _tried_events:
+                        st.markdown("**Actions/events logged**")
+                        st.caption(" · ".join(_tried_events))
+
+            # Outcomes over time
+            with st.expander("Outcomes over time", expanded=False):
+                _outcome_rows = []
+                for _a in _closed_emp_actions:
+                    _resolved_at = str(_a.get("resolved_at") or _a.get("last_event_at") or "")[:10]
+                    _outcome_rows.append(
+                        {
+                            "Date": _resolved_at,
+                            "Outcome": str(_a.get("resolution_type") or "").replace("_", " ").title() or "Unknown",
+                            "Delta UPH": float(_a.get("improvement_delta") or 0.0),
+                            "Status": str(_a.get("status") or "").replace("_", " ").title(),
+                        }
+                    )
+                if _outcome_rows:
+                    _outcome_df = pd.DataFrame(_outcome_rows)
+                    st.dataframe(_outcome_df, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No completed outcomes yet.")
+
+            # Recognition/development history
+            with st.expander("Recognition / development history", expanded=False):
+                if not _recognition_actions:
+                    st.caption("No recognition/development actions recorded yet.")
+                else:
+                    for _a in _recognition_actions:
+                        st.markdown(
+                            f"**{str(_a.get('action_type') or '').replace('_', ' ').title()}** · "
+                            f"{str(_a.get('status') or '').replace('_', ' ').title()}"
+                        )
+                        st.caption(str(_a.get("trigger_summary") or ""))
+
+            # Full action timeline
+            with st.expander(f"Action timeline ({len(_timeline)})", expanded=False):
+                if not _timeline:
+                    st.caption("No timeline events yet.")
+                else:
+                    for _ev in _timeline[:40]:
+                        _ev_label = str(_ev.get("event_type") or "event").replace("_", " ").title()
+                        _ev_ts = str(_ev.get("event_at") or "")[:16].replace("T", " ")
+                        _ev_outcome = str(_ev.get("outcome") or "")
+                        _ev_note = str(_ev.get("notes") or "")
+                        _ev_trigger = str(_ev.get("trigger_summary") or "")
+                        st.markdown(f"**{_ev_label}** · {_ev_ts}")
+                        st.caption(
+                            f"Action #{_ev.get('action_id')} | "
+                            f"{str(_ev.get('action_type') or '').replace('_', ' ')} | "
+                            f"{_ev_trigger[:100]}"
+                        )
+                        if _ev_outcome:
+                            st.caption(f"Outcome: {_ev_outcome}")
+                        if _ev_note:
+                            st.caption(_ev_note[:240])
+                        st.divider()
+
+            st.divider()
+
             # ── Show follow-up scheduler if just saved ────────────────────────
             _fu_key = f"_cn_show_followup_{emp_id}"
             if st.session_state.get(_fu_key):
@@ -518,13 +639,59 @@ def _emp_coaching():
             if st.session_state.pop("_cn_clear_inputs", False):
                 st.session_state["cn_note"] = ""
                 st.session_state["cn_common_issues"] = []
+                st.session_state["cn_coaching_reason"] = "Below goal"
+                st.session_state["cn_later_outcome"] = "pending"
 
-            note_text  = st.text_area(
-                "Add a coaching note",
+            _target_action_options = {"Auto (use latest open action or create new)": ""}
+            for _oa in _open_emp_actions:
+                _oa_id = str(_oa.get("id") or "")
+                _oa_label = (
+                    f"#{_oa_id} · {str(_oa.get('issue_type') or '').replace('_', ' ')} · "
+                    f"{str(_oa.get('_runtime_status') or _oa.get('status') or '').replace('_', ' ')}"
+                )
+                _target_action_options[_oa_label] = _oa_id
+
+            _target_choice = st.selectbox(
+                "Action target",
+                list(_target_action_options.keys()),
+                key="cn_action_target",
+                help="Attach coaching to an open action, or auto-create a new action cycle.",
+            )
+
+            coaching_reason = st.selectbox(
+                "Reason",
+                [
+                    "Below goal",
+                    "Trend down",
+                    "Training gap",
+                    "Process blocker",
+                    "Quality issue",
+                    "Attendance issue",
+                    "Recognition/development",
+                    "Other",
+                ],
+                key="cn_coaching_reason",
+            )
+
+            note_text = st.text_area(
+                "Action taken",
                 height=120,
                 key="cn_note",
-                placeholder="What did you discuss? What's the plan?",
+                placeholder="What did you do in coaching and what changed today?",
             )
+            _cf1, _cf2 = st.columns(2)
+            expected_followup_date = _cf1.date_input(
+                "Expected follow-up date",
+                value=date.today() + __import__("datetime").timedelta(days=7),
+                key="cn_expected_followup",
+            )
+            later_outcome = _cf2.selectbox(
+                "Later outcome",
+                ["pending", "improved", "no_change", "worse"],
+                key="cn_later_outcome",
+                help="Usually pending when logging the initial coaching.",
+            )
+
             _issue_options = [
                 "Equipment issue",
                 "Staffing",
@@ -553,7 +720,30 @@ def _emp_coaching():
                     _issue_prefix = ""
                     if selected_issues:
                         _issue_prefix = "[Issues: " + ", ".join(selected_issues) + "]\n"
-                    _final_note = f"{_issue_prefix}{note_text.strip()}"
+                    _final_note = (
+                        f"reason={coaching_reason}\n"
+                        f"expected_follow_up_date={expected_followup_date.isoformat()}\n"
+                        f"later_outcome={later_outcome}\n"
+                        f"{_issue_prefix}{note_text.strip()}"
+                    )
+
+                    _cycle_result = log_coaching_lifecycle_entry(
+                        employee_id=emp_id,
+                        employee_name=emp_name,
+                        department=emp_dept,
+                        reason=coaching_reason,
+                        action_taken=f"{_issue_prefix}{note_text.strip()}",
+                        expected_follow_up_date=expected_followup_date.isoformat(),
+                        performed_by=current_user_name,
+                        later_outcome=later_outcome,
+                        existing_action_id=_target_action_options.get(_target_choice, ""),
+                        tenant_id=tenant_id,
+                    )
+                    if not _cycle_result:
+                        st.error("Could not save coaching cycle as an action event.")
+                        st.stop()
+
+                    # Keep legacy coaching journal populated during transition.
                     add_coaching_note(emp_id, _final_note, current_user_name)
                     _raw_cached_coaching_notes_for.clear()
                     _raw_cached_all_coaching_notes.clear()

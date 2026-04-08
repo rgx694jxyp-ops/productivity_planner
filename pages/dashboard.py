@@ -12,9 +12,9 @@ from ui.components import (
 from ui.coaching_components import _render_priority_strip
 
 def page_dashboard():
-    """Dashboard: At-a-glance risk view of all employees."""
-    st.title("📊 Dashboard")
-    st.caption("See who needs attention first. Filter by urgency or department.")
+    """Performance Context: At-a-glance performance view of all employees."""
+    st.title("📊 Performance Context")
+    st.caption("Team performance snapshot. Filter by capacity needs or department priority.")
 
     gs, history = load_goal_status_history("Loading dashboard data…")
     if gs is None:

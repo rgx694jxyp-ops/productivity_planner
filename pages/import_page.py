@@ -1535,6 +1535,37 @@ def _import_step3(tenant_id: str):
                 "alloc_date":        canon_date,
                 "alloc_has_date":    has_date_col,
             })
+
+            # Post-import action engine refresh (kept in background flow).
+            try:
+                bar.progress(95, text="Refreshing signals and actions…")
+
+                # Refresh performance signals from archived pipeline output.
+                from pages.common import load_goal_status_history as _load_goal_status_history
+                _gs_after, _history_after = _load_goal_status_history("Refreshing performance signals…")
+
+                # Generate actions from latest signals and normalize open statuses.
+                from services.action_service import run_all_triggers as _run_all_triggers, refresh_action_statuses as _refresh_action_statuses
+
+                _trigger_summary = _run_all_triggers(
+                    history=_history_after or [],
+                    tenant_id=tenant_id,
+                )
+                _status_updates = _refresh_action_statuses(tenant_id=tenant_id)
+
+                st.session_state["_last_action_engine_refresh"] = {
+                    "trigger_summary": _trigger_summary,
+                    "status_updates": int(_status_updates or 0),
+                    "refreshed_at": get_user_timezone_now(tenant_id).isoformat(timespec="seconds"),
+                }
+            except Exception as _action_refresh_err:
+                _log_app_error(
+                    "pipeline",
+                    f"Post-import action refresh failed: {_action_refresh_err}",
+                    detail=traceback.format_exc(),
+                    severity="warning",
+                )
+
             bar.progress(100, text="Done!")
             _unique_emp_count = len({r["emp_id"] for r in alloc_rows})
             st.session_state["_import_complete_summary"] = {

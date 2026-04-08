@@ -134,15 +134,15 @@ def render_sidebar() -> str:
         st.divider()
         nav_items = [
             ("supervisor", "✅  Today"),
-            ("dashboard", "📊  Dashboard"),
-            ("import", "📁  Import Data"),
             ("employees", "👥  Employees"),
-            ("productivity", "📈  Productivity"),
+            ("productivity", "📈  Context / Analysis"),
+            ("dashboard", "📊  Performance Context"),
+            ("import", "📁  Import Data"),
+            ("settings", "⚙️  Settings"),
             ("shift_plan", "📋  Shift Plan"),
-            ("coaching_intel", "🧠  Coaching Intel"),
+            ("coaching_intel", "🧠  Actions"),
             ("cost_impact", "💰  Cost Impact"),
             ("email", "📧  Email Setup"),
-            ("settings", "⚙️  Settings"),
         ]
         nav_keys = [key for key, _ in nav_items]
         nav_labels = {key: label for key, label in nav_items}

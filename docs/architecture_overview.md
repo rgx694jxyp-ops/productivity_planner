@@ -9,6 +9,9 @@ Stack: Python, Streamlit, Supabase (Postgres/Auth), Stripe, Supabase Edge Functi
 This document is the high-level map of how the app works today.
 Use it to onboard quickly, reason about system behavior, and understand where changes belong.
 
+Product framing lives in docs/product_definition.md.
+Architecture should support that product direction: follow-through first, analytics second.
+
 ## Ownership Model
 
 Authoritative ownership rules are in docs/module_ownership.md.
@@ -152,16 +155,20 @@ Tenant isolation patterns:
 - _tq(query): appends tenant filter when tenant context exists.
 - _tenant_fields(): injects tenant_id on inserts.
 - Subscription/billing reads are tenant-scoped.
-- Today screen actions are stored in supervisor_actions and tenant-scoped.
+- Today screen actions are stored in actions and tenant-scoped.
 - Tests cover cross-tenant leak scenarios.
 
 ## Today Screen Flow
 
 - Route key: `supervisor`
-- UI entrypoint: pages/today_screen.py
-- Decision logic: services/supervisor_execution_service.py
-- Persistence: supervisor_actions table
+- UI entrypoint: pages/today.py
+- Decision logic: services/action_service.py
+- Persistence: actions table
 - Goal: surface unhandled actions, overdue follow-ups, repeat no-improvement cycles, and ignored high performers.
+
+Product note:
+- rankings, risk, and trends are signal inputs
+- the primary output is the action queue
 
 ## Logging and Diagnostics
 

@@ -35,3 +35,14 @@ When adding code, place it in the highest-level module that still keeps logic re
 3. Rendering widgets/components: `ui/`
 4. Page composition/interaction: `pages/`
 5. Runtime/bootstrap/plumbing: `core/`
+
+## Product Direction
+
+When adding new product features, default toward execution-system concepts:
+
+- actions
+- follow-up
+- unresolved issues
+- outcomes
+
+Do not default toward passive dashboard expansion unless it directly supports supervisor follow-through.

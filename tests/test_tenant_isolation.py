@@ -126,7 +126,7 @@ def test_billing_entitlement_uses_requested_tenant_only(monkeypatch):
     assert calls == [("subscription", "tenant-a"), ("employee_count", "tenant-a")]
 
 
-def test_supervisor_actions_lookup_is_tenant_scoped(monkeypatch):
+def test_actions_lookup_is_tenant_scoped(monkeypatch):
     class _Query:
         def __init__(self):
             self.eq_calls = []
@@ -147,8 +147,8 @@ def test_supervisor_actions_lookup_is_tenant_scoped(monkeypatch):
                 if key == "tenant_id":
                     tenant = value
             data = {
-                "tenant-a": [{"id": 1, "tenant_id": "tenant-a", "emp_id": "E1"}],
-                "tenant-b": [{"id": 2, "tenant_id": "tenant-b", "emp_id": "E2"}],
+                "tenant-a": [{"id": 1, "tenant_id": "tenant-a", "employee_id": "E1"}],
+                "tenant-b": [{"id": 2, "tenant_id": "tenant-b", "employee_id": "E2"}],
             }
             return SimpleNamespace(data=data.get(tenant, []))
 
@@ -156,12 +156,12 @@ def test_supervisor_actions_lookup_is_tenant_scoped(monkeypatch):
 
     class _Client:
         def table(self, table_name):
-            assert table_name == "supervisor_actions"
+            assert table_name == "actions"
             return query
 
     monkeypatch.setattr(database, "get_client", lambda: _Client())
 
-    rows = database.list_supervisor_actions("tenant-a")
+    rows = database.list_actions("tenant-a")
 
-    assert rows == [{"id": 1, "tenant_id": "tenant-a", "emp_id": "E1"}]
+    assert rows == [{"id": 1, "tenant_id": "tenant-a", "employee_id": "E1"}]
     assert ("tenant_id", "tenant-a") in query.eq_calls

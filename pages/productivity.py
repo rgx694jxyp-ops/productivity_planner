@@ -66,8 +66,8 @@ def _clear_targets_cache() -> None:
         pass
 
 def page_productivity():
-    st.title("📈 Productivity")
-    st.caption("UPH rankings, department goals, trend charts, and performance tracking.")
+    st.title("📈 Context / Analysis")
+    st.caption("Performance benchmarks, team trends, and contextual analysis to support your decisions.")
 
     # Context and breadcrumbs
     _prod_view = st.session_state.get("prod_view", "")
