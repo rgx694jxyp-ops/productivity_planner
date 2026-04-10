@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from repositories import action_events_repo, actions_repo, billing_repo
+from repositories import action_events_repo, actions_repo, billing_repo, operational_exceptions_repo
 
 
 def test_actions_repo_create_action_returns_empty_dict_on_failure(monkeypatch):
@@ -67,4 +67,26 @@ def test_billing_repo_update_subscription_state_returns_false_on_failure(monkeyp
     ok = billing_repo.update_subscription_state({"status": "active"})
 
     assert ok is False
+    assert logged
+
+
+def test_operational_exceptions_repo_create_returns_empty_dict_on_failure(monkeypatch):
+    logged = []
+
+    class _Client:
+        def table(self, _name):
+            raise RuntimeError("db write failed")
+
+    monkeypatch.setattr(operational_exceptions_repo, "get_client", lambda: _Client())
+    monkeypatch.setattr(operational_exceptions_repo, "get_tenant_id", lambda: "tenant-a")
+    monkeypatch.setattr(operational_exceptions_repo, "log_error", lambda *args, **kwargs: logged.append((args, kwargs)))
+
+    out = operational_exceptions_repo.create_operational_exception(
+        exception_date="2026-04-09",
+        category="equipment",
+        summary="Scanner outage",
+        employee_id="E1",
+    )
+
+    assert out == {}
     assert logged

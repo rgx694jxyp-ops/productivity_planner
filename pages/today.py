@@ -10,12 +10,22 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from core.dependencies import _cached_employees
 from domain.insight_card_contract import InsightCardContract
+from domain.operational_exceptions import EXCEPTION_CATEGORIES
 from pages.common import load_goal_status_history
 from services.action_lifecycle_service import run_all_triggers
 from services.action_metrics_service import _recent_action_outcomes, get_manager_outcome_stats
 from services.action_query_service import get_open_actions
 from services.action_recommendation_service import get_ignored_high_performers, get_repeat_offenders
+from services.exception_tracking_service import (
+    build_exception_context_line,
+    create_operational_exception,
+    list_open_operational_exceptions,
+    resolve_operational_exception,
+    summarize_open_operational_exceptions,
+)
+from services.follow_through_service import FOLLOW_THROUGH_STATUSES, log_follow_through_event
 from services.today_home_service import build_today_home_sections
 from services.signal_traceability_service import traceability_payload_from_card
 from ui.state_panels import (
@@ -310,6 +320,181 @@ def _render_bottom_charts(queue_items: list[dict], manager_stats: dict) -> None:
         st.bar_chart(outcomes_chart)
 
 
+def _employee_option_map() -> tuple[list[str], dict[str, dict]]:
+    options = ["Not linked to one employee"]
+    option_map: dict[str, dict] = {"Not linked to one employee": {}}
+    for employee in (_cached_employees() or []):
+        label = f"{employee.get('name', employee.get('emp_id', 'Unknown'))} | {employee.get('department', '')} | {employee.get('emp_id', '')}"
+        options.append(label)
+        option_map[label] = employee
+    return options, option_map
+
+
+def _go_to_exception_employee(exception_row: dict) -> None:
+    employee_id = str(exception_row.get("employee_id") or "")
+    if not employee_id:
+        return
+    st.session_state["goto_page"] = "team"
+    st.session_state["emp_view"] = "Performance Journal"
+    st.session_state["cn_selected_emp"] = employee_id
+    st.rerun()
+
+
+def _render_exception_create_form(*, tenant_id: str, today_value: date) -> None:
+    employee_options, employee_map = _employee_option_map()
+    with st.expander("Log operational exception", expanded=False):
+        st.caption("Capture context that may affect performance interpretation for today or a recent shift.")
+        with st.form("today_operational_exception_form", clear_on_submit=True):
+            selected_label = st.selectbox("Employee", employee_options, index=0)
+            selected_employee = employee_map.get(selected_label, {})
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                exception_date = st.date_input("Date", value=today_value)
+            with c2:
+                category = st.selectbox("Category", EXCEPTION_CATEGORIES, index=EXCEPTION_CATEGORIES.index("unknown"))
+            with c3:
+                shift = st.text_input("Shift", value=str(selected_employee.get("shift", "") or ""))
+            process_name = st.text_input("Process", value=str(selected_employee.get("department", "") or ""))
+            summary = st.text_input("What happened", placeholder="Example: scanner outage slowed receiving lane")
+            notes = st.text_area("Notes (optional)", value="")
+            submitted = st.form_submit_button("Save exception", type="primary")
+            if submitted:
+                result = create_operational_exception(
+                    exception_date=exception_date.isoformat(),
+                    category=category,
+                    summary=summary,
+                    employee_id=str(selected_employee.get("emp_id", "") or ""),
+                    employee_name=str(selected_employee.get("name", "") or ""),
+                    department=str(selected_employee.get("department", "") or ""),
+                    shift=shift,
+                    process_name=process_name,
+                    notes=notes,
+                    created_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
+                    tenant_id=tenant_id,
+                )
+                if result:
+                    show_success_state("Operational exception saved.")
+                    st.rerun()
+                else:
+                    show_error_state("Operational exception could not be saved right now.")
+
+
+def _render_open_exceptions(*, tenant_id: str) -> None:
+    summary = summarize_open_operational_exceptions(tenant_id=tenant_id)
+    rows = summary.get("rows") or []
+
+    st.markdown('<div class="today-section-label">Operational Exceptions</div>', unsafe_allow_html=True)
+    st.markdown('<div class="today-supporting-note">Open operational context that may help explain current performance signals.</div>', unsafe_allow_html=True)
+    _render_exception_create_form(tenant_id=tenant_id, today_value=date.today())
+
+    if not rows:
+        with st.container(border=True):
+            st.markdown("No open operational exceptions are currently logged.")
+        return
+
+    m1, m2 = st.columns(2)
+    m1.metric("Open exceptions", int(summary.get("open_count", 0) or 0))
+    m2.metric("Linked employees", int(summary.get("linked_employee_count", 0) or 0))
+    category_bits = [f"{name}: {count}" for name, count in sorted((summary.get("categories") or {}).items())]
+    if category_bits:
+        st.caption("Categories: " + " | ".join(category_bits[:6]))
+
+    for row in rows[:8]:
+        exception_id = str(row.get("id") or "")
+        summary_text = str(row.get("summary") or "Operational exception")
+        linked_name = str(row.get("employee_name") or row.get("employee_id") or "Team context")
+        with st.container(border=True):
+            st.markdown(f"<div class=\"today-insight-title\">{summary_text}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class=\"today-insight-line\"><strong>What happened:</strong> {summary_text}</div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div class=\"today-insight-line\"><strong>Compared to what:</strong> Compared with normal operating conditions for this date, shift, or process context.</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "<div class=\"today-insight-line\"><strong>Why shown:</strong> Shown because this exception is still open and may affect current performance interpretation.</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class=\"today-insight-meta\">Confidence: High (manually logged operational context). Source: {build_exception_context_line(row)} | Linked: {linked_name}</div>",
+                unsafe_allow_html=True,
+            )
+            if str(row.get("notes") or "").strip():
+                with st.expander("Context details", expanded=False):
+                    st.write(str(row.get("notes") or ""))
+                    if str(row.get("resolution_note") or "").strip():
+                        st.caption(f"Resolution note: {row.get('resolution_note')}")
+
+            with st.expander("Log follow-through", expanded=False):
+                with st.form(f"today_exception_follow_through_{exception_id}", clear_on_submit=True):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        status = st.selectbox("Status", FOLLOW_THROUGH_STATUSES, index=0, key=f"today_exception_status_{exception_id}")
+                    with c2:
+                        outcome_label = st.selectbox(
+                            "Outcome (optional)",
+                            ["Not captured", "Improved", "No change", "Worse", "Blocked", "Pending"],
+                            index=0,
+                            key=f"today_exception_outcome_{exception_id}",
+                        )
+                    with c3:
+                        has_due_date = st.checkbox("Add due date", value=False, key=f"today_exception_due_toggle_{exception_id}")
+                    due_date = st.date_input(
+                        "Due date",
+                        value=date.today(),
+                        key=f"today_exception_due_date_{exception_id}",
+                        disabled=not has_due_date,
+                    )
+                    details = st.text_area(
+                        "Notes/details",
+                        height=90,
+                        placeholder="Example: checked outage board, confirmed spare device ETA, recheck after lunch.",
+                        key=f"today_exception_details_{exception_id}",
+                    )
+                    submitted = st.form_submit_button("Save follow-through", type="primary")
+                    if submitted:
+                        outcome_map = {
+                            "Not captured": "",
+                            "Improved": "improved",
+                            "No change": "no_change",
+                            "Worse": "worse",
+                            "Blocked": "blocked",
+                            "Pending": "pending",
+                        }
+                        result = log_follow_through_event(
+                            employee_id=str(row.get("employee_id") or ""),
+                            linked_exception_id=exception_id,
+                            owner=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
+                            status=status,
+                            due_date=due_date.isoformat() if has_due_date else "",
+                            details=details,
+                            outcome=outcome_map.get(outcome_label, ""),
+                            tenant_id=tenant_id,
+                        )
+                        if result:
+                            show_success_state("Exception follow-through saved.")
+                            st.rerun()
+                        else:
+                            show_error_state("Exception follow-through could not be saved right now.")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if str(row.get("employee_id") or "") and st.button("Open employee detail", key=f"today_exception_open_{exception_id}", use_container_width=True):
+                    _go_to_exception_employee(row)
+            with c2:
+                if st.button("Resolve exception", key=f"today_exception_resolve_{exception_id}", use_container_width=True):
+                    resolved = resolve_operational_exception(
+                        exception_id,
+                        resolution_note="Resolved from Today screen.",
+                        resolved_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
+                        tenant_id=tenant_id,
+                    )
+                    if resolved:
+                        show_success_state("Operational exception resolved.")
+                        st.rerun()
+                    else:
+                        show_error_state("Operational exception could not be resolved right now.")
+
+
 def _go_to_drill_down(item: InsightCardContract) -> None:
     screen = str(item.drill_down.screen or "")
     entity_id = str(item.drill_down.entity_id or "")
@@ -537,6 +722,8 @@ def page_today() -> None:
         placeholder_message="No active data warnings from current session context.",
         placeholder_todo="TODO: Wire structured import diagnostics for row-level completeness breakdown.",
     )
+
+    _render_open_exceptions(tenant_id=st.session_state.tenant_id)
 
     filtered_queue = _filter_queue(queue_items, st.session_state.today_queue_filter)
     recent_outcomes = _recent_action_outcomes(lookback_days=1, tenant_id=st.session_state.tenant_id)

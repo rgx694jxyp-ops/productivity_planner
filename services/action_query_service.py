@@ -103,7 +103,7 @@ def get_employee_action_timeline(
     employee_id: str,
     tenant_id: str = "",
 ) -> list[dict]:
-    """Return flattened timeline across all actions for one employee, newest first."""
+    """Return flattened timeline across all actions plus generic follow-through events."""
     try:
         actions = actions_repo.list_actions(
             tenant_id=tenant_id,
@@ -121,18 +121,46 @@ def get_employee_action_timeline(
                 timeline.append(
                     {
                         "action_id": action_id,
+                        "linked_exception_id": ev.get("linked_exception_id"),
                         "event_type": ev.get("event_type"),
                         "event_at": ev.get("event_at"),
-                        "performed_by": ev.get("performed_by"),
-                        "notes": ev.get("notes"),
+                        "performed_by": ev.get("owner") or ev.get("performed_by"),
+                        "notes": ev.get("details") or ev.get("notes"),
                         "outcome": ev.get("outcome"),
-                        "next_follow_up_at": ev.get("next_follow_up_at"),
-                        "status": action.get("status"),
+                        "next_follow_up_at": ev.get("due_date") or ev.get("next_follow_up_at"),
+                        "status": ev.get("status") or action.get("status"),
                         "issue_type": action.get("issue_type"),
                         "action_type": action.get("action_type"),
                         "trigger_summary": action.get("trigger_summary"),
                     }
                 )
+
+        generic_events = action_events_repo.list_action_events(
+            action_id="",
+            tenant_id=tenant_id,
+            employee_id=employee_id,
+            limit=120,
+            newest_first=True,
+        )
+        for ev in generic_events or []:
+            if str(ev.get("action_id") or "").strip():
+                continue
+            timeline.append(
+                {
+                    "action_id": "",
+                    "linked_exception_id": ev.get("linked_exception_id"),
+                    "event_type": ev.get("event_type"),
+                    "event_at": ev.get("event_at"),
+                    "performed_by": ev.get("owner") or ev.get("performed_by"),
+                    "notes": ev.get("details") or ev.get("notes"),
+                    "outcome": ev.get("outcome"),
+                    "next_follow_up_at": ev.get("due_date") or ev.get("next_follow_up_at"),
+                    "status": ev.get("status") or "logged",
+                    "issue_type": "",
+                    "action_type": "",
+                    "trigger_summary": "Lightweight follow-through log",
+                }
+            )
         timeline.sort(key=lambda item: str(item.get("event_at") or ""), reverse=True)
         return timeline
     except Exception as e:

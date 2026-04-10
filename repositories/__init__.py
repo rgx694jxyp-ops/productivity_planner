@@ -13,6 +13,11 @@ from repositories.billing_repo import (
 )
 from repositories.employees_repo import get_employee_count, get_employees
 from repositories.import_repo import batch_store_uph_history, get_all_uph_history
+from repositories.operational_exceptions_repo import (
+    create_operational_exception,
+    list_operational_exceptions,
+    resolve_operational_exception,
+)
 from repositories.tenant_repo import get_tenant, set_tenant_stripe_customer_id
 
 __all__ = [
@@ -20,6 +25,7 @@ __all__ = [
     "batch_store_uph_history",
     "create_action",
     "create_billing_portal_url",
+    "create_operational_exception",
     "get_all_uph_history",
     "get_config",
     "get_employee_count",
@@ -29,7 +35,9 @@ __all__ = [
     "get_tenant",
     "list_action_events",
     "list_actions",
+    "list_operational_exceptions",
     "log_action_event",
+    "resolve_operational_exception",
     "modify_subscription",
     "set_tenant_stripe_customer_id",
     "update_action",

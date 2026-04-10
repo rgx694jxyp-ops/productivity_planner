@@ -10,6 +10,7 @@ from core.dependencies import (
 )
 from services.plan_service import get_available_employee_views
 from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback, init_runtime
+from domain.operational_exceptions import EXCEPTION_CATEGORIES
 
 init_runtime()
 from services.coaching_service import find_coaching_impact
@@ -21,6 +22,20 @@ from services.employee_service import (
 )
 from services.action_lifecycle_service import log_coaching_lifecycle_entry
 from services.action_query_service import get_employee_action_timeline, get_employee_actions
+from services.activity_comparison_service import list_recent_activity_comparisons, summarize_activity_comparisons
+from services.employee_detail_service import build_employee_detail_context
+from services.exception_tracking_service import (
+    build_exception_context_line,
+    create_operational_exception,
+    list_recent_operational_exceptions,
+    resolve_operational_exception,
+)
+from services.follow_through_service import (
+    FOLLOW_THROUGH_STATUSES,
+    build_follow_through_context_line,
+    log_follow_through_event,
+    summarize_follow_through_events,
+)
 from services.employees_service import _build_archived_productivity
 from database import add_coaching_note, archive_coaching_notes, delete_coaching_note
 from export_manager import export_employee
@@ -61,6 +76,342 @@ def _normalize_label_text(value, max_len: int = 64) -> str:
     if len(s) > max_len:
         s = s[: max_len - 3].rstrip() + "..."
     return s or "Unknown"
+
+
+def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: str, emp_dept: str) -> None:
+    st.subheader("Operational Exceptions")
+    st.caption("Operational context linked to this employee that may help explain recent performance.")
+
+    recent_rows = list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=20)
+    open_rows = [row for row in recent_rows if str(row.get("status") or "") == "open"]
+
+    with st.expander("Log linked exception", expanded=False):
+        with st.form(f"employee_exception_form_{emp_id}", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                exception_date = st.date_input("Date", value=date.today(), key=f"employee_exception_date_{emp_id}")
+            with c2:
+                category = st.selectbox(
+                    "Category",
+                    EXCEPTION_CATEGORIES,
+                    index=EXCEPTION_CATEGORIES.index("unknown"),
+                    key=f"employee_exception_category_{emp_id}",
+                )
+            with c3:
+                shift = st.text_input("Shift", value="", key=f"employee_exception_shift_{emp_id}")
+            process_name = st.text_input("Process", value=emp_dept, key=f"employee_exception_process_{emp_id}")
+            summary = st.text_input(
+                "What happened",
+                placeholder="Example: training overlap slowed pack station",
+                key=f"employee_exception_summary_{emp_id}",
+            )
+            notes = st.text_area("Notes (optional)", value="", key=f"employee_exception_notes_{emp_id}")
+            submitted = st.form_submit_button("Save exception", type="primary")
+            if submitted:
+                result = create_operational_exception(
+                    exception_date=exception_date.isoformat(),
+                    category=category,
+                    summary=summary,
+                    employee_id=emp_id,
+                    employee_name=emp_name,
+                    department=emp_dept,
+                    shift=shift,
+                    process_name=process_name,
+                    notes=notes,
+                    created_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
+                    tenant_id=tenant_id,
+                )
+                if result:
+                    show_success_state(f"{emp_name}: operational exception saved.")
+                    st.rerun()
+                else:
+                    show_error_state("Operational exception could not be saved right now.")
+
+    if not recent_rows:
+        show_partial_data_state("No linked operational exceptions are on file for this employee yet.")
+        return
+
+    m1, m2 = st.columns(2)
+    m1.metric("Open exceptions", len(open_rows))
+    m2.metric("Recent exception history", len(recent_rows))
+
+    for row in recent_rows[:6]:
+        exception_id = str(row.get("id") or "")
+        status = str(row.get("status") or "open").title()
+        with st.container(border=True):
+            st.markdown(f"**{row.get('summary', 'Operational exception')}**")
+            st.caption(build_exception_context_line(row) + f" | Status: {status}")
+            if str(row.get("notes") or "").strip():
+                st.write(str(row.get("notes") or ""))
+            if str(row.get("resolution_note") or "").strip():
+                st.caption(f"Resolution: {row.get('resolution_note')}")
+            if str(row.get("status") or "") == "open":
+                if st.button("Resolve", key=f"employee_exception_resolve_{exception_id}"):
+                    resolved = resolve_operational_exception(
+                        exception_id,
+                        resolution_note="Resolved from employee detail.",
+                        resolved_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
+                        tenant_id=tenant_id,
+                    )
+                    if resolved:
+                        show_success_state(f"{emp_name}: operational exception resolved.")
+                        st.rerun()
+                    else:
+                        show_error_state("Operational exception could not be resolved right now.")
+
+
+def _render_employee_follow_through_panel(*, tenant_id: str, emp_id: str, emp_name: str) -> None:
+    st.subheader("Follow-through Log")
+    st.caption("Quick log of what was checked, scheduled, or observed. New entries are stored in the lightweight follow-through log.")
+
+    exception_rows = list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=12)
+    exception_lookup = {str(row.get("id") or ""): row for row in exception_rows}
+    summary = summarize_follow_through_events(tenant_id=tenant_id, employee_id=emp_id, limit=20)
+    rows = summary.get("rows") or []
+
+    exception_options = {"Not linked to an exception": ""}
+    for row in exception_rows:
+        exception_id = str(row.get("id") or "")
+        if not exception_id:
+            continue
+        label = f"#{exception_id} | {str(row.get('summary') or 'Operational exception')[:60]}"
+        exception_options[label] = exception_id
+
+    with st.expander("Log quick follow-through", expanded=False):
+        with st.form(f"employee_follow_through_form_{emp_id}", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                status = st.selectbox("Status", FOLLOW_THROUGH_STATUSES, index=0, key=f"follow_through_status_{emp_id}")
+            with c2:
+                outcome_label = st.selectbox(
+                    "Outcome (optional)",
+                    ["Not captured", "Improved", "No change", "Worse", "Blocked", "Pending"],
+                    index=0,
+                    key=f"follow_through_outcome_{emp_id}",
+                )
+            with c3:
+                has_due_date = st.checkbox("Add due date", value=False, key=f"follow_through_due_toggle_{emp_id}")
+            due_date = st.date_input(
+                "Due date",
+                value=date.today() + __import__("datetime").timedelta(days=3),
+                key=f"follow_through_due_date_{emp_id}",
+                disabled=not has_due_date,
+            )
+            linked_exception_label = st.selectbox(
+                "Linked exception",
+                list(exception_options.keys()),
+                key=f"follow_through_exception_{emp_id}",
+            )
+            details = st.text_area(
+                "Notes/details",
+                height=100,
+                placeholder="Example: checked scanner lane, swapped spare device, recheck tomorrow morning.",
+                key=f"follow_through_details_{emp_id}",
+            )
+            submitted = st.form_submit_button("Save follow-through", type="primary")
+            if submitted:
+                outcome_map = {
+                    "Not captured": "",
+                    "Improved": "improved",
+                    "No change": "no_change",
+                    "Worse": "worse",
+                    "Blocked": "blocked",
+                    "Pending": "pending",
+                }
+                result = log_follow_through_event(
+                    employee_id=emp_id,
+                    linked_exception_id=exception_options.get(linked_exception_label, ""),
+                    owner=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
+                    status=status,
+                    due_date=due_date.isoformat() if has_due_date else "",
+                    details=details,
+                    outcome=outcome_map.get(outcome_label, ""),
+                    tenant_id=tenant_id,
+                )
+                if result:
+                    show_success_state(f"{emp_name}: follow-through saved.")
+                    st.rerun()
+                else:
+                    show_error_state("Follow-through could not be saved right now.")
+
+    if not rows:
+        show_partial_data_state("No follow-through entries are on file for this employee yet.")
+        return
+
+    m1, m2 = st.columns(2)
+    m1.metric("Recent entries", int(summary.get("total_count", 0) or 0))
+    m2.metric("Open items", int(summary.get("open_count", 0) or 0))
+
+    for row in rows[:6]:
+        with st.container(border=True):
+            details = str(row.get("details") or row.get("notes") or "Follow-through entry")
+            st.markdown(f"**{details[:120]}**")
+            st.caption(build_follow_through_context_line(row))
+            linked_exception_id = str(row.get("linked_exception_id") or "")
+            if linked_exception_id and linked_exception_id in exception_lookup:
+                st.caption(f"Linked exception: {exception_lookup[linked_exception_id].get('summary', 'Operational exception')}")
+            if str(row.get("outcome") or "").strip():
+                st.caption(f"Outcome: {row.get('outcome')}")
+
+
+def _render_activity_comparison_card(comparison: dict, *, show_employee_id: bool = False) -> None:
+    with st.container(border=True):
+        st.markdown(f"**{comparison.get('outcome_label', 'No clear change yet')}**")
+        if show_employee_id and str(comparison.get("employee_id") or "").strip():
+            st.caption(f"Employee: {comparison.get('employee_id')}")
+        st.caption(
+            f"What happened: {comparison.get('what_happened')} | Compared to what: {comparison.get('compared_to_what')}"
+        )
+        st.caption(f"Why shown: {comparison.get('why_shown')}")
+        st.caption(
+            f"Confidence: {comparison.get('confidence_label')} | Data supports: {comparison.get('data_supports')}"
+        )
+        st.caption(str(comparison.get("time_context") or ""))
+        st.caption(str(comparison.get("workload_context") or ""))
+        st.caption(str(comparison.get("data_completeness_note") or ""))
+        details_text = str(comparison.get("details") or "").strip()
+        if details_text:
+            with st.expander("Logged activity detail", expanded=False):
+                st.write(details_text)
+                before_dates = comparison.get("before_dates") or []
+                after_dates = comparison.get("after_dates") or []
+                st.caption(
+                    f"Before dates used: {', '.join(before_dates[:7]) or 'None'} | After dates used: {', '.join(after_dates[:7]) or 'None'}"
+                )
+
+
+def _render_employee_signal_summary(detail_context: dict) -> None:
+    st.subheader("Signal Summary")
+    with st.container(border=True):
+        st.markdown(f"**Current state:** {detail_context.get('current_state', 'pace context is loading')}.")
+        st.caption(f"What happened: {detail_context.get('what_happened', '')}")
+        st.caption(f"Compared to what: {detail_context.get('compared_to_what', '')}")
+        st.caption(f"Confidence: {detail_context.get('confidence_label', 'Low')}")
+        st.caption(f"Data completeness: {detail_context.get('data_completeness_note', '')}")
+
+
+def _render_employee_signal_why(detail_context: dict) -> None:
+    st.subheader("Why this is showing")
+    with st.container(border=True):
+        st.caption(f"Trigger: {detail_context.get('why_showing', '')}")
+        st.caption(f"Comparison logic: {detail_context.get('comparison_logic', '')}")
+
+
+def _render_employee_signal_basis(detail_context: dict) -> None:
+    st.subheader("What this is based on")
+    with st.container(border=True):
+        st.caption(f"Timeframe used: {detail_context.get('timeframe_used', '')}")
+        st.caption(f"Baseline used: {detail_context.get('baseline_used', '')}")
+        st.caption(f"Volume/workload context: {detail_context.get('workload_context', '')}")
+        st.caption(f"Incomplete/missing data: {detail_context.get('missing_data_note', '')}")
+
+        before_after = detail_context.get("before_after_summary") or {}
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Before/after status", str(before_after.get("label") or "no clear change yet").replace("_", " "))
+        b2.metric("Trailing avg UPH", f"{float(before_after.get('trailing_avg_uph') or 0):.1f}")
+        b3.metric("Prior avg UPH", f"{float(before_after.get('prior_avg_uph') or 0):.1f}")
+
+
+def _render_employee_trend_and_drilldown(detail_context: dict) -> None:
+    st.subheader("Observed Trend")
+    trend_points = detail_context.get("trend_points") or []
+    if not trend_points:
+        show_partial_data_state("No included trend points are currently available for this employee.")
+        return
+
+    trend_df = pd.DataFrame(trend_points)
+    chart_df = trend_df[["Date", "UPH"]].copy()
+    chart_df["Date"] = pd.to_datetime(chart_df["Date"], errors="coerce")
+    chart_df = chart_df.dropna(subset=["Date"]).sort_values("Date")
+    chart_df = chart_df.set_index("Date")
+    st.line_chart(chart_df[["UPH"]], use_container_width=True)
+
+    with st.expander("Contributing time periods", expanded=False):
+        periods = detail_context.get("contributing_periods") or {}
+        trailing_dates = periods.get("trailing_dates") or []
+        prior_dates = periods.get("prior_dates") or []
+        st.caption("Trailing window dates used in comparison")
+        st.write(", ".join(trailing_dates) if trailing_dates else "None")
+        st.caption("Prior window dates used in comparison")
+        st.write(", ".join(prior_dates) if prior_dates else "None")
+
+    with st.expander("Underlying records", expanded=False):
+        included_records = detail_context.get("included_records") or []
+        if not included_records:
+            st.caption("No included records in the current lookback window.")
+        else:
+            st.dataframe(pd.DataFrame(included_records), use_container_width=True, hide_index=True)
+
+    with st.expander("Included vs excluded data", expanded=False):
+        included_records = detail_context.get("included_records") or []
+        excluded_records = detail_context.get("excluded_records") or []
+        c1, c2 = st.columns(2)
+        c1.metric("Included records", len(included_records))
+        c2.metric("Excluded records", len(excluded_records))
+        if excluded_records:
+            st.dataframe(pd.DataFrame(excluded_records), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No excluded records in this lookback window.")
+
+
+def _render_employee_activity_comparisons(*, tenant_id: str, emp_id: str, expected_uph: float, history_rows: list[dict]) -> None:
+    comparisons = list_recent_activity_comparisons(
+        tenant_id=tenant_id,
+        history_rows=history_rows,
+        expected_uph_by_employee={emp_id: expected_uph},
+        employee_id=emp_id,
+        include_weak_signals=True,
+        limit=4,
+    )
+    st.subheader("Logged Activity Comparison")
+    st.caption("Deterministic before/after view of whether recent logged activity was followed by improvement, similar conditions, or performance still below expected.")
+    if not comparisons:
+        show_partial_data_state("No recent logged activity has enough comparable before/after data yet.")
+        return
+    strong_comparisons = [row for row in comparisons if not bool(row.get("is_weak_signal"))]
+    weak_comparisons = [row for row in comparisons if bool(row.get("is_weak_signal"))]
+    summary = summarize_activity_comparisons(strong_comparisons)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Improved", int(summary.get("improved_count", 0) or 0))
+    m2.metric("No clear change yet", int(summary.get("no_clear_change_count", 0) or 0))
+    m3.metric("Still below expected", int(summary.get("still_below_expected_count", 0) or 0))
+    if not strong_comparisons:
+        show_low_confidence_state("Recent comparisons are currently low-confidence and are hidden from primary summary cards until more comparable data arrives.")
+    for comparison in strong_comparisons:
+        _render_activity_comparison_card(comparison)
+    if weak_comparisons:
+        with st.expander(f"Low-confidence comparisons ({len(weak_comparisons)})", expanded=False):
+            st.caption("These are shown for transparency but excluded from the primary signal summary because of incomplete comparison data.")
+            for comparison in weak_comparisons:
+                _render_activity_comparison_card(comparison)
+
+
+def _render_team_activity_comparisons(*, tenant_id: str, history_rows: list[dict], goal_status: list[dict]) -> None:
+    expected_uph_by_employee = {
+        str(row.get("EmployeeID") or ""): float(row.get("Target UPH") or 0.0)
+        for row in goal_status or []
+        if str(row.get("EmployeeID") or "").strip()
+    }
+    comparisons = list_recent_activity_comparisons(
+        tenant_id=tenant_id,
+        history_rows=history_rows,
+        expected_uph_by_employee=expected_uph_by_employee,
+        per_employee_latest_only=True,
+        include_weak_signals=False,
+        limit=6,
+    )
+    st.subheader("Recent Logged Activity Outcomes")
+    st.caption("Latest deterministic before/after comparisons across the team based on recent logged activity.")
+    if not comparisons:
+        show_partial_data_state("Recent logged activity does not yet have enough comparable before/after data across the team.")
+        return
+    summary = summarize_activity_comparisons(comparisons)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Improved", int(summary.get("improved_count", 0) or 0))
+    m2.metric("No clear change yet", int(summary.get("no_clear_change_count", 0) or 0))
+    m3.metric("Still below expected", int(summary.get("still_below_expected_count", 0) or 0))
+    for comparison in comparisons:
+        _render_activity_comparison_card(comparison, show_employee_id=True)
 
 def page_employees():
     st.title("👥 Employees")
@@ -221,13 +572,13 @@ def _emp_ai_coaching():
     st.markdown("---")
 
     # Filter
-    _filter = st.radio("Show", ["All", "🔴 Urgent only", "🟡 Needs attention", "⭐ Top performers"],
+    _filter = st.radio("Show", ["All", "🔴 Higher risk", "🟡 Observed risk", "⭐ Top performers"],
                         horizontal=True, key="coaching_filter")
 
     for rec in recs:
-        if _filter == "🔴 Urgent only" and rec["priority"] != "high":
+        if _filter == "🔴 Higher risk" and rec["priority"] != "high":
             continue
-        if _filter == "🟡 Needs attention" and rec["priority"] not in ("high", "medium"):
+        if _filter == "🟡 Observed risk" and rec["priority"] not in ("high", "medium"):
             continue
         if _filter == "⭐ Top performers" and rec["priority"] != "star":
             continue
@@ -262,8 +613,8 @@ def _emp_coaching():
         dept_sel = "All departments"
         st.session_state["cn_dept"] = dept_sel
 
-    # ── Manager Action List ──────────────────────────────────────────────────
-    # Auto-generates follow-up actions for trending-down or below-goal employees
+    # ── Manager signal list ───────────────────────────────────────────────────
+    # Auto-surfaces employees with below-goal/trending-down signals.
     gs = st.session_state.get("goal_status", [])
     if "dismissed_actions" not in st.session_state:
         st.session_state.dismissed_actions = set()
@@ -295,8 +646,8 @@ def _emp_coaching():
                 })
 
     if action_items:
-        with st.expander(f"📋 **Manager Action List** — {len(action_items)} follow-up(s) needed", expanded=True):
-            st.caption("Employees trending down or below goal. Complete the follow-up, then dismiss the action.")
+        with st.expander(f"📋 **Manager Signal List** — {len(action_items)} active signal(s)", expanded=True):
+            st.caption("Employees currently trending down or below goal in the latest observed data.")
             for ai in action_items:
                 ac1, ac2, ac3 = st.columns([3, 5, 1])
                 badge = ""
@@ -366,6 +717,12 @@ def _emp_coaching():
 
     with col_detail:
         if not selected_emp:
+            _render_team_activity_comparisons(
+                tenant_id=tenant_id,
+                history_rows=history_rows,
+                goal_status=gs,
+            )
+            st.divider()
             show_partial_data_state("Select an employee from the list to view details and timeline evidence.")
         else:
             emp_id   = selected_emp["emp_id"]
@@ -435,6 +792,11 @@ def _emp_coaching():
 
             # UPH status + delta since last view
             _emp_gs = next((r for r in gs if str(r.get("EmployeeID","")) == str(emp_id)), None)
+            _detail_context = build_employee_detail_context(
+                emp_id=emp_id,
+                goal_row=_emp_gs or {},
+                history_rows=history_rows,
+            )
             if _emp_gs:
                 _trend_icon = {"up": "↑", "down": "↓", "flat": "→"}.get(_emp_gs.get("trend",""), "—")
                 _chg = _emp_gs.get("change_pct", 0)
@@ -472,13 +834,21 @@ def _emp_coaching():
                 else:
                     st.caption("No coaching on record yet.")
 
-                # ── Next step suggestion ──────────────────────────────────────
-                if _emp_gs.get("trend") == "down" and _emp_gs.get("goal_status") == "below_goal":
-                    st.warning("⚠ Performance is dropping while already below target. Reset the standard and remove blockers today.")
-                elif _emp_gs.get("trend") == "down":
-                    st.info("Performance is slipping. Suggested: quick check-in and reset one daily focus target.")
-                elif not _impact:
-                    st.info("Suggested: confirm what is working and set one measurable next-step target.")
+            _render_employee_signal_summary(_detail_context)
+            _render_employee_signal_why(_detail_context)
+            _render_employee_signal_basis(_detail_context)
+            _render_employee_trend_and_drilldown(_detail_context)
+
+            st.divider()
+
+            _render_employee_activity_comparisons(
+                tenant_id=tenant_id,
+                emp_id=emp_id,
+                expected_uph=float((_emp_gs or {}).get("Target UPH") or 0),
+                history_rows=history_rows,
+            )
+
+            st.divider()
 
             # ── Flag status ───────────────────────────────────────────────────
             if is_flagged:
@@ -495,6 +865,23 @@ def _emp_coaching():
                             r["flagged"] = False
                     st.rerun()
             
+            st.divider()
+
+            _render_employee_follow_through_panel(
+                tenant_id=tenant_id,
+                emp_id=emp_id,
+                emp_name=emp_name,
+            )
+
+            st.divider()
+
+            _render_employee_exception_panel(
+                tenant_id=tenant_id,
+                emp_id=emp_id,
+                emp_name=emp_name,
+                emp_dept=emp_dept,
+            )
+
             st.divider()
 
             # ── Action decision history (new primary profile context) ─────────
@@ -529,7 +916,7 @@ def _emp_coaching():
                             f"Trigger: {str(_a.get('trigger_summary') or '')[:120]}"
                         )
                         st.caption(
-                            f"Due: {_due or '—'} | Recommended next step: {_next_step}"
+                            f"Due: {_due or '—'} | Logged intervention type: {_next_step}"
                         )
                         st.divider()
             else:
@@ -588,8 +975,8 @@ def _emp_coaching():
                         )
                         st.caption(str(_a.get("trigger_summary") or ""))
 
-            # Full action timeline
-            with st.expander(f"Action timeline ({len(_timeline)})", expanded=False):
+            # Full follow-through timeline
+            with st.expander(f"Follow-through timeline ({len(_timeline)})", expanded=False):
                 if not _timeline:
                     st.caption("No timeline events yet.")
                 else:
@@ -600,11 +987,18 @@ def _emp_coaching():
                         _ev_note = str(_ev.get("notes") or "")
                         _ev_trigger = str(_ev.get("trigger_summary") or "")
                         st.markdown(f"**{_ev_label}** · {_ev_ts}")
-                        st.caption(
-                            f"Action #{_ev.get('action_id')} | "
-                            f"{str(_ev.get('action_type') or '').replace('_', ' ')} | "
-                            f"{_ev_trigger[:100]}"
-                        )
+                        _context_bits = []
+                        if str(_ev.get("action_id") or "").strip():
+                            _context_bits.append(f"Action #{_ev.get('action_id')}")
+                        else:
+                            _context_bits.append("Standalone log")
+                        if str(_ev.get("linked_exception_id") or "").strip():
+                            _context_bits.append(f"Exception #{_ev.get('linked_exception_id')}")
+                        if str(_ev.get("action_type") or "").strip():
+                            _context_bits.append(str(_ev.get("action_type") or "").replace("_", " "))
+                        if _ev_trigger:
+                            _context_bits.append(_ev_trigger[:100])
+                        st.caption(" | ".join(_context_bits))
                         if _ev_outcome:
                             st.caption(f"Outcome: {_ev_outcome}")
                         if _ev_note:
@@ -820,11 +1214,12 @@ def _emp_coaching():
                                 r["flagged"] = True
                         st.rerun()
 
-            # ── Coaching timeline ─────────────────────────────────────────────
+            # ── Legacy coaching timeline ──────────────────────────────────────
             notes = _cached_coaching_notes_for(emp_id)
             _n_count = len(notes)
-            _tl_lbl = f"📋 Coaching Timeline ({_n_count} entries)" if _n_count else "📋 No coaching history yet"
+            _tl_lbl = f"📋 Legacy coaching history ({_n_count} entries)" if _n_count else "📋 No legacy coaching history yet"
             with st.expander(_tl_lbl, expanded=(_n_count > 0 and _n_count <= 3)):
+                st.caption("Older coaching journal entries are preserved here for reference. New quick follow-through entries save above.")
                 if notes:
                     # Build per-note UPH impact
                     _all_h = st.session_state.get("history", [])
@@ -901,7 +1296,7 @@ def _emp_coaching():
                         st.session_state.pop("cn_selected_emp", None)
                         st.rerun()
                 else:
-                    st.caption("No coaching history yet — add a note above.")
+                    st.caption("No legacy coaching history yet.")
 
 
 
