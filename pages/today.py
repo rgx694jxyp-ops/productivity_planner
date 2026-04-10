@@ -10,29 +10,25 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from domain.insight_card_contract import InsightCardContract
+from pages.common import load_goal_status_history
 from services.action_lifecycle_service import run_all_triggers
 from services.action_metrics_service import _recent_action_outcomes, get_manager_outcome_stats
 from services.action_query_service import get_open_actions
 from services.action_recommendation_service import get_ignored_high_performers, get_repeat_offenders
-from ui.today_queue import build_action_queue, render_action_queue
-
-
-st.set_page_config(
-    page_title="Today - DPD Supervisor",
-    page_icon="📋",
-    layout="wide",
-    initial_sidebar_state="collapsed",
+from services.today_home_service import build_today_home_sections
+from services.signal_traceability_service import traceability_payload_from_card
+from ui.state_panels import (
+    show_error_state,
+    show_healthy_state,
+    show_loading_state,
+    show_low_confidence_state,
+    show_no_data_state,
+    show_partial_data_state,
+    show_success_state,
 )
-
-
-if "tenant_id" not in st.session_state:
-    st.session_state.tenant_id = ""
-
-if "today_queue_filter" not in st.session_state:
-    st.session_state.today_queue_filter = "all"
-
-if "today_auto_triggers_run" not in st.session_state:
-    st.session_state.today_auto_triggers_run = False
+from ui.traceability_panel import render_traceability_panel
+from ui.today_queue import build_action_queue, render_action_queue
 
 
 def _apply_today_styles() -> None:
@@ -77,6 +73,46 @@ def _apply_today_styles() -> None:
             text-transform: uppercase;
             color: #5d7693;
         }
+        .today-home-section {
+            margin-top: 12px;
+            margin-bottom: 10px;
+        }
+        .today-home-title {
+            font-size: 1.12rem;
+            font-weight: 800;
+            color: #0f2d52;
+            margin-bottom: 4px;
+        }
+        .today-home-desc {
+            color: #5d7693;
+            font-size: 0.92rem;
+            margin-bottom: 10px;
+        }
+        .today-insight-title {
+            font-size: 1rem;
+            font-weight: 800;
+            color: #0f2d52;
+            margin-bottom: 4px;
+        }
+        .today-insight-line {
+            color: #182b40;
+            font-size: 0.93rem;
+            line-height: 1.38;
+            margin: 3px 0;
+        }
+        .today-insight-meta {
+            color: #5d7693;
+            font-size: 0.83rem;
+            margin-top: 7px;
+        }
+        .today-placeholder {
+            background: #f8fbff;
+            border: 1px dashed #c9d9ea;
+            border-radius: 12px;
+            padding: 10px 12px;
+            color: #335a80;
+            font-size: 0.9rem;
+        }
         .today-supporting-note {
             margin-top: -2px;
             margin-bottom: 10px;
@@ -103,7 +139,27 @@ def _apply_today_styles() -> None:
 def _show_flash_message() -> None:
     message = str(st.session_state.pop("today_flash_message", "") or "")
     if message:
-        st.success(message)
+        show_success_state(message)
+
+
+def _compute_data_state_flags(goal_status: list[dict], import_summary: dict, home_sections: dict[str, list[InsightCardContract]]) -> dict[str, bool]:
+    days = int(import_summary.get("days") or 0)
+    has_goal_data = bool(goal_status)
+    below_goal_count = sum(1 for row in goal_status if str(row.get("goal_status") or "") == "below_goal")
+    low_conf_cards = [
+        card
+        for section_cards in (home_sections or {}).values()
+        for card in section_cards
+        if str(card.confidence.level or "") == "low"
+    ]
+    partial_rows = [row for row in goal_status if str(row.get("trend") or "") == "insufficient_data"]
+
+    return {
+        "no_data": not has_goal_data and days == 0,
+        "partial_data": bool(partial_rows) or (0 < days < 3),
+        "low_confidence": bool(low_conf_cards),
+        "healthy": has_goal_data and below_goal_count == 0,
+    }
 
 
 def _queue_counts(queue_items: list[dict]) -> dict[str, int]:
@@ -185,6 +241,20 @@ def _render_empty_state() -> None:
         st.info("Import fresh data to refill the queue and surface who needs attention next.")
 
 
+def _render_first_time_empty_state() -> None:
+    """Onboarding-focused empty state for users who just completed first import."""
+    with st.container(border=True):
+        st.markdown("### Welcome! 🎉")
+        st.markdown(
+            "You've just imported your team data. The action queue starts filling up once you begin logging "
+            "coaching conversations and follow-ups."
+        )
+        st.info("**Next step:** Go to **👥 Team** to see your employees, pick someone, and log your first coaching note.")
+        if st.button("👥 View team →", type="primary", use_container_width=True, key="first_time_view_team"):
+            st.session_state["goto_page"] = "team"
+            st.rerun()
+
+
 def _render_filtered_empty_state() -> None:
     with st.container(border=True):
         st.markdown("### Nothing matches this filter")
@@ -240,78 +310,267 @@ def _render_bottom_charts(queue_items: list[dict], manager_stats: dict) -> None:
         st.bar_chart(outcomes_chart)
 
 
-today_value = date.today()
+def _go_to_drill_down(item: InsightCardContract) -> None:
+    screen = str(item.drill_down.screen or "")
+    entity_id = str(item.drill_down.entity_id or "")
+    st.session_state["_drill_traceability_context"] = traceability_payload_from_card(item)
 
-_apply_today_styles()
+    if screen == "employee_detail":
+        st.session_state["goto_page"] = "team"
+        st.session_state["emp_view"] = "Performance Journal"
+        if entity_id:
+            st.session_state["cn_selected_emp"] = entity_id
+    elif screen == "team_process":
+        st.session_state["goto_page"] = "team"
+    elif screen == "import_data_trust":
+        st.session_state["goto_page"] = "import"
+    elif screen == "today":
+        st.session_state["goto_page"] = "today"
+    else:
+        st.session_state["goto_page"] = "today"
 
-st.markdown(
-    """
+    st.rerun()
+
+
+def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
+    with st.container(border=True):
+        st.markdown(f'<div class="today-insight-title">{item.title}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-insight-line"><strong>What happened:</strong> {item.what_happened}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-insight-line"><strong>Compared to what:</strong> {item.compared_to_what}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-insight-line"><strong>Why shown:</strong> {item.why_flagged}</div>', unsafe_allow_html=True)
+
+        confidence_basis = item.confidence.basis or "evidence basis available"
+        confidence_note = f"Confidence: {item.confidence.level.title()} ({confidence_basis})"
+        if item.confidence.caveat:
+            confidence_note = f"{confidence_note}. {item.confidence.caveat}"
+        st.markdown(f'<div class="today-insight-meta">{confidence_note}</div>', unsafe_allow_html=True)
+
+        workload_note = item.workload_context.volume_note or "Volume/workload context not available for this signal."
+        st.markdown(f'<div class="today-insight-meta">Workload: {workload_note}</div>', unsafe_allow_html=True)
+
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            with st.expander("Context and source details", expanded=False):
+                st.write(f"Time window: {item.time_context.observed_window_label}")
+                if item.time_context.compared_window_label:
+                    st.write(f"Compared with: {item.time_context.compared_window_label}")
+                st.write(f"Data completeness: {item.data_completeness.summary}")
+                if item.traceability.date_range_used:
+                    st.write(f"Date range used: {item.traceability.date_range_used}")
+                if item.traceability.baseline_or_target_used:
+                    st.write(f"Baseline/target used: {item.traceability.baseline_or_target_used}")
+                if item.traceability.linked_entity_label or item.traceability.linked_entity_id:
+                    st.write(
+                        "Linked context: "
+                        f"{item.traceability.linked_entity_label or item.traceability.linked_entity_id}"
+                    )
+                review_areas = list(item.metadata.get("optional_review_areas") or [])
+                if review_areas:
+                    st.write(f"Areas to review: {', '.join(review_areas)}")
+                if item.source_references:
+                    st.markdown("**Sources**")
+                    for source in item.source_references:
+                        st.caption(f"{source.source_name}")
+                st.caption("Detailed source evidence is available in drill-down.")
+
+        with c2:
+            if st.button(item.drill_down.label, key=f"{key_prefix}_{item.insight_id}", use_container_width=True):
+                _go_to_drill_down(item)
+
+
+def _render_section_placeholder(message: str, todo_note: str, *, key: str) -> None:
+    with st.container(border=True):
+        st.markdown(f'<div class="today-placeholder">{message}</div>', unsafe_allow_html=True)
+        with st.expander("TODO scaffolding", expanded=False):
+            st.caption(todo_note)
+        if st.button("View Data Trust", key=key, use_container_width=True):
+            st.session_state["goto_page"] = "import"
+            st.rerun()
+
+
+def _render_home_section(
+    *,
+    section_title: str,
+    section_description: str,
+    items: list[InsightCardContract],
+    key_prefix: str,
+    placeholder_message: str,
+    placeholder_todo: str,
+) -> None:
+    st.markdown('<div class="today-home-section">', unsafe_allow_html=True)
+    st.markdown(f'<div class="today-home-title">{section_title}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="today-home-desc">{section_description}</div>', unsafe_allow_html=True)
+    if not items:
+        _render_section_placeholder(placeholder_message, placeholder_todo, key=f"{key_prefix}_placeholder")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    for item in items:
+        _render_insight_card(item, key_prefix=key_prefix)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def page_today() -> None:
+    if "tenant_id" not in st.session_state:
+        st.session_state.tenant_id = ""
+
+    if "today_queue_filter" not in st.session_state:
+        st.session_state.today_queue_filter = "all"
+
+    if "today_auto_triggers_run" not in st.session_state:
+        st.session_state.today_auto_triggers_run = False
+
+    today_value = date.today()
+
+    _apply_today_styles()
+
+    _trace_ctx = st.session_state.get("_drill_traceability_context") or {}
+    if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"today", ""}:
+        render_traceability_panel(_trace_ctx, heading="Signal source context")
+
+    st.markdown(
+        """
     <div class="today-hero">
         <div class="today-hero-kicker">Today Queue</div>
         <div class="today-hero-title">Who needs your attention today?</div>
         <div class="today-hero-copy">In under a minute, see who needs attention, understand why, log the next move, and keep the floor moving.</div>
     </div>
     """,
-    unsafe_allow_html=True,
-)
-_show_flash_message()
+        unsafe_allow_html=True,
+    )
+    _show_flash_message()
 
-if not st.session_state.today_auto_triggers_run:
-    with st.spinner("Refreshing the action queue..."):
-        run_all_triggers(tenant_id=st.session_state.tenant_id)
-    st.session_state.today_auto_triggers_run = True
+    try:
+        if not st.session_state.today_auto_triggers_run:
+            loading_slot = st.empty()
+            with loading_slot.container():
+                show_loading_state("Refreshing the action queue and latest context.")
+            with st.spinner("Refreshing the action queue..."):
+                run_all_triggers(tenant_id=st.session_state.tenant_id)
+            loading_slot.empty()
+            st.session_state.today_auto_triggers_run = True
 
-open_actions = get_open_actions(tenant_id=st.session_state.tenant_id, today=today_value)
-repeat_offenders = get_repeat_offenders(
-    tenant_id=st.session_state.tenant_id,
-    today=today_value,
-    open_actions=open_actions,
-)
-ignored_high_performers = get_ignored_high_performers(
-    tenant_id=st.session_state.tenant_id,
-    today=today_value,
-    open_actions=open_actions,
-)
-queue_items = build_action_queue(
-    open_actions=open_actions,
-    repeat_offenders=repeat_offenders,
-    recognition_opportunities=ignored_high_performers,
-    tenant_id=st.session_state.tenant_id,
-    today=today_value,
-)
-counts = _queue_counts(queue_items)
+        open_actions = get_open_actions(tenant_id=st.session_state.tenant_id, today=today_value)
+        repeat_offenders = get_repeat_offenders(
+            tenant_id=st.session_state.tenant_id,
+            today=today_value,
+            open_actions=open_actions,
+        )
+        ignored_high_performers = get_ignored_high_performers(
+            tenant_id=st.session_state.tenant_id,
+            today=today_value,
+            open_actions=open_actions,
+        )
+        queue_items = build_action_queue(
+            open_actions=open_actions,
+            repeat_offenders=repeat_offenders,
+            recognition_opportunities=ignored_high_performers,
+            tenant_id=st.session_state.tenant_id,
+            today=today_value,
+        )
+        counts = _queue_counts(queue_items)
+        goal_status, _ = load_goal_status_history("Loading Today context…")
+        goal_status = goal_status or []
+        import_summary = st.session_state.get("_import_complete_summary") or {}
+        home_sections = build_today_home_sections(
+            queue_items=queue_items,
+            goal_status=goal_status,
+            import_summary=import_summary,
+            today=today_value,
+        )
+    except Exception as exc:
+        show_error_state(f"Today screen data could not load cleanly: {exc}")
+        return
 
-st.markdown('<div class="today-section-label">Queue Summary</div>', unsafe_allow_html=True)
-_render_summary_strip(counts, st.session_state.today_queue_filter)
-st.write("")
+    state_flags = _compute_data_state_flags(goal_status, import_summary, home_sections)
+    if state_flags["no_data"]:
+        show_no_data_state()
+    if state_flags["partial_data"]:
+        missing_days = int(import_summary.get("days") or 0)
+        partial_note = (
+            f"Current history window is {missing_days} day(s). More days improve trend reliability."
+            if missing_days > 0
+            else "Some trend rows are incomplete and will become more reliable as data coverage grows."
+        )
+        show_partial_data_state(partial_note)
+    if state_flags["low_confidence"]:
+        show_low_confidence_state("Low-confidence signals are shown with clear caveats and may update as new data arrives.")
+    if state_flags["healthy"] and counts.get("all", 0) == 0:
+        show_healthy_state()
 
-filtered_queue = _filter_queue(queue_items, st.session_state.today_queue_filter)
-recent_outcomes = _recent_action_outcomes(lookback_days=1, tenant_id=st.session_state.tenant_id)
+    st.markdown('<div class="today-section-label">Queue Summary</div>', unsafe_allow_html=True)
+    _render_summary_strip(counts, st.session_state.today_queue_filter)
+    st.write("")
 
-st.markdown('<div class="today-section-label">Action Queue</div>', unsafe_allow_html=True)
-st.markdown('<div class="today-supporting-note">Top items stay visible first. Overdue actions float to the top until they are updated.</div>', unsafe_allow_html=True)
-if filtered_queue:
-    st.caption(f"Showing {len(filtered_queue)} actionable item{'s' if len(filtered_queue) != 1 else ''}.")
-    render_action_queue(
-        queue_items=filtered_queue,
+    _render_home_section(
+        section_title="Needs Attention",
+        section_description="Open items that are currently active in the follow-through queue.",
+        items=home_sections.get("needs_attention", []),
+        key_prefix="today_needs_attention",
+        placeholder_message="No active attention items right now.",
+        placeholder_todo="TODO: Keep this section linked to real-time queue trigger refresh cadence.",
+    )
+
+    _render_home_section(
+        section_title="Changed from Normal",
+        section_description="Visible shifts in trend compared with each person's recent baseline context.",
+        items=home_sections.get("changed_from_normal", []),
+        key_prefix="today_changed_normal",
+        placeholder_message="No clear changed-from-normal signals are available yet.",
+        placeholder_todo="TODO: Expand trend confidence when enough consecutive observations are present.",
+    )
+
+    _render_home_section(
+        section_title="Unresolved Items",
+        section_description="Items that remain open past expected follow-up timing or appear repeatedly.",
+        items=home_sections.get("unresolved_items", []),
+        key_prefix="today_unresolved",
+        placeholder_message="No unresolved items are currently surfaced.",
+        placeholder_todo="TODO: Add issue-type specific unresolved-age benchmarks once service defaults are finalized.",
+    )
+
+    _render_home_section(
+        section_title="Data Warnings",
+        section_description="Data quality and completeness context that may affect signal confidence.",
+        items=home_sections.get("data_warnings", []),
+        key_prefix="today_data_warnings",
+        placeholder_message="No active data warnings from current session context.",
+        placeholder_todo="TODO: Wire structured import diagnostics for row-level completeness breakdown.",
+    )
+
+    filtered_queue = _filter_queue(queue_items, st.session_state.today_queue_filter)
+    recent_outcomes = _recent_action_outcomes(lookback_days=1, tenant_id=st.session_state.tenant_id)
+
+    st.markdown('<div class="today-section-label">Action Queue Details</div>', unsafe_allow_html=True)
+    st.markdown('<div class="today-supporting-note">Expanded evidence and logging controls for open queue items.</div>', unsafe_allow_html=True)
+    if filtered_queue:
+        st.caption(f"Showing {len(filtered_queue)} actionable item{'s' if len(filtered_queue) != 1 else ''}.")
+        render_action_queue(
+            queue_items=filtered_queue,
+            tenant_id=st.session_state.tenant_id,
+            performed_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
+            today=today_value,
+        )
+    elif counts["all"]:
+        _render_filtered_empty_state()
+    else:
+        # Check if this is first-time user (just completed import)
+        is_first_time = st.session_state.get("_first_import_just_completed", False)
+        if is_first_time:
+            st.session_state["_first_import_just_completed"] = False  # Show first-time state only once
+            _render_first_time_empty_state()
+        else:
+            _render_empty_state()
+
+    st.write("")
+    st.markdown('<div class="today-section-label">Since Yesterday</div>', unsafe_allow_html=True)
+    _render_since_yesterday(queue_items, recent_outcomes)
+
+    st.write("")
+    manager_stats = get_manager_outcome_stats(
         tenant_id=st.session_state.tenant_id,
-        performed_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
+        lookback_days=7,
         today=today_value,
     )
-elif counts["all"]:
-    _render_filtered_empty_state()
-else:
-    _render_empty_state()
-
-st.write("")
-st.markdown('<div class="today-section-label">Since Yesterday</div>', unsafe_allow_html=True)
-_render_since_yesterday(queue_items, recent_outcomes)
-
-st.write("")
-manager_stats = get_manager_outcome_stats(
-    tenant_id=st.session_state.tenant_id,
-    lookback_days=7,
-    today=today_value,
-)
-st.markdown('<div class="today-section-label">Supporting Context</div>', unsafe_allow_html=True)
-_render_bottom_charts(queue_items, manager_stats)
+    st.markdown('<div class="today-section-label">Supporting Context</div>', unsafe_allow_html=True)
+    _render_bottom_charts(queue_items, manager_stats)

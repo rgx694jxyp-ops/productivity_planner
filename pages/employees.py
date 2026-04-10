@@ -35,6 +35,16 @@ from ui.components import (
     show_coaching_impact,
 )
 from ui.floor_language import translate_to_floor_language
+from ui.state_panels import (
+    show_error_state,
+    show_healthy_state,
+    show_loading_state,
+    show_low_confidence_state,
+    show_no_data_state,
+    show_partial_data_state,
+    show_success_state,
+)
+from ui.traceability_panel import render_traceability_panel
 try:
     from pages.common import _build_coaching_recommendations
 except Exception:
@@ -56,6 +66,10 @@ def page_employees():
     st.title("👥 Employees")
     if not require_db(): return
     tenant_id = str(st.session_state.get("tenant_id", "") or "")
+
+    _trace_ctx = st.session_state.get("_drill_traceability_context") or {}
+    if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"employee_detail", "team_process"}:
+        render_traceability_panel(_trace_ctx, heading="Signal source context")
 
     # Apply requested view switch before employees_view_tab widget is instantiated.
     _pending_emp_view = st.session_state.pop("_employees_set_view", None)
@@ -104,7 +118,7 @@ def page_employees():
         else:
             _emp_ai_coaching()
     except Exception as e:
-        st.error(f"Error: {e}")
+        show_error_state(f"Employees view could not load cleanly: {e}")
         _log_app_error("employees", f"Employee page error: {e}", detail=traceback.format_exc())
 
 
@@ -114,7 +128,7 @@ def _emp_history():
     st.subheader("Employee UPH history")
     emps = _cached_employees()
     if not emps:
-        st.info("No employees yet. Go to **Import Data** to upload a CSV — employees are created automatically from your data.")
+        show_no_data_state()
         return
 
     # ── Department filter → populates employee dropdown ───────────────────────
@@ -124,7 +138,7 @@ def _emp_history():
     filtered_emps = filter_employees_by_department(emps, dept_sel)
 
     if not filtered_emps:
-        st.info("No employees in that department.")
+        show_partial_data_state("No employees are currently mapped to that department filter.")
         return
 
     # Employee dropdown: Name — Department — ID
@@ -155,7 +169,7 @@ def _emp_history():
     history = (_hist_result.get("data") or {}).get("history", [])
 
     if not history:
-        st.info("No history yet for this employee.")
+        show_partial_data_state("No history is available for this employee in the selected date range.")
         return
 
     _frames = build_employee_history_frames(history)
@@ -168,10 +182,11 @@ def _emp_history():
     if not df_chart.empty:
         st.line_chart(df_chart.set_index("Date")[["UPH"]], use_container_width=True)
     else:
-        st.info("No valid UPH data to chart for this date range.")
+        show_low_confidence_state("No reliable pace values were found for this date range.")
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     if st.button("⬇️ Export employee history"):
+        show_loading_state("Preparing employee history export.")
         with st.spinner("Generating…"):
             data = export_employee(emp_id)
         st.download_button(f"⬇️ Download {emp_id}_history.xlsx", data,
@@ -190,7 +205,7 @@ def _emp_ai_coaching():
 
     recs = _build_coaching_recommendations()
     if not recs:
-        st.info("No coaching data available. Import productivity data and set department goals first.")
+        show_partial_data_state("Coaching insight context is not available yet. Add productivity history and targets to populate this view.")
         return
 
     # Summary metrics
@@ -236,7 +251,7 @@ def _emp_coaching():
     flags = _cached_active_flags()
     history_rows = st.session_state.get("history", [])
     if not emps:
-        st.info("No employees yet. Go to **Import Data** to upload a CSV — employees are created automatically from your data.")
+        show_no_data_state()
         return
 
     # ── Build employee list — all employees, annotate who has notes / is flagged
@@ -298,7 +313,7 @@ def _emp_coaching():
                 st.rerun()
     else:
         if gs:
-            st.success("✓ No follow-ups needed — all employees are on track.")
+            show_healthy_state()
 
     # ── Top bar: dept filter ──────────────────────────────────────────────────
     _render_breadcrumb("employees", dept_sel if dept_sel != "All departments" else None)
@@ -351,7 +366,7 @@ def _emp_coaching():
 
     with col_detail:
         if not selected_emp:
-            st.info("← Select an employee from the list")
+            show_partial_data_state("Select an employee from the list to view details and timeline evidence.")
         else:
             emp_id   = selected_emp["emp_id"]
             emp_name = selected_emp["name"]
@@ -365,6 +380,7 @@ def _emp_coaching():
                 _fb_remaining = _cn_fb["remaining"]
                 _fb_emp_safe  = str(_cn_fb["emp_name"])[:40]
                 if _fb_remaining == 0:
+                    show_success_state(f"{_fb_emp_safe}: note saved and current follow-up list is clear.")
                     st.markdown(
                         '<div class="dpd-shift-done">'
                         '<div class="dpd-shift-done-icon">🎉</div>'
@@ -377,6 +393,7 @@ def _emp_coaching():
                         st.session_state["goto_page"] = "supervisor"
                         st.rerun()
                 else:
+                    show_success_state(f"{_fb_emp_safe}: note saved and timeline updated.")
                     _pl = "employee" if _fb_remaining == 1 else "employees"
                     # Find next highest-risk below-goal employee
                     _nxt_gs = sorted(

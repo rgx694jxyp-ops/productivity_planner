@@ -1,0 +1,65 @@
+{
+  "dataset_summary": {
+    "employees": 32,
+    "history_days": 18,
+    "history_start": "2026-03-22",
+    "history_end": "2026-04-08",
+    "preseeded_actions": 9
+  },
+  "scenario_index": [
+    {
+      "employee_id": "EMP003",
+      "employee_name": "Jamie Carter",
+      "scenario": "Overdue follow-up",
+      "story": "Supervisor coached Jamie, promised a follow-up, and the due date passed. Today shows the missed loop immediately."
+    },
+    {
+      "employee_id": "EMP014",
+      "employee_name": "Riley Chen",
+      "scenario": "Overdue follow-up",
+      "story": "Riley had one follow-up logged, but the next check never happened. This demonstrates queue persistence and overdue prioritization."
+    },
+    {
+      "employee_id": "EMP007",
+      "employee_name": "Morgan Lee",
+      "scenario": "Due today",
+      "story": "Morgan is a same-day follow-up: some improvement, but still not at target. Good for showing a fast coaching loop."
+    },
+    {
+      "employee_id": "EMP021",
+      "employee_name": "Taylor Brooks",
+      "scenario": "Due today",
+      "story": "Taylor is blocked by process friction, not effort. This helps tell a story about diagnosing blockers, not just pushing harder."
+    },
+    {
+      "employee_id": "EMP009",
+      "employee_name": "Casey Patel",
+      "scenario": "Repeat no-improvement",
+      "story": "Casey has multiple no-change and worse outcomes. This is the escalation example because coaching alone is not working."
+    },
+    {
+      "employee_id": "EMP018",
+      "employee_name": "Jordan Kim",
+      "scenario": "Repeat no-improvement",
+      "story": "Jordan is already escalated after repeated misses. This shows the product captures management history, not just today's snapshot."
+    },
+    {
+      "employee_id": "EMP011",
+      "employee_name": "Avery Stone",
+      "scenario": "Recognition opportunity",
+      "story": "Avery is a top performer with no recognition touchpoint logged. This proves the product also reinforces wins."
+    },
+    {
+      "employee_id": "EMP026",
+      "employee_name": "Cameron Price",
+      "scenario": "Recognition opportunity",
+      "story": "Cameron is another high performer, useful for showing recognition can become a development conversation, not just a pat on the back."
+    },
+    {
+      "employee_id": "EMP005",
+      "employee_name": "Sam Rivera",
+      "scenario": "Resolved win",
+      "story": "Sam started below target, improved after coaching, and was closed as a win. This gives you a before/after proof point in the demo."
+    }
+  ]
+}

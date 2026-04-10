@@ -574,6 +574,122 @@ def page_settings():
 
     # ── Advanced tab ─────────────────────────────────────────────────────
     with tab_advanced:
+        # ── Demo data loader ─────────────────────────────────────────────
+        st.subheader("🎬 Load Demo Data")
+        st.caption(
+            "Seed your tenant with a realistic 32-employee, 18-day dataset "
+            "and 9 pre-built action scenarios for demos and testing. "
+            "This adds rows to your database — use on a demo / sandbox tenant only."
+        )
+        with st.expander("Demo scenario overview", expanded=False):
+            st.markdown(
+                """
+| Employee | Scenario | What to show |
+|---|---|---|
+| Jamie Carter | **Overdue follow-up** | Supervisor coached but never closed the loop |
+| Riley Chen | **Overdue follow-up** | Two logged touchpoints, next follow-up slipped |
+| Devon Tran | **Due today** | Partial improvement after coaching, not at target yet |
+| Marcus Brooks | **Due today** | Flat output — process blocker, not effort |
+| Casey Patel | **Repeat no-improvement** | Three coaching cycles, still declining — escalation story |
+| Jordan Kim | **Repeat no-improvement** | Already escalated — shows tracking past attempts |
+| Avery Stone | **Recognition opportunity** | Top packer, no recognition logged in 2 weeks |
+| Victor Salazar | **Recognition opportunity** | Steady high output — turn it into a development conversation |
+| Sam Rivera | **Resolved win** | Dipped, coached, recovered above baseline — before/after proof point |
+"""
+            )
+
+        _demo_clear = st.checkbox(
+            "Clear existing demo rows first (removes rows where created_by = demo.supervisor@example.com)",
+            key="demo_seed_clear",
+        )
+        _demo_btn = st.button("⬇️ Load demo actions into this tenant", key="demo_seed_run", type="primary")
+
+        if _demo_btn:
+            _demo_tid = st.session_state.get("tenant_id", "")
+            if not _demo_tid:
+                st.error("No tenant ID found in session. Make sure you are logged in.")
+            else:
+                import json as _json
+                from pathlib import Path as _Path
+
+                _seed_dir = _Path(__file__).resolve().parents[1] / "demo_data"
+                _actions_file = _seed_dir / "demo_actions_seed.json"
+                _events_file = _seed_dir / "demo_action_events_seed.json"
+
+                if not _actions_file.exists() or not _events_file.exists():
+                    st.error(
+                        "Demo seed files not found. Run `python scripts/generate_demo_dataset.py` first."
+                    )
+                else:
+                    try:
+                        from repositories._common import get_client as _get_db_client
+
+                        _sb = _get_db_client()
+                        _actions_raw = _json.loads(_actions_file.read_text())
+                        _events_raw = _json.loads(_events_file.read_text())
+
+                        if _demo_clear:
+                            with st.spinner("Clearing existing demo rows..."):
+                                _sb.table("action_events").delete().eq(
+                                    "tenant_id", _demo_tid
+                                ).eq("performed_by", "demo.supervisor@example.com").execute()
+                                _sb.table("actions").delete().eq(
+                                    "tenant_id", _demo_tid
+                                ).eq("created_by", "demo.supervisor@example.com").execute()
+
+                        _seed_id_to_db: dict = {}
+                        _action_errors = 0
+                        with st.spinner(f"Inserting {len(_actions_raw)} actions..."):
+                            for _a in _actions_raw:
+                                _seed_id = _a["id"]
+                                _payload = {k: v for k, v in _a.items() if k != "id"}
+                                _payload["tenant_id"] = _demo_tid
+                                for _ts in ("resolved_at", "escalated_at"):
+                                    if _payload.get(_ts) in (None, "", "null"):
+                                        _payload[_ts] = None
+                                _res = _sb.table("actions").insert(_payload).execute()
+                                if _res.data:
+                                    _seed_id_to_db[_seed_id] = str(_res.data[0]["id"])
+                                else:
+                                    _action_errors += 1
+
+                        _event_errors = 0
+                        with st.spinner(f"Inserting {len(_events_raw)} action events..."):
+                            for _e in _events_raw:
+                                _db_aid = _seed_id_to_db.get(_e["action_id"])
+                                if not _db_aid:
+                                    _event_errors += 1
+                                    continue
+                                _ep = {k: v for k, v in _e.items() if k != "id"}
+                                _ep["tenant_id"] = _demo_tid
+                                _ep["action_id"] = _db_aid
+                                if _ep.get("next_follow_up_at") in (None, "", "null"):
+                                    _ep["next_follow_up_at"] = None
+                                _eres = _sb.table("action_events").insert(_ep).execute()
+                                if not _eres.data:
+                                    _event_errors += 1
+
+                        if _action_errors or _event_errors:
+                            st.warning(
+                                f"Loaded with some issues: {_action_errors} action error(s), "
+                                f"{_event_errors} event error(s). Check the error log below."
+                            )
+                        else:
+                            st.success(
+                                f"✓ Demo data loaded: {len(_seed_id_to_db)} actions and "
+                                f"{len(_events_raw)} events added to tenant {_demo_tid}."
+                            )
+                            st.info(
+                                "Next: open the **Import** page and upload "
+                                "`demo_data/demo_supervisor_history.csv` to add the 18-day "
+                                "performance history. Then go to **Today** to see the queue."
+                            )
+                    except Exception as _demo_err:
+                        st.error(f"Demo seed failed: {_demo_err}")
+
+        st.divider()
+
+        # ── Error log ─────────────────────────────────────────────────────
         st.subheader("Error Log")
         st.caption("Diagnostics and troubleshooting tools for admins.")
         st.caption("Recent errors and warnings logged by the application. Use this to diagnose issues.")

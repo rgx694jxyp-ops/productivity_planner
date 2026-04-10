@@ -130,6 +130,13 @@ def render_sidebar() -> str:
 </div>""",
             unsafe_allow_html=True,
         )
+        
+        # First-time badge (shown once after first import)
+        if st.session_state.get("_first_import_just_completed"):
+            st.markdown(
+                '<div style="background:#E8F0F9;border:1px solid #C5D4E8;border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px;color:#0F2D52;font-weight:600;text-align:center;">ℹ️ First session</div>',
+                unsafe_allow_html=True,
+            )
 
         st.divider()
         nav_items = [

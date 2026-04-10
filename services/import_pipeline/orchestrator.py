@@ -13,6 +13,7 @@ from services.import_pipeline.mapper import review_mapping
 from services.import_pipeline.models import ImportCommitResult, ImportIssue, ImportPreviewResult, ImportSummary, MappingReview
 from services.import_pipeline.parser import parse_sessions_to_rows
 from services.import_pipeline.validator import validate_rows
+from services.import_trust_service import trust_summary_from_issues
 
 
 def _build_import_fingerprint(rows: list[dict]) -> str:
@@ -93,6 +94,13 @@ def preview_import(sessions: list[dict], *, fallback_date: date, tenant_id: str 
             duplicate_rows_in_file=duplicate_rows_in_file,
             duplicate_rows_existing=(len(candidate_rows) if exact_duplicate else 0),
         )
+        trust_summary = trust_summary_from_issues(
+            total_rows=summary.total_rows,
+            accepted_rows=summary.valid_rows,
+            issues=issues,
+            duplicates=summary.duplicate_rows_in_file + summary.duplicate_rows_existing,
+            missing_required_fields=len(all_required_missing),
+        )
 
         can_import = (not all_required_missing) and bool(candidate_rows) and (not exact_duplicate)
         if all_required_missing:
@@ -143,6 +151,7 @@ def preview_import(sessions: list[dict], *, fallback_date: date, tenant_id: str 
             exact_duplicate_import=exact_duplicate,
             fingerprint=fingerprint,
             message=message,
+            trust_summary=trust_summary,
         )
     except Exception as error:
         log_error(
@@ -178,6 +187,7 @@ def confirm_import(preview: ImportPreviewResult, *, tenant_id: str, upload_name:
             summary=preview.summary,
             issues=[ImportIssue(code="not_confirmable", message=preview.message, severity="error")],
             message="Import blocked. Resolve preview issues and try again.",
+            trust_summary=preview.trust_summary,
         )
 
     try:
@@ -223,6 +233,7 @@ def confirm_import(preview: ImportPreviewResult, *, tenant_id: str, upload_name:
             summary=summary,
             upload_id=upload_id,
             message=f"Import completed successfully: {inserted_rows} row(s) inserted.",
+            trust_summary=preview.trust_summary,
         )
     except Exception as error:
         log_error(
@@ -237,4 +248,5 @@ def confirm_import(preview: ImportPreviewResult, *, tenant_id: str, upload_name:
             summary=preview.summary,
             issues=[ImportIssue(code="import_failed", message="Import failed while saving data.", severity="error")],
             message="Import failed while saving data. Please try again. If it keeps failing, contact support.",
+            trust_summary=preview.trust_summary,
         )

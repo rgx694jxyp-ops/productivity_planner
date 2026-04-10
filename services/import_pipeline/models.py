@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Severity = Literal["error", "warning", "info"]
+DataQualityStatus = Literal["valid", "partial", "low_confidence", "invalid"]
 
 
 @dataclass
@@ -37,6 +38,19 @@ class ImportSummary:
 
 
 @dataclass
+class ImportTrustSummary:
+    status: DataQualityStatus = "invalid"
+    accepted_rows: int = 0
+    rejected_rows: int = 0
+    warnings: int = 0
+    duplicates: int = 0
+    missing_required_fields: int = 0
+    inconsistent_names: int = 0
+    suspicious_values: int = 0
+    confidence_score: int = 0
+
+
+@dataclass
 class ImportPreviewResult:
     success: bool
     can_import: bool
@@ -47,6 +61,7 @@ class ImportPreviewResult:
     exact_duplicate_import: bool = False
     fingerprint: str = ""
     message: str = ""
+    trust_summary: ImportTrustSummary = field(default_factory=ImportTrustSummary)
 
 
 @dataclass
@@ -56,3 +71,4 @@ class ImportCommitResult:
     issues: list[ImportIssue] = field(default_factory=list)
     upload_id: Any = None
     message: str = ""
+    trust_summary: ImportTrustSummary = field(default_factory=ImportTrustSummary)

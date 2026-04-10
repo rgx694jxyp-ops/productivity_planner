@@ -15,9 +15,16 @@ from services.action_lifecycle_service import (
     save_action_touchpoint,
 )
 from services.action_recommendation_service import get_action_recommendation
+from services.plain_language_service import (
+    action_code_from_recommendation,
+    action_label,
+    outcome_code,
+    outcome_label,
+)
 
 MAX_VISIBLE_QUEUE_ITEMS = 7
-OUTCOME_OPTIONS = ["improved", "no_change", "worse", "blocked", "not_applicable"]
+OUTCOME_CODES = ["improved", "no_change", "worse", "blocked", "not_applicable"]
+OUTCOME_OPTIONS = [outcome_label(code) for code in OUTCOME_CODES]
 
 
 def _escape_html(value: object) -> str:
@@ -167,22 +174,13 @@ def _good_looks_like(action: dict) -> str:
 
     baseline_uph = float(action.get("baseline_uph") or 0.0)
     if baseline_uph > 0:
-        return f"Get back to at least {baseline_uph:.0f} UPH and hold it."
+        return f"Previous baseline context: {baseline_uph:.0f} UPH."
 
-    return "Close the loop with a clear next step and a scheduled follow-up."
+    return "Follow-up context is available in this item's timeline."
 
 
 def _primary_cta_label(recommendation: str) -> str:
-    mapping = {
-        "coach today": "Coach now",
-        "follow up": "Follow up",
-        "follow up now": "Follow up",
-        "recognize": "Recognize",
-        "escalate": "Escalate",
-        "deprioritize": "Deprioritize",
-        "continue": "Follow up",
-    }
-    return mapping.get(recommendation, "Follow up")
+    return action_label(action_code_from_recommendation(recommendation))
 
 
 def _build_repeat_lookup(repeat_offenders: list[dict]) -> dict[str, dict]:
@@ -199,7 +197,7 @@ def _why_this_is_here(action: dict, recommendation: dict, queue_status: str) -> 
     if queue_status == "due_today":
         return "This item is due today, so it belongs in the active queue for this shift."
     if action.get("_is_repeat_issue"):
-        return "This employee has a repeated pattern of open issues, so normal coaching may not be enough."
+        return "This employee has a repeated open pattern, so it stays visible for closer follow-through."
     if action.get("_is_recognition_opportunity"):
         return "This person is doing well and no recognition touchpoint has been logged yet."
 
@@ -252,6 +250,7 @@ def build_action_queue(
 
         enriched["_queue_status"] = queue_status
         enriched["_recommendation"] = str(recommendation.get("recommendation") or "follow up")
+        enriched["_primary_action_code"] = action_code_from_recommendation(enriched["_recommendation"])
         enriched["_primary_cta"] = _primary_cta_label(enriched["_recommendation"])
         enriched["_short_reason"] = _short_reason(action)
         enriched["_good_looks_like"] = _good_looks_like(action)
@@ -306,11 +305,11 @@ def _build_status_chips(action: dict) -> str:
 
 
 def _default_outcome_index(primary_cta: str) -> int:
-    if primary_cta == "Recognize":
-        return OUTCOME_OPTIONS.index("not_applicable")
-    if primary_cta in {"Escalate", "Deprioritize"}:
-        return OUTCOME_OPTIONS.index("no_change")
-    return OUTCOME_OPTIONS.index("improved")
+    if primary_cta == action_label("log_recognition"):
+        return OUTCOME_CODES.index("not_applicable")
+    if primary_cta in {action_label("mark_for_review"), action_label("lower_urgency")}:
+        return OUTCOME_CODES.index("no_change")
+    return OUTCOME_CODES.index("improved")
 
 
 def _action_form_key(action_id: str) -> str:
@@ -326,11 +325,11 @@ def _set_flash_and_refresh(message: str, action_id: str) -> None:
 def _submit_primary_action(action: dict, outcome: str, note: str, next_follow_up_at: str, tenant_id: str, performed_by: str) -> bool:
     action_id = str(action.get("id") or "")
     employee_id = str(action.get("employee_id") or "")
-    primary_cta = str(action.get("_primary_cta") or "Follow up")
+    primary_action_code = str(action.get("_primary_action_code") or "log_follow_up")
     note_text = str(note or "").strip()
     submitted = False
 
-    if primary_cta == "Recognize":
+    if primary_action_code == "log_recognition":
         note_payload = note_text
         if outcome and outcome != "not_applicable":
             note_payload = f"outcome={outcome}\n{note_text}".strip()
@@ -343,7 +342,7 @@ def _submit_primary_action(action: dict, outcome: str, note: str, next_follow_up
             tenant_id=tenant_id,
         )
         submitted = bool(result)
-    elif primary_cta == "Escalate":
+    elif primary_action_code == "mark_for_review":
         reason = f"outcome={outcome}\nnote={note_text}".strip()
         result = mark_action_escalated(action_id=action_id, reason=reason, tenant_id=tenant_id)
         if result:
@@ -358,7 +357,7 @@ def _submit_primary_action(action: dict, outcome: str, note: str, next_follow_up
                 tenant_id=tenant_id,
             )
         submitted = bool(result)
-    elif primary_cta == "Deprioritize":
+    elif primary_action_code == "lower_urgency":
         reason = f"outcome={outcome}\nnote={note_text}".strip()
         result = mark_action_deprioritized(action_id=action_id, reason=reason, tenant_id=tenant_id)
         if result:
@@ -374,7 +373,7 @@ def _submit_primary_action(action: dict, outcome: str, note: str, next_follow_up
             )
         submitted = bool(result)
     else:
-        event_type = "coached" if primary_cta == "Coach now" else "follow_up_logged"
+        event_type = "coached" if primary_action_code == "log_check_in" else "follow_up_logged"
         result = save_action_touchpoint(
             action_id=action_id,
             event_type=event_type,
@@ -425,7 +424,7 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
                         <div class="today-copy-value">{_escape_html(action.get('_why_this_is_here'))}</div>
                     </div>
                     <div class="today-copy-block">
-                        <div class="today-copy-label">What good looks like</div>
+                        <div class="today-copy-label">Context target</div>
                         <div class="today-copy-value">{_escape_html(action.get('_good_looks_like'))}</div>
                     </div>
                 </div>
@@ -458,14 +457,15 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
             st.rerun()
 
         if st.session_state.get(form_key, False):
-            default_schedule = primary_cta not in {"Escalate", "Deprioritize"}
+            default_schedule = primary_cta not in {action_label("mark_for_review"), action_label("lower_urgency")}
             with st.form(key=f"today_action_form_{action_id}", clear_on_submit=False):
-                outcome = st.selectbox(
+                outcome_display = st.selectbox(
                     "Outcome",
                     options=OUTCOME_OPTIONS,
                     index=_default_outcome_index(primary_cta),
                     key=f"today_outcome_{action_id}",
                 )
+                outcome = outcome_code(outcome_display)
                 note = st.text_area(
                     "Note (optional)",
                     value="",

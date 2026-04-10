@@ -30,13 +30,95 @@ from services.import_service import (
     _find_matching_upload_by_fingerprint,
     _build_candidate_uph_rows,
 )
+from services.import_pipeline.orchestrator import preview_import as _pipeline_preview_import
+from services.import_pipeline.job_service import (
+    complete_job as _complete_import_job,
+    create_import_job as _create_import_job,
+    mark_stage_completed as _mark_import_stage_completed,
+    mark_stage_failed as _mark_import_stage_failed,
+    mark_stage_in_progress as _mark_import_stage_in_progress,
+    serialize_job as _serialize_import_job,
+)
+from services.import_pipeline.mapping_profiles import (
+    build_mapping_profile_payload as _build_mapping_profile_payload,
+    get_recent_mapping_profile as _get_recent_mapping_profile,
+)
+from services.import_trust_service import build_import_trust_summary
+from ui.traceability_panel import render_traceability_panel
 
+
+
+_TRUST_STATUS_LABELS = {
+    "valid": "Valid",
+    "partial": "Partial",
+    "low_confidence": "Low confidence",
+    "invalid": "Invalid",
+}
+
+
+def _render_import_trust_summary(trust: dict, *, heading: str) -> None:
+    _status = str(trust.get("status", "invalid") or "invalid")
+    _score = int(trust.get("confidence_score", 0) or 0)
+    _accepted = int(trust.get("accepted_rows", 0) or 0)
+    _rejected = int(trust.get("rejected_rows", 0) or 0)
+    _warnings = int(trust.get("warnings", 0) or 0)
+    _duplicates = int(trust.get("duplicates", 0) or 0)
+    _missing_required = int(trust.get("missing_required_fields", 0) or 0)
+    _inconsistent = int(trust.get("inconsistent_names", 0) or 0)
+    _suspicious = int(trust.get("suspicious_values", 0) or 0)
+
+    st.markdown(f"**{heading}**")
+    st.caption(
+        f"Status: {_TRUST_STATUS_LABELS.get(_status, _status.title())} · "
+        f"Confidence score: {_score}/100"
+    )
+    _m1, _m2, _m3, _m4 = st.columns(4)
+    _m1.metric("Accepted rows", f"{_accepted:,}")
+    _m2.metric("Rejected rows", f"{_rejected:,}")
+    _m3.metric("Warnings", f"{_warnings:,}")
+    _m4.metric("Duplicates", f"{_duplicates:,}")
+    _d1, _d2, _d3 = st.columns(3)
+    _d1.caption(f"Missing required fields: {_missing_required:,}")
+    _d2.caption(f"Inconsistent names: {_inconsistent:,}")
+    _d3.caption(f"Suspicious values: {_suspicious:,}")
+
+
+def _render_row_error_summary(issues: list[dict]) -> None:
+    if not issues:
+        return
+
+    error_rows = [issue for issue in issues if str(issue.get("severity", "error")) == "error"]
+    warning_rows = [issue for issue in issues if str(issue.get("severity", "error")) == "warning"]
+
+    st.markdown("**Row-level validation details**")
+    c1, c2 = st.columns(2)
+    c1.metric("Row errors", f"{len(error_rows):,}")
+    c2.metric("Row warnings", f"{len(warning_rows):,}")
+
+    preview = []
+    for issue in issues[:80]:
+        preview.append(
+            {
+                "Severity": str(issue.get("severity", "error") or "error").title(),
+                "Row": int(issue.get("row_index", 0) or 0),
+                "Field": str(issue.get("field", "") or ""),
+                "Code": str(issue.get("code", "") or ""),
+                "Message": str(issue.get("message", "") or ""),
+                "Value": str(issue.get("value", "") or ""),
+            }
+        )
+    if preview:
+        st.dataframe(pd.DataFrame(preview), use_container_width=True, hide_index=True)
 
 
 
 def page_import():
     st.title("📁 Import Data")
     tenant_id = str(st.session_state.get("tenant_id", "") or "")
+
+    _trace_ctx = st.session_state.get("_drill_traceability_context") or {}
+    if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) == "import_data_trust":
+        render_traceability_panel(_trace_ctx, heading="Signal source context")
 
     # Keep expander headings readable on themed backgrounds.
     st.markdown(
@@ -145,6 +227,8 @@ def _import_step1(tenant_id: str):
                     _ins = int(_stats.get("inserted_rows", 0) or 0)
                     _cand = int(_stats.get("candidate_rows", _u.get("row_count", 0)) or 0)
                     _exact_dup = bool(_stats.get("exact_duplicate_import"))
+                    _trust_status = str(_stats.get("trust_status", "") or "")
+                    _trust_score = int(_stats.get("confidence_score", 0) or 0)
                     _status = "Undone" if _undo_applied else ("Active" if _is_active else "Inactive")
 
                     _hdr = f"{_u.get('filename', 'Upload')} ({(_u.get('created_at') or '')[:16].replace('T', ' ')})"
@@ -153,6 +237,12 @@ def _import_step1(tenant_id: str):
                             f"Status: {_status} · Candidate rows: {_cand} · Inserted: {_ins} · "
                             f"Duplicates: {_dup}{' · Exact duplicate import' if _exact_dup else ''}"
                         )
+                        if _trust_status:
+                            st.caption(
+                                "Data quality: "
+                                f"{_TRUST_STATUS_LABELS.get(_trust_status, _trust_status.title())} "
+                                f"({_trust_score}/100)"
+                            )
 
                         if _is_active and _ins > 0:
                             if st.button("Remove upload and rollback data", key=f"remove_upload_{_uid}"):
@@ -349,6 +439,11 @@ def _import_step1(tenant_id: str):
             for s in sessions:
                 headers = s.get("headers", list(s.get("rows",[{}])[0].keys()) if s.get("rows") else [])
                 auto = _auto_detect(headers)
+                profile = _get_recent_mapping_profile(
+                    tenant_id=tenant_id,
+                    headers=headers,
+                )
+
                 has_id   = bool(auto.get("EmployeeID"))
                 has_name = bool(auto.get("EmployeeName"))
                 has_uph  = bool(auto.get("UPH")) or (bool(auto.get("Units")) and bool(auto.get("HoursWorked")))
@@ -362,6 +457,19 @@ def _import_step1(tenant_id: str):
                         "UPH":         auto.get("UPH", ""),
                         "Units":       auto.get("Units", ""),
                         "HoursWorked": auto.get("HoursWorked", ""),
+                    }
+                elif profile and profile.get("EmployeeID") and profile.get("EmployeeName") and (
+                    profile.get("UPH") or (profile.get("Units") and profile.get("HoursWorked"))
+                ):
+                    s["mapping"] = {
+                        "Date":        profile.get("Date", ""),
+                        "EmployeeID":  profile.get("EmployeeID", ""),
+                        "EmployeeName":profile.get("EmployeeName", ""),
+                        "Department":  profile.get("Department", ""),
+                        "Shift":       profile.get("Shift", ""),
+                        "UPH":         profile.get("UPH", ""),
+                        "Units":       profile.get("Units", ""),
+                        "HoursWorked": profile.get("HoursWorked", ""),
                     }
                 else:
                     all_auto = False
@@ -457,12 +565,15 @@ def _import_step2(tenant_id: str):
                     st.session_state.pop(f"fm_{idx}_UPH_u", None)
             st.session_state[_prev_key] = saved_src
             
+            st.markdown("**UPH source** — How to calculate units per hour")
+            st.caption("Most warehouses track units picked/packed and hours worked. DPD will divide them for performance metrics.")
             uph_src = st.radio(
-                "UPH source",
+                "",
                 ["Calculate: Units ÷ Hours", "Already have UPH column"],
                 index=1 if "Already" in saved_src else 0,
                 key=uph_src_key,
                 horizontal=True,
+                label_visibility="collapsed",
             )
 
             ca, cb = st.columns(2)
@@ -665,26 +776,35 @@ def _import_step3(tenant_id: str):
         _ic_below = _sm.get("below", 0)
         _ic_risks = _sm.get("risks", 0)
         _ic_rank  = _sm.get("ranked", 0)
+        _ic_trust = _sm.get("trust") or {}
         _ic_below_line = (
             f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-warn" style="color:#8a5a00;">⚠</span>&nbsp;'
             f'<strong>{_ic_below}</strong> employees below goal &nbsp;·&nbsp; {_ic_risks} high-priority risks</div>'
             if _ic_below > 0 else
             f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-ok" style="color:#1f6f2a;">✔</span>&nbsp;All employees on target</div>'
         )
+        _ic_next_label = f"You have {_ic_below} employee{'s' if _ic_below != 1 else ''} below goal." if _ic_below > 0 else "All employees are on target. "
+        _ic_context = (
+            f"Ready to coach and track outcomes." if _ic_below > 0 
+            else f"Great shape! Start logging notes to track team trends."
+        )
         st.markdown(
             f'<div class="dpd-import-done" style="background:#ffffff;border:1px solid #d9e2ef;border-radius:10px;padding:14px 16px;">'
-            f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">✔ Import complete — you\'re ready</div>'
-            f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-ok" style="color:#1f6f2a;">✔</span>&nbsp;'
-            f'<strong>{_ic_emp}</strong> employees loaded &nbsp;·&nbsp; {_ic_rank} ranked</div>'
-            f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-ok" style="color:#1f6f2a;">✔</span>&nbsp;'
-            f'<strong>{_ic_days}</strong> {"day" if _ic_days == 1 else "days"} of data</div>'
+            f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">✔ Import complete — ready to go</div>'
+            f'<div class="dpd-import-row" style="color:#000000;font-size:14px;line-height:1.5;margin-bottom:8px;"><span style="color:#5d7693;">'
+            f'<strong>{_ic_emp}</strong> employees · <strong>{_ic_days}</strong> {"day" if _ic_days == 1 else "days"} of data</span></div>'
             f'{_ic_below_line}'
+            f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:10px;">{_ic_next_label} {_ic_context}</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
+        if _ic_trust:
+            _render_import_trust_summary(_ic_trust, heading="Import trust indicators")
         _ic_c1, _ic_c2 = st.columns(2)
-        if _ic_c1.button("→ Start your day", type="primary", use_container_width=True, key="ic_start_day"):
+        _ic_btn_label = f"View team ({_ic_below} need attention)" if _ic_below > 0 else "View your team"
+        if _ic_c1.button(f"👥 {_ic_btn_label}", type="primary", use_container_width=True, key="ic_start_day"):
             del st.session_state["_import_complete_summary"]
+            st.session_state["_first_import_just_completed"] = True
             st.session_state["goto_page"] = "supervisor"
             st.rerun()
         if _ic_c2.button("↺ Import more data", use_container_width=True, key="ic_import_more"):
@@ -901,12 +1021,53 @@ def _import_step3(tenant_id: str):
 
     _preview_overlap_count = _preview_dup_count
     _preview_new_count = 0 if _preview_exact_duplicate_import else len(_candidate_preview_rows)
+    _preview_result_obj = None
+    _preview_trust_summary = {}
+    _preview_row_issues = []
+    try:
+        _preview_result_obj = _pipeline_preview_import(
+            sessions,
+            fallback_date=work_date,
+            tenant_id=tenant_id,
+        )
+        if _preview_result_obj and _preview_result_obj.success:
+            _preview_trust_summary = {
+                "status": _preview_result_obj.trust_summary.status,
+                "confidence_score": _preview_result_obj.trust_summary.confidence_score,
+                "accepted_rows": _preview_result_obj.trust_summary.accepted_rows,
+                "rejected_rows": _preview_result_obj.trust_summary.rejected_rows,
+                "warnings": _preview_result_obj.trust_summary.warnings,
+                "duplicates": _preview_result_obj.trust_summary.duplicates,
+                "missing_required_fields": _preview_result_obj.trust_summary.missing_required_fields,
+                "inconsistent_names": _preview_result_obj.trust_summary.inconsistent_names,
+                "suspicious_values": _preview_result_obj.trust_summary.suspicious_values,
+            }
+            _preview_row_issues = [
+                {
+                    "code": issue.code,
+                    "message": issue.message,
+                    "severity": issue.severity,
+                    "row_index": issue.row_index,
+                    "field": issue.field,
+                    "value": issue.value,
+                }
+                for issue in (_preview_result_obj.invalid_issues or [])
+            ]
+    except Exception:
+        _preview_trust_summary = {}
+        _preview_row_issues = []
+
     with st.expander("👀 Preview parsed data before import", expanded=True):
         _preview_days = len(_preview_dates) if _preview_dates else 1
         st.caption(
             f"Sample preview of parsed rows. About {_preview_days} day(s) and "
             f"{len(_preview_emp_ids)} unique employee ID(s) detected."
         )
+        if _preview_trust_summary:
+            _render_import_trust_summary(_preview_trust_summary, heading="Projected data quality and trust")
+        if _preview_row_issues:
+            with st.expander("Show row-level validation issues", expanded=False):
+                _render_row_error_summary(_preview_row_issues)
         if _candidate_preview_rows:
             if _preview_exact_duplicate_import:
                 st.markdown(
@@ -957,6 +1118,27 @@ def _import_step3(tenant_id: str):
             all_rows.extend(s["rows"])
             if not all_mapping and s.get("mapping"):
                 all_mapping = s["mapping"]
+
+        _upload_names = [s.get("filename", "") for s in sessions if s.get("filename")]
+        _upload_name = ", ".join(_upload_names).strip() or "Import"
+        _import_job = _create_import_job(
+            tenant_id=tenant_id,
+            upload_name=_upload_name,
+            total_rows=len(all_rows),
+        )
+        _mark_import_stage_completed(
+            _import_job,
+            "map",
+            meta={"mapped_fields": int(sum(1 for v in (all_mapping or {}).values() if str(v or "").strip()))},
+        )
+        _mark_import_stage_in_progress(_import_job, "validate")
+        _validate_meta = {
+            "row_errors": int(sum(1 for i in (_preview_row_issues or []) if str(i.get("severity", "error")) == "error")),
+            "row_warnings": int(sum(1 for i in (_preview_row_issues or []) if str(i.get("severity", "error")) == "warning")),
+            "accepted_rows": int(_preview_trust_summary.get("accepted_rows", 0) or 0),
+            "rejected_rows": int(_preview_trust_summary.get("rejected_rows", 0) or 0),
+        }
+        _mark_import_stage_completed(_import_job, "validate", meta=_validate_meta)
 
         _progress_container = st.container()
         with _progress_container:
@@ -1377,7 +1559,9 @@ def _import_step3(tenant_id: str):
 
             # Store UPH history synchronously so data is in DB before pipeline completes
             try:
+                _mark_import_stage_in_progress(_import_job, "persist")
                 _bg_tid = st.session_state.get("tenant_id", "")
+                _final_trust_summary = {}
                 if _bg_tid:
                     uph_batch = [{**r, "tenant_id": _bg_tid} for r in uph_batch]
                 from database import batch_store_uph_history as _batch_store_uph_history
@@ -1428,16 +1612,62 @@ def _import_step3(tenant_id: str):
                         pass
 
                 if _bg_tid:
+                    _preview_missing_required = int(_preview_trust_summary.get("missing_required_fields", 0) or 0)
+                    _preview_warning_count = int(_preview_trust_summary.get("warnings", 0) or 0)
+                    _quality_warning_count = _preview_warning_count
+                    if name_fixed_count > 0:
+                        _quality_warning_count += 1
+                    if (uph_rejected_count + neg_value_fixed_count) > 0:
+                        _quality_warning_count += 1
+
+                    _final_trust = build_import_trust_summary(
+                        total_rows=int(_candidate_count),
+                        accepted_rows=int(len(uph_batch)),
+                        duplicates=int(_dup_skipped),
+                        missing_required_fields=int(_preview_missing_required),
+                        inconsistent_names=int(name_fixed_count),
+                        suspicious_values=int(uph_rejected_count + neg_value_fixed_count),
+                        warnings=int(_quality_warning_count),
+                    )
+                    _final_trust_summary = {
+                        "status": str(_final_trust.status),
+                        "confidence_score": int(_final_trust.confidence_score),
+                        "accepted_rows": int(_final_trust.accepted_rows),
+                        "rejected_rows": int(_final_trust.rejected_rows),
+                        "warnings": int(_final_trust.warnings),
+                        "duplicates": int(_final_trust.duplicates),
+                        "missing_required_fields": int(_final_trust.missing_required_fields),
+                        "inconsistent_names": int(_final_trust.inconsistent_names),
+                        "suspicious_values": int(_final_trust.suspicious_values),
+                    }
+                    _profile_headers = []
+                    for _sess in sessions:
+                        _profile_headers = list(_sess.get("headers") or [])
+                        if _profile_headers:
+                            break
                     _upload_payload = {
                         "files": [s.get("filename", "") for s in sessions],
                         "data_fingerprint": _batch_fingerprint,
+                        "mapping_profile": _build_mapping_profile_payload(
+                            headers=_profile_headers,
+                            mapping=all_mapping,
+                        ),
                         "stats": {
                             "candidate_rows": int(_candidate_count),
                             "inserted_rows": int(len(uph_batch)),
                             "duplicate_rows": int(_dup_skipped),
                             "replaced_rows": int(_replaced_existing_rows),
                             "exact_duplicate_import": bool(_exact_duplicate_import),
+                            "accepted_rows": int(_final_trust.accepted_rows),
+                            "rejected_rows": int(_final_trust.rejected_rows),
+                            "warnings": int(_final_trust.warnings),
+                            "missing_required_fields": int(_final_trust.missing_required_fields),
+                            "inconsistent_names": int(_final_trust.inconsistent_names),
+                            "suspicious_values": int(_final_trust.suspicious_values),
+                            "trust_status": str(_final_trust.status),
+                            "confidence_score": int(_final_trust.confidence_score),
                         },
+                        "import_job": _serialize_import_job(_import_job),
                         "undo": {
                             "tenant_id": _bg_tid,
                             "new_row_ids": _new_row_ids,
@@ -1472,7 +1702,30 @@ def _import_step3(tenant_id: str):
                         f"Overlap handled: replaced {_replaced_existing_rows} existing history row(s) "
                         f"and uploaded {len(uph_batch)} fresh row(s)."
                     )
+                if not _final_trust_summary:
+                    _final_trust_summary = {
+                        "status": "invalid",
+                        "confidence_score": 0,
+                        "accepted_rows": int(len(uph_batch)),
+                        "rejected_rows": int(max(0, _candidate_count - len(uph_batch))),
+                        "warnings": 0,
+                        "duplicates": int(_dup_skipped),
+                        "missing_required_fields": 0,
+                        "inconsistent_names": int(name_fixed_count),
+                        "suspicious_values": int(uph_rejected_count + neg_value_fixed_count),
+                    }
+                _mark_import_stage_completed(
+                    _import_job,
+                    "persist",
+                    meta={
+                        "inserted_rows": int(len(uph_batch)),
+                        "duplicate_rows": int(_dup_skipped),
+                        "replaced_rows": int(_replaced_existing_rows),
+                    },
+                )
             except Exception as _uph_err:
+                _mark_import_stage_failed(_import_job, "persist", error=str(_uph_err))
+                _complete_import_job(_import_job, success=False)
                 _show_user_error(
                     "Could not save imported history right now.",
                     next_steps=(
@@ -1574,13 +1827,29 @@ def _import_step3(tenant_id: str):
                 "below":     _below_final,
                 "risks":     _risks_final,
                 "days":      _estimated_days,
+                "trust":     _final_trust_summary,
+                "import_job": _serialize_import_job(_import_job),
+                "import_file": _upload_name,
             }
+            _mark_import_stage_in_progress(_import_job, "summarize")
+            _mark_import_stage_completed(
+                _import_job,
+                "summarize",
+                meta={
+                    "employees": int(_unique_emp_count),
+                    "below_goal": int(_below_final),
+                    "risks": int(_risks_final),
+                },
+            )
+            _complete_import_job(_import_job, success=True)
             
             # Clear the progress bar before rerun
             _progress_container.empty()
             st.rerun()
 
         except Exception as _pipe_err:
+            _mark_import_stage_failed(_import_job, _import_job.current_stage or "persist", error=str(_pipe_err))
+            _complete_import_job(_import_job, success=False)
             _tb = traceback.format_exc()
             st.error("Pipeline error:")
             st.code(_tb)

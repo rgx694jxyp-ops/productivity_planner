@@ -10,6 +10,10 @@ from datetime import date, timedelta
 from domain.actions import IssueType, NO_IMPROVEMENT_OUTCOMES, OPEN_STATUSES
 from repositories import action_events_repo, actions_repo
 
+_REPEAT_ISSUE_TYPES: frozenset[str] = frozenset({
+    IssueType.REPEAT_NO_IMPROVEMENT,
+})
+
 def get_repeat_offenders(
     tenant_id: str = "",
     today: date | None = None,
@@ -66,7 +70,11 @@ def get_repeat_offenders(
             max_days_open = max(days_open_list) if days_open_list else 0
 
             # Initial screen: skip employees who are neither repeat nor stale
-            if len(emp_actions) < 2 and max_days_open < stale_days_threshold:
+            has_repeat_type = any(
+                str(a.get("issue_type") or "") in _REPEAT_ISSUE_TYPES
+                for a in emp_actions
+            )
+            if len(emp_actions) < 2 and max_days_open < stale_days_threshold and not has_repeat_type:
                 continue
 
             # Load events across all actions for this employee

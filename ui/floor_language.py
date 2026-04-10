@@ -1,5 +1,7 @@
 """UI-facing language translations and confidence messaging."""
 
+from services.plain_language_service import describe_attention_level
+
 
 def translate_to_floor_language(technical_term: str, context: dict | None = None) -> str:
     """Convert technical jargon to supervisor-friendly language."""
@@ -19,13 +21,7 @@ def translate_to_floor_language(technical_term: str, context: dict | None = None
 
 def risk_to_human_language(risk_level: str, context: dict | None = None) -> str:
     """Convert risk color codes to actionable language."""
-    if "🔴" in str(risk_level) or "High" in str(risk_level):
-        return "Needs coaching ⏰ - performance is well below target"
-    if "🟡" in str(risk_level) or "Medium" in str(risk_level):
-        return "Check in soon 💬 - starting to slide or inconsistent"
-    if "🟢" in str(risk_level) or "Low" in str(risk_level):
-        return "Doing well ✓ - on track"
-    return "Needs attention"
+    return describe_attention_level(str(risk_level))
 
 
 def human_confidence_message(
