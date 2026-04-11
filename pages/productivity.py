@@ -22,6 +22,7 @@ from cache import (
     raw_cached_coaching_notes_for as _raw_cached_coaching_notes_for,
     raw_cached_targets as _raw_cached_targets,
 )
+from services.target_service import list_configurable_processes, normalize_process_name
 try:
     from pages.common import _normalize_label_text
 except Exception:
@@ -75,9 +76,12 @@ def page_productivity():
     _render_session_context_bar()
 
     try:
-        from goals          import (analyse_trends, build_goal_status, get_all_targets,
-                                    set_dept_target, flag_employee, unflag_employee,
-                                    add_note, get_active_flags, load_goals, save_goals)
+        from goals          import (analyse_trends, build_goal_status, clear_employee_target_override,
+                                    clear_process_target, get_active_flags, get_all_targets,
+                                    get_employee_target_overrides, load_goals, save_configured_processes,
+                                    save_goals, set_default_target, set_employee_target_override,
+                                    set_process_target, flag_employee, unflag_employee,
+                                    add_note)
         from ranker         import build_department_report
         from error_log      import ErrorLog
         from exporter       import export_excel
@@ -200,11 +204,11 @@ def page_productivity():
 
     # ── DEPT GOALS ────────────────────────────────────────────────────────────
     if chosen_prod == "🎯 Dept Goals":
-        st.subheader("Department UPH targets")
-        st.caption("Set a simple target for each department. Once targets are in place, the app can tell you who is on track and who needs help.")
+        st.subheader("Performance targets")
+        st.caption("Set one default target, refine it by process, and add an employee override only when needed.")
         st.caption("Trend window and Top/Bottom % only affect ranking/highlighting views.")
 
-        st.info("Quick start: if you do not have formal standards yet, enter your best current expectation for each department and refine later.")
+        st.info("Quick start: start with one default target, then only add process or employee targets where expectations are meaningfully different.")
 
         with st.expander("Advanced scoring controls"):
             tw = st.slider("Trend window used for trend scoring (weeks)", 2, 12,
@@ -228,60 +232,83 @@ def page_productivity():
 
         targets   = _cached_targets()
         goals_obj = load_goals()
+        process_targets = goals_obj.get("process_targets") or {}
+        default_target = float(goals_obj.get("default_target_uph", 0) or 0)
+        configured_processes = list_configurable_processes(goals_obj)
 
-        # Auto-populate departments from all available sources
+        # Auto-populate processes from all available sources.
         if st.session_state.pipeline_done:
-            all_depts = set()
-            # From goal_status
+            all_depts = set(configured_processes)
             for r in st.session_state.get("goal_status", []):
                 if r.get("Department"): all_depts.add(r["Department"])
-            # From top_performers
             for r in st.session_state.get("top_performers", []):
                 if r.get("Department"): all_depts.add(r["Department"])
-            # From employees table (catches archived data with blank uph_history dept)
             for e in (_cached_employees() or []):
                 if e.get("department"): all_depts.add(e["department"])
             for d in all_depts:
-                if d and d not in targets:
-                    set_dept_target(d, 0.0)
+                process_name = normalize_process_name(d, goals_obj) or str(d or "").strip()
+                if process_name and process_name not in process_targets:
+                    set_process_target(process_name, float(process_targets.get(process_name, 0) or 0))
                     _clear_targets_cache()
+            goals_obj = load_goals()
+            process_targets = goals_obj.get("process_targets") or {}
             targets = _cached_targets()
 
-        dept_list  = sorted(targets.keys())
+        process_list: list[str] = []
+        seen_processes: set[str] = set()
+        for raw_name in [*configured_processes, *sorted(process_targets.keys()), *sorted(targets.keys())]:
+            canonical_name = normalize_process_name(raw_name, goals_obj) or str(raw_name or "").strip()
+            if not canonical_name or canonical_name in seen_processes:
+                continue
+            seen_processes.add(canonical_name)
+            process_list.append(canonical_name)
         goal_changed = False
         pending_goal_changes: list[tuple[str, float, float]] = []
 
-        if not dept_list:
-            st.info("No departments yet. Run Import Data first — departments are detected automatically from your CSV.")
+        with st.container(border=True):
+            st.markdown("**Default target**")
+            st.caption("Used when a process target or employee override is not set.")
+            new_default_target = st.number_input(
+                "Default target UPH",
+                min_value=0.0,
+                value=float(default_target or 0),
+                step=1.0,
+                key="default_target_uph_input",
+            )
+            if st.button("Save default target", key="save_default_target", type="primary", use_container_width=True):
+                set_default_target(new_default_target)
+                _audit("GOAL_TARGET_DEFAULT", f"default | {default_target} → {new_default_target}")
+                _clear_targets_cache()
+                goal_changed = True
+
+        st.divider()
+
+        if not process_list:
+            st.info("No processes yet. Run Import Data first or add a custom process below.")
         else:
-            # Header row
             hc1, hc2, hc3 = st.columns([3, 2, 1])
-            hc1.markdown("**Department**")
+            hc1.markdown("**Process**")
             hc2.markdown("**UPH Target**")
             hc3.markdown("")
             st.divider()
 
-            for dept in dept_list:
-                cur = float(targets.get(dept, 0) or 0)
+            for process_name in process_list:
+                cur = float(process_targets.get(process_name, targets.get(process_name, 0)) or 0)
                 c1, c2, c3 = st.columns([3, 2, 1])
-                c1.markdown(f"**{dept}**")
+                c1.markdown(f"**{process_name}**")
 
-                # Seed text input once — don't overwrite after user changes it
-                seed_key = f"goal_seed_{dept}"
-                txt_key  = f"goal_txt_{dept}"
+                seed_key = f"goal_seed_{process_name}"
+                txt_key  = f"goal_txt_{process_name}"
                 if seed_key not in st.session_state:
                     st.session_state[seed_key] = True
-                    # Seed from persisted JSON value — this runs on every fresh session
                     st.session_state[txt_key] = str(int(cur)) if cur else ""
                 elif txt_key not in st.session_state:
-                    # Key was cleared somehow — re-seed from JSON
                     st.session_state[txt_key] = str(int(cur)) if cur else ""
 
                 c2.text_input("UPH", key=txt_key,
                               label_visibility="collapsed",
                               placeholder="e.g. 18")
 
-                # Parse draft value; defer DB writes until explicit save.
                 raw = st.session_state.get(txt_key, "")
                 try:
                     new_val = float(raw.strip()) if raw.strip() else 0.0
@@ -289,28 +316,89 @@ def page_productivity():
                     new_val = cur
 
                 if abs(new_val - cur) > 0.001:
-                    pending_goal_changes.append((dept, cur, new_val))
+                    pending_goal_changes.append((process_name, cur, new_val))
 
-                if c3.button("✕", key=f"rm_dept_{dept}", help="Remove department"):
-                    goals_obj["dept_targets"].pop(dept, None)
-                    save_goals(goals_obj)
+                if c3.button("✕", key=f"rm_process_{process_name}", help="Clear process target"):
+                    clear_process_target(process_name)
                     _clear_targets_cache()
                     st.session_state.pop(seed_key, None)
                     st.session_state.pop(txt_key,  None)
                     goal_changed = True
 
             if pending_goal_changes:
-                st.info(f"{len(pending_goal_changes)} unsaved goal change(s).")
-                if st.button("Save goal changes", key="save_dept_goal_changes", type="primary", use_container_width=True):
-                    for _dept, _cur, _new in pending_goal_changes:
-                        set_dept_target(_dept, _new)
-                        _audit("GOAL_TARGET", f"{_dept} | {_cur} → {_new}")
+                st.info(f"{len(pending_goal_changes)} unsaved process target change(s).")
+                if st.button("Save process target changes", key="save_process_goal_changes", type="primary", use_container_width=True):
+                    for _process_name, _cur, _new in pending_goal_changes:
+                        set_process_target(_process_name, _new)
+                        _audit("GOAL_TARGET_PROCESS", f"{_process_name} | {_cur} → {_new}")
                     _clear_targets_cache()
                     goal_changed = True
 
-        # Departments are added automatically from the pipeline — no manual add form
+        with st.expander("Add custom process", expanded=False):
+            with st.form("custom_process_form", clear_on_submit=True):
+                custom_process_name = st.text_input("Process name", placeholder="Example: Cycle Count")
+                custom_aliases = st.text_input("Similar names (comma-separated)", placeholder="Example: count, counting")
+                add_custom_process = st.form_submit_button("Add process", type="primary")
+                if add_custom_process and str(custom_process_name or "").strip():
+                    latest_goals = load_goals()
+                    existing_processes = list(latest_goals.get("configured_processes") or [])
+                    process_name = str(custom_process_name or "").strip()
+                    aliases = [alias.strip() for alias in str(custom_aliases or "").split(",") if alias.strip()]
+                    if not any(normalize_process_name(process_name, {"configured_processes": [entry]}) == entry.get("name") for entry in existing_processes):
+                        existing_processes.append({"name": process_name, "aliases": aliases})
+                        save_configured_processes(existing_processes, tenant_id=tenant_id)
+                        _clear_targets_cache()
+                        goal_changed = True
 
-        # Reapply goals to all charts after any change
+        with st.expander("Employee overrides", expanded=False):
+            overrides = get_employee_target_overrides(tenant_id)
+            employee_rows = _cached_employees() or []
+            employee_options = {
+                f"{str(row.get('name') or row.get('emp_id') or 'Unknown')} ({str(row.get('department') or 'No process')})": str(row.get("emp_id") or "")
+                for row in employee_rows
+                if str(row.get("emp_id") or "").strip()
+            }
+            if employee_options:
+                selected_label = st.selectbox("Employee", list(employee_options.keys()), key="employee_target_override_emp")
+                selected_emp_id = employee_options.get(selected_label, "")
+                override_target = st.number_input(
+                    "Override target UPH",
+                    min_value=0.0,
+                    value=float((overrides.get(selected_emp_id) or {}).get("target_uph") or 0),
+                    step=1.0,
+                    key="employee_target_override_value",
+                )
+                override_process_options = ["Any process", *process_list] if process_list else ["Any process"]
+                current_override_process = str((overrides.get(selected_emp_id) or {}).get("process_name") or "")
+                override_process = st.selectbox(
+                    "Process (optional)",
+                    override_process_options,
+                    index=override_process_options.index(current_override_process) if current_override_process in override_process_options else 0,
+                    key="employee_target_override_process",
+                )
+                c1, c2 = st.columns(2)
+                if c1.button("Save employee override", key="save_employee_target_override", type="primary", use_container_width=True):
+                    set_employee_target_override(
+                        selected_emp_id,
+                        override_target,
+                        "" if override_process == "Any process" else override_process,
+                        tenant_id=tenant_id,
+                    )
+                    _audit("GOAL_TARGET_EMPLOYEE", f"{selected_emp_id} | {override_target}")
+                    _clear_targets_cache()
+                    goal_changed = True
+                if c2.button("Clear employee override", key="clear_employee_target_override", use_container_width=True):
+                    clear_employee_target_override(selected_emp_id, tenant_id=tenant_id)
+                    _clear_targets_cache()
+                    goal_changed = True
+
+            if overrides:
+                st.markdown("**Current overrides**")
+                for emp_id, override in list(overrides.items())[:12]:
+                    target_uph = float((override or {}).get("target_uph") or 0)
+                    process_name = str((override or {}).get("process_name") or "Any process")
+                    st.caption(f"{emp_id}: {target_uph:.1f} UPH | {process_name}")
+
         if goal_changed and st.session_state.pipeline_done:
             _reapply_goals()
             st.toast("✓ Goals updated", icon="🎯")

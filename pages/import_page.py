@@ -30,7 +30,6 @@ from services.import_service import (
     _find_matching_upload_by_fingerprint,
     _build_candidate_uph_rows,
 )
-from services.import_pipeline.orchestrator import preview_import as _pipeline_preview_import
 from services.import_pipeline.job_service import (
     complete_job as _complete_import_job,
     create_import_job as _create_import_job,
@@ -44,8 +43,119 @@ from services.import_pipeline.mapping_profiles import (
     get_recent_mapping_profile as _get_recent_mapping_profile,
 )
 from services.import_trust_service import build_import_trust_summary
+from jobs.entrypoints import run_import_postprocess_job, run_import_preview_job
+from services.import_quality_service import (
+    ISSUE_HANDLING_CHOICES,
+    ISSUE_HANDLING_LABELS,
+    build_issue_groups,
+    build_latest_import_summary,
+    trust_level_from_summary,
+)
 from ui.traceability_panel import render_traceability_panel
+from models.import_quality_models import LatestImportSummary
+from services.trend_classification_service import normalize_trend_state
+from services.onboarding_service import build_first_import_insight
 
+
+# ---------------------------------------------------------------------------
+# Sample template
+# ---------------------------------------------------------------------------
+
+# Minimal realistic CSV that new users can fill in and upload immediately.
+_SAMPLE_TEMPLATE_CSV = (
+    "Date,EmployeeID,EmployeeName,Department,Units,HoursWorked\n"
+    "2026-04-07,1001,Alex Chen,Picking,420,8.0\n"
+    "2026-04-07,1002,Jamie Park,Picking,385,7.5\n"
+    "2026-04-07,1003,Sam Rivera,Packing,290,8.0\n"
+    "2026-04-07,1004,Taylor Moore,Receiving,210,6.0\n"
+    "2026-04-07,1005,Jordan Lee,Picking,445,8.0\n"
+)
+
+
+# ---------------------------------------------------------------------------
+# First-insight renderer (post-import completion screen)
+# ---------------------------------------------------------------------------
+
+def _render_first_import_insight(insight: dict) -> None:
+    """Render the trust-first first-insight section on the completion screen."""
+    conf_label = str(insight.get("confidence_label") or "Low")
+    conf_score = int(insight.get("confidence_score") or 0)
+    conf_colors = {"High": "#1f6f2a", "Medium": "#8a5a00", "Low": "#c0392b"}
+    conf_color = conf_colors.get(conf_label, "#555")
+
+    st.markdown(
+        '<div style="margin-top:14px;margin-bottom:4px;font-size:0.75rem;font-weight:700;'
+        'letter-spacing:0.08em;text-transform:uppercase;color:#5d7693;">'
+        'Your first look</div>',
+        unsafe_allow_html=True,
+    )
+    with st.container(border=True):
+        st.markdown(
+            f'<div style="font-size:0.93rem;line-height:1.45;margin-bottom:6px;">'
+            f'<strong>What happened:</strong> {insight["what_happened"]}</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div style="font-size:0.93rem;line-height:1.45;margin-bottom:6px;">'
+            f'<strong>Compared to what:</strong> {insight["compared_to_what"]}</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div style="font-size:0.93rem;line-height:1.45;margin-bottom:6px;">'
+            f'<strong>Confidence:</strong> '
+            f'<span style="color:{conf_color};font-weight:700;">{conf_label}</span>'
+            f' ({conf_score}/100) — {insight["confidence_basis"]}</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div style="font-size:0.93rem;line-height:1.45;margin-bottom:6px;">'
+            f'<strong>Why shown:</strong> {insight["why_shown"]}</div>',
+            unsafe_allow_html=True,
+        )
+        if insight.get("confidence_note"):
+            st.info(insight["confidence_note"])
+
+        top_item = insight.get("top_item")
+        if top_item is not None:
+            st.divider()
+            st.markdown(
+                '<div style="font-size:0.83rem;font-weight:700;color:#5d7693;'
+                'text-transform:uppercase;letter-spacing:0.06em;">'
+                'Highest-priority signal</div>',
+                unsafe_allow_html=True,
+            )
+            tier = str(getattr(top_item, "attention_tier", "") or "")
+            tier_colors = {"high": "#c0392b", "medium": "#e67e22", "low": "#7f8c8d"}
+            tier_color = tier_colors.get(tier, "#555")
+            summary = str(getattr(top_item, "attention_summary", "") or "")
+            reasons = list(getattr(top_item, "attention_reasons", []) or [])
+            employee_id = str(getattr(top_item, "employee_id", "") or "")
+            process_name = str(getattr(top_item, "process_name", "") or "")
+            score = int(getattr(top_item, "attention_score", 0) or 0)
+            process_label = f" ({process_name})" if process_name and process_name.lower() != "unassigned" else ""
+            st.markdown(
+                f'<div style="border-left:4px solid {tier_color};padding-left:10px;margin-top:6px;">'
+                f'<span style="font-weight:700;">{employee_id}{process_label}</span> — '
+                f'<span style="color:{tier_color};font-size:0.88rem;">'
+                f'{tier.title()} priority · score {score}/100</span></div>',
+                unsafe_allow_html=True,
+            )
+            if summary:
+                st.markdown(
+                    f'<div style="font-size:0.9rem;margin-top:4px;">{summary}</div>',
+                    unsafe_allow_html=True,
+                )
+            if reasons:
+                with st.expander("Why ranked first", expanded=False):
+                    for reason in reasons:
+                        st.markdown(f"- {reason}")
+        elif insight.get("is_healthy"):
+            st.divider()
+            st.markdown(
+                f'<div style="font-size:0.9rem;color:#1f6f2a;">{insight.get("healthy_message") or "No strong signals yet."}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
 
 _TRUST_STATUS_LABELS = {
@@ -54,6 +164,112 @@ _TRUST_STATUS_LABELS = {
     "low_confidence": "Low confidence",
     "invalid": "Invalid",
 }
+
+
+def _render_latest_import_summary(summary: LatestImportSummary, *, heading: str) -> None:
+    processed = int(summary.rows_processed or 0)
+    valid = int(summary.valid_rows or 0)
+    warning_rows = int(summary.warning_rows or 0)
+    rejected = int(summary.rejected_rows or 0)
+    ignored = int(summary.ignored_or_excluded_rows or 0)
+
+    st.markdown(f"**{heading}**")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Rows processed", f"{processed:,}")
+    m2.metric("Valid rows", f"{valid:,}")
+    m3.metric("Warning rows", f"{warning_rows:,}")
+    m4.metric("Rejected rows", f"{rejected:,}")
+    m5.metric("Ignored/excluded", f"{ignored:,}")
+
+
+def _render_data_confidence_panel(trust: dict) -> None:
+    level = trust_level_from_summary(trust)
+    meanings = {
+        "High": "Most rows are usable and today's comparisons are likely reliable.",
+        "Moderate": "Some rows have quality issues, so comparisons are usable but should be treated with caution.",
+        "Low": "Several issues were found; today's comparisons may change after data cleanup.",
+    }
+    st.markdown("**Data Confidence**")
+    with st.container(border=True):
+        st.markdown(f"**{level} confidence**")
+        st.caption(meanings.get(level, "Confidence context is still being calculated."))
+        st.caption("Data issues can reduce confidence in today’s interpretation, especially trend and comparison sections.")
+
+
+def _render_issue_group_handling(
+    *,
+    trust: dict,
+    row_issues: list[dict],
+    preview_rows: list[dict],
+    excluded_rows: list[dict],
+    state_key: str,
+) -> None:
+    groups = build_issue_groups(
+        trust=trust,
+        row_issues=row_issues,
+        preview_rows=preview_rows,
+        excluded_rows=excluded_rows,
+    )
+    if not groups:
+        return
+
+    st.markdown("**Issue Groups and Handling**")
+    st.caption("Choose a lightweight handling path per issue group. This records intent for the current import flow without opening a spreadsheet editor.")
+
+    if state_key not in st.session_state or not isinstance(st.session_state.get(state_key), dict):
+        # TODO: Move handling-state persistence to a tenant-scoped repository once policy storage is added.
+        st.session_state[state_key] = {}
+    handling_state = st.session_state[state_key]
+
+    for group in groups:
+        group_key = str(group.key or "")
+        selected_choice = str(handling_state.get(group_key) or group.default_choice or "review_details")
+        if selected_choice not in _ISSUE_HANDLING_CHOICES:
+            selected_choice = "review_details"
+        with st.container(border=True):
+            st.markdown(f"**{group.label}** · {int(group.count or 0):,}")
+            st.caption(str(group.effect or ""))
+            selected_choice = st.selectbox(
+                "Handling choice",
+                _ISSUE_HANDLING_CHOICES,
+                index=_ISSUE_HANDLING_CHOICES.index(selected_choice),
+                format_func=lambda value: _ISSUE_HANDLING_LABELS.get(value, value),
+                key=f"{state_key}_{group_key}_choice",
+            )
+            handling_state[group_key] = selected_choice
+
+            if selected_choice == "map_or_correct":
+                st.text_input(
+                    "Optional mapping/correction note",
+                    value=str(handling_state.get(f"{group_key}_note") or ""),
+                    key=f"{state_key}_{group_key}_note",
+                    placeholder="Example: normalize process labels to 'Packing'.",
+                )
+                handling_state[f"{group_key}_note"] = str(st.session_state.get(f"{state_key}_{group_key}_note") or "")
+
+            with st.expander("Review details", expanded=False):
+                rows = group.rows or []
+                if not rows:
+                    st.caption("No row-level details are available for this issue group.")
+                else:
+                    st.dataframe(pd.DataFrame(rows[:120]), use_container_width=True, hide_index=True)
+
+    with st.expander("View handling choices applied", expanded=False):
+        choices = []
+        for key, value in handling_state.items():
+            if key.endswith("_note"):
+                continue
+            choices.append(
+                {
+                    "Issue Group": key.replace("_", " ").title(),
+                    "Handling": _ISSUE_HANDLING_LABELS.get(str(value), str(value)),
+                    "Note": str(handling_state.get(f"{key}_note") or ""),
+                }
+            )
+        if choices:
+            st.dataframe(pd.DataFrame(choices), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No handling choices have been selected yet.")
 
 
 def _render_import_trust_summary(trust: dict, *, heading: str) -> None:
@@ -349,6 +565,27 @@ def _import_step1(tenant_id: str):
 
     if not files:
         st.info("Upload anything you have. Even partial data is enough to start.")
+        with st.expander("Don't have a file ready? Download a sample template", expanded=False):
+            st.caption(
+                "The template has six columns: **Date**, **EmployeeID**, **EmployeeName**, "
+                "**Department**, **Units**, and **HoursWorked**. Fill in your team's numbers "
+                "and upload the file to get your first interpreted summary."
+            )
+            st.markdown(
+                "| Date | EmployeeID | EmployeeName | Department | Units | HoursWorked |\n"
+                "|---|---|---|---|---|---|\n"
+                "| 2026-04-07 | 1001 | Alex Chen | Picking | 420 | 8.0 |\n"
+                "| 2026-04-07 | 1002 | Jamie Park | Picking | 385 | 7.5 |\n"
+                "| ... | ... | ... | ... | ... | ... |"
+            )
+            st.download_button(
+                label="Download sample_template.csv",
+                data=_SAMPLE_TEMPLATE_CSV.encode("utf-8"),
+                file_name="sample_template.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="download_sample_template",
+            )
         st.divider()
         _render_recent_uploads_panel()
         return
@@ -798,8 +1035,73 @@ def _import_step3(tenant_id: str):
             f'</div>',
             unsafe_allow_html=True,
         )
+
+        # ── First interpreted insight ─────────────────────────────────────────
+        try:
+            _goal_status_for_insight = list(st.session_state.get("goal_status") or [])
+            _first_insight = build_first_import_insight(
+                import_summary=_sm,
+                goal_status=_goal_status_for_insight,
+            )
+            _render_first_import_insight(_first_insight)
+        except Exception:
+            pass
+
         if _ic_trust:
             _render_import_trust_summary(_ic_trust, heading="Import trust indicators")
+            _render_latest_import_summary(
+                build_latest_import_summary(
+                    rows_processed=int(_sm.get("rows_processed", 0) or 0),
+                    valid_rows=int(_sm.get("valid_rows", 0) or 0),
+                    warning_rows=int(_sm.get("warning_rows", 0) or 0),
+                    rejected_rows=int(_sm.get("rejected_rows", 0) or 0),
+                    ignored_or_excluded_rows=int(_sm.get("ignored_or_excluded_rows", 0) or 0),
+                ),
+                heading="Latest import summary",
+            )
+            _render_data_confidence_panel(_ic_trust)
+
+            _complete_row_issues = list(_sm.get("row_issues") or [])
+            _complete_excluded_rows = list(_sm.get("excluded_rows") or [])
+            _render_issue_group_handling(
+                trust=_ic_trust,
+                row_issues=_complete_row_issues,
+                preview_rows=list(_sm.get("preview_rows") or []),
+                excluded_rows=_complete_excluded_rows,
+                state_key="import_issue_handling_complete",
+            )
+
+            with st.expander("View problematic rows", expanded=False):
+                if _complete_row_issues:
+                    _render_row_error_summary(_complete_row_issues)
+                else:
+                    st.caption("No row-level problematic rows were captured for this import.")
+
+            with st.expander("View excluded data", expanded=False):
+                if _complete_excluded_rows:
+                    st.dataframe(pd.DataFrame(_complete_excluded_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No excluded rows were captured for this import.")
+
+            # Plain-language confidence note — replaces the old no-op radio.
+            _conf_score = int((_ic_trust or {}).get("confidence_score", 0) or 0)
+            if _conf_score >= 75:
+                st.success(
+                    "Data confidence is **High**. Comparisons and trend signals are reliable. "
+                    "Navigate to Today or Team to see interpreted results."
+                )
+            elif _conf_score >= 50:
+                st.warning(
+                    "Data confidence is **Medium**. Some rows have quality issues — comparisons "
+                    "will work but are noted with caveats where data is incomplete. "
+                    "You can continue now or address issues later."
+                )
+            else:
+                st.warning(
+                    "Data confidence is **Low**. Several quality issues were found. "
+                    "You can still continue — insights will note where confidence is limited "
+                    "and comparisons may shift after cleanup."
+                )
         _ic_c1, _ic_c2 = st.columns(2)
         _ic_btn_label = f"View team ({_ic_below} need attention)" if _ic_below > 0 else "View your team"
         if _ic_c1.button(f"👥 {_ic_btn_label}", type="primary", use_container_width=True, key="ic_start_day"):
@@ -1024,11 +1326,13 @@ def _import_step3(tenant_id: str):
     _preview_result_obj = None
     _preview_trust_summary = {}
     _preview_row_issues = []
+    _user_role = str(st.session_state.get("user_role", "") or "")
     try:
-        _preview_result_obj = _pipeline_preview_import(
-            sessions,
+        _preview_result_obj = run_import_preview_job(
+            sessions=sessions,
             fallback_date=work_date,
             tenant_id=tenant_id,
+            user_role=_user_role,
         )
         if _preview_result_obj and _preview_result_obj.success:
             _preview_trust_summary = {
@@ -1065,9 +1369,31 @@ def _import_step3(tenant_id: str):
         )
         if _preview_trust_summary:
             _render_import_trust_summary(_preview_trust_summary, heading="Projected data quality and trust")
+            _render_latest_import_summary(
+                build_latest_import_summary(
+                    rows_processed=int(len(_candidate_preview_rows)),
+                    valid_rows=int(_preview_trust_summary.get("accepted_rows", 0) or 0),
+                    warning_rows=int(sum(1 for i in (_preview_row_issues or []) if str(i.get("severity", "error")) == "warning")),
+                    rejected_rows=int(_preview_trust_summary.get("rejected_rows", 0) or 0),
+                    ignored_or_excluded_rows=int((_preview_trust_summary.get("duplicates", 0) or 0) + len(_preview_mismatch_rows or [])),
+                ),
+                heading="Latest import summary",
+            )
+            _render_data_confidence_panel(_preview_trust_summary)
+            _render_issue_group_handling(
+                trust=_preview_trust_summary,
+                row_issues=_preview_row_issues,
+                preview_rows=_preview_rows,
+                excluded_rows=_preview_mismatch_rows,
+                state_key="import_issue_handling_preview",
+            )
+            st.caption("How data issues affect interpretation: unresolved quality issues can reduce confidence in today’s trend comparisons.")
         if _preview_row_issues:
             with st.expander("Show row-level validation issues", expanded=False):
                 _render_row_error_summary(_preview_row_issues)
+        if _preview_mismatch_rows:
+            with st.expander("Show excluded/ignored rows", expanded=False):
+                st.dataframe(pd.DataFrame(_preview_mismatch_rows[:120]), use_container_width=True, hide_index=True)
         if _candidate_preview_rows:
             if _preview_exact_duplicate_import:
                 st.markdown(
@@ -1102,9 +1428,24 @@ def _import_step3(tenant_id: str):
                         f"created: {str(_matching_upload.get('created_at', ''))[:19].replace('T', ' ')})."
                     )
         if _preview_rows:
-            st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
+            with st.expander("Show parsed sample rows", expanded=False):
+                st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
         else:
             st.info("No preview rows available from mapped data.")
+
+        st.markdown("**Continue path**")
+        st.radio(
+            "Choose how to continue",
+            ["continue_with_warnings", "review_later", "proceed_using_available_data"],
+            format_func=lambda value: {
+                "continue_with_warnings": "Continue with warnings",
+                "review_later": "Review later",
+                "proceed_using_available_data": "Proceed using available data",
+            }.get(value, value),
+            key="import_preview_continue_path",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
 
     _confirm_preview = st.checkbox(
         "I reviewed the preview and want to write this data to history",
@@ -1678,6 +2019,33 @@ def _import_step3(tenant_id: str):
                     }
                     _upload_filename = ", ".join([s.get("filename", "") for s in sessions if s.get("filename")]).strip() or "Import"
                     _upload_log_id = _record_upload_event(_bg_tid, _upload_filename, _candidate_count, _upload_payload)
+
+                    # Keep legacy UPH history for compatibility, and ingest normalized records for future analytics.
+                    _valid_dates = sorted(
+                        {
+                            str(row.get("work_date") or "")[:10]
+                            for row in uph_batch
+                            if str(row.get("work_date") or "").strip()
+                        }
+                    )
+                    run_import_postprocess_job(
+                        uph_rows=uph_batch,
+                        tenant_id=tenant_id,
+                        source_import_job_id=str(_import_job.job_id),
+                        source_import_file=_upload_filename,
+                        source_upload_id=str(_upload_log_id or ""),
+                        data_quality_status=str(_final_trust.status),
+                        exclusion_note=(
+                            f"duplicates_skipped={int(_dup_skipped)}; replaced_rows={int(_replaced_existing_rows)}"
+                            if (_dup_skipped or _replaced_existing_rows)
+                            else ""
+                        ),
+                        handling_choice=str(st.session_state.get("import_preview_continue_path") or ""),
+                        handling_note="Imported through legacy-compatible UPH pipeline",
+                        from_date=_valid_dates[0] if _valid_dates else "",
+                        to_date=_valid_dates[-1] if _valid_dates else "",
+                    )
+
                     if len(uph_batch) > 0 and (_new_row_ids or _undo_previous_rows):
                         st.session_state["_last_import_undo"] = {
                             "tenant_id": _bg_tid,
@@ -1828,6 +2196,14 @@ def _import_step3(tenant_id: str):
                 "risks":     _risks_final,
                 "days":      _estimated_days,
                 "trust":     _final_trust_summary,
+                "rows_processed": int(_candidate_count),
+                "valid_rows": int((_final_trust_summary or {}).get("accepted_rows", 0) or len(uph_batch)),
+                "warning_rows": int((_final_trust_summary or {}).get("warnings", 0) or 0),
+                "rejected_rows": int((_final_trust_summary or {}).get("rejected_rows", 0) or max(0, _candidate_count - len(uph_batch))),
+                "ignored_or_excluded_rows": int((_dup_skipped or 0) + len(_preview_mismatch_rows or [])),
+                "row_issues": list(_preview_row_issues or []),
+                "excluded_rows": list((_preview_mismatch_rows or [])[:120]),
+                "preview_rows": list((_preview_rows or [])[:120]),
                 "import_job": _serialize_import_job(_import_job),
                 "import_file": _upload_name,
             }
@@ -1873,7 +2249,7 @@ def _import_step3(tenant_id: str):
         _uc = len({r["emp_id"] for r in st.session_state.alloc_rows})
         _gs = st.session_state.get("goal_status", []) or []
         _below = len([r for r in _gs if r.get("goal_status") == "below_goal"])
-        _risks = len([r for r in _gs if r.get("goal_status") == "below_goal" and r.get("trend") == "down"])
+        _risks = len([r for r in _gs if r.get("goal_status") == "below_goal" and normalize_trend_state(r.get("trend") or "") == "declining"])
         col2.success(
             f"✓ {_uc} employees processed — {_below} below goal, {_risks} high-priority risks detected."
         )

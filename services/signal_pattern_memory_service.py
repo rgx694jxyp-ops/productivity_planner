@@ -143,11 +143,12 @@ def detect_pattern_memory_from_goal_row(
     recent_trend_history = list(row.get("recent_trend_history") or [])[:max_recent_points]
     recent_goal_history = list(row.get("recent_goal_status_history") or [])[:max_recent_points]
 
-    down_count = _count_matching(recent_trend_history, expected="down")
+    down_count = _count_matching(recent_trend_history, expected="down") + _count_matching(recent_trend_history, expected="declining")
+    below_expected_count = _count_matching(recent_trend_history, expected="below_expected")
     below_goal_count = _count_matching(recent_goal_history, expected="below_goal")
-    repeat_count = max(down_count, below_goal_count)
+    repeat_count = max(down_count + below_expected_count, below_goal_count)
 
-    if trend == "down" and change_pct <= -5 and repeat_count >= 2:
+    if trend in {"down", "declining"} and change_pct <= -5 and repeat_count >= 2:
         return PatternMemoryResult(
             pattern_detected=True,
             pattern_kind="repeated_decline",

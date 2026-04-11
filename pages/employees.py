@@ -24,6 +24,7 @@ from services.action_lifecycle_service import log_coaching_lifecycle_entry
 from services.action_query_service import get_employee_action_timeline, get_employee_actions
 from services.activity_comparison_service import list_recent_activity_comparisons, summarize_activity_comparisons
 from services.employee_detail_service import build_employee_detail_context
+from services.team_process_service import build_team_process_contexts
 from services.exception_tracking_service import (
     build_exception_context_line,
     create_operational_exception,
@@ -60,6 +61,7 @@ from ui.state_panels import (
     show_success_state,
 )
 from ui.traceability_panel import render_traceability_panel
+from services.trend_classification_service import normalize_trend_state
 try:
     from pages.common import _build_coaching_recommendations
 except Exception:
@@ -108,6 +110,7 @@ def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: s
             notes = st.text_area("Notes (optional)", value="", key=f"employee_exception_notes_{emp_id}")
             submitted = st.form_submit_button("Save exception", type="primary")
             if submitted:
+                _user_role = str(st.session_state.get("user_role", "") or "")
                 result = create_operational_exception(
                     exception_date=exception_date.isoformat(),
                     category=category,
@@ -120,6 +123,7 @@ def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: s
                     notes=notes,
                     created_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
                     tenant_id=tenant_id,
+                    user_role=_user_role,
                 )
                 if result:
                     show_success_state(f"{emp_name}: operational exception saved.")
@@ -266,6 +270,11 @@ def _render_activity_comparison_card(comparison: dict, *, show_employee_id: bool
         st.caption(
             f"Confidence: {comparison.get('confidence_label')} | Data supports: {comparison.get('data_supports')}"
         )
+        comparison_breakdown = comparison.get("comparison_breakdown") or {}
+        for key in ("compared_to_target", "compared_to_recent_performance", "compared_to_recent_average"):
+            text = str(comparison_breakdown.get(key) or "").strip()
+            if text:
+                st.caption(text)
         st.caption(str(comparison.get("time_context") or ""))
         st.caption(str(comparison.get("workload_context") or ""))
         st.caption(str(comparison.get("data_completeness_note") or ""))
@@ -281,35 +290,82 @@ def _render_activity_comparison_card(comparison: dict, *, show_employee_id: bool
 
 
 def _render_employee_signal_summary(detail_context: dict) -> None:
+    summary = detail_context.get("signal_summary") or {}
     st.subheader("Signal Summary")
     with st.container(border=True):
-        st.markdown(f"**Current state:** {detail_context.get('current_state', 'pace context is loading')}.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown("**Current state**")
+        c1.write(str(summary.get("current_state") or detail_context.get("current_state") or "pace context is loading").capitalize())
+        c2.markdown("**Compared to what**")
+        c2.write(str(summary.get("compared_to_what") or detail_context.get("compared_to_what") or "Recent context is still loading."))
+        c3.markdown("**Confidence**")
+        c3.write(str(summary.get("confidence_label") or detail_context.get("confidence_label") or "Low").lower())
+        c4.markdown("**Data completeness**")
+        c4.write(str(summary.get("data_completeness_label") or detail_context.get("data_completeness_label") or "Limited data").lower())
         st.caption(f"What happened: {detail_context.get('what_happened', '')}")
-        st.caption(f"Compared to what: {detail_context.get('compared_to_what', '')}")
-        st.caption(f"Confidence: {detail_context.get('confidence_label', 'Low')}")
-        st.caption(f"Data completeness: {detail_context.get('data_completeness_note', '')}")
+        if str(summary.get('trend_explanation') or detail_context.get('trend_explanation') or '').strip():
+            st.caption(f"Trend state: {summary.get('trend_explanation') or detail_context.get('trend_explanation')}")
+        st.caption(f"Data completeness note: {summary.get('data_completeness_note') or detail_context.get('data_completeness_note', '')}")
 
 
 def _render_employee_signal_why(detail_context: dict) -> None:
+    why = detail_context.get("why_this_is_showing") or {}
+    comparison_breakdown = why.get("comparison_breakdown") or detail_context.get("comparison_breakdown") or {}
     st.subheader("Why this is showing")
     with st.container(border=True):
-        st.caption(f"Trigger: {detail_context.get('why_showing', '')}")
-        st.caption(f"Comparison logic: {detail_context.get('comparison_logic', '')}")
+        st.markdown("**What triggered the signal**")
+        st.write(str(why.get("trigger") or detail_context.get("why_showing") or "Recent signal context is still loading."))
+        st.markdown("**What comparison was used**")
+        st.write(str(why.get("comparison_used") or detail_context.get("comparison_logic") or ""))
+        for key in ("compared_to_target", "compared_to_recent_performance", "compared_to_recent_average"):
+            text = str(comparison_breakdown.get(key) or "").strip()
+            if text:
+                st.caption(text)
+        st.markdown("**Why you are seeing it now**")
+        st.write(str(why.get("why_now") or detail_context.get("why_showing") or ""))
 
 
 def _render_employee_signal_basis(detail_context: dict) -> None:
+    basis = detail_context.get("what_this_is_based_on") or {}
     st.subheader("What this is based on")
     with st.container(border=True):
-        st.caption(f"Timeframe used: {detail_context.get('timeframe_used', '')}")
-        st.caption(f"Baseline used: {detail_context.get('baseline_used', '')}")
-        st.caption(f"Volume/workload context: {detail_context.get('workload_context', '')}")
-        st.caption(f"Incomplete/missing data: {detail_context.get('missing_data_note', '')}")
+        st.markdown("**Timeframe used**")
+        st.write(str(basis.get("timeframe_used") or detail_context.get("timeframe_used") or ""))
+        st.markdown("**Baseline used**")
+        st.write(str(basis.get("baseline_used") or detail_context.get("baseline_used") or ""))
+        st.markdown("**Volume/workload context**")
+        st.write(str(basis.get("workload_context") or detail_context.get("workload_context") or ""))
+        st.markdown("**Incomplete, missing, or excluded data**")
+        st.write(str(basis.get("missing_data_note") or detail_context.get("missing_data_note") or ""))
 
-        before_after = detail_context.get("before_after_summary") or {}
+
+def _render_employee_before_after_summary(detail_context: dict) -> None:
+    before_after = detail_context.get("before_after_summary") or {}
+    st.subheader("Before/After Summary")
+    with st.container(border=True):
+        st.markdown(f"**Current summary:** {str(before_after.get('label') or 'no clear change yet').replace('_', ' ')}")
         b1, b2, b3 = st.columns(3)
-        b1.metric("Before/after status", str(before_after.get("label") or "no clear change yet").replace("_", " "))
-        b2.metric("Trailing avg UPH", f"{float(before_after.get('trailing_avg_uph') or 0):.1f}")
-        b3.metric("Prior avg UPH", f"{float(before_after.get('prior_avg_uph') or 0):.1f}")
+        b1.metric("Recent average UPH", f"{float(before_after.get('trailing_avg_uph') or 0):.1f}")
+        b2.metric("Prior average UPH", f"{float(before_after.get('prior_avg_uph') or 0):.1f}")
+        b3.metric("Change", f"{float(before_after.get('delta_uph') or 0):+.1f}")
+        st.caption(
+            f"Comparable days used: recent {int(before_after.get('trailing_days') or 0)} | prior {int(before_after.get('prior_days') or 0)}"
+        )
+
+
+def _render_employee_pattern_history(detail_context: dict) -> None:
+    pattern = detail_context.get("pattern_history") or {}
+    st.subheader("Pattern History")
+    with st.container(border=True):
+        st.markdown(f"**Summary:** {pattern.get('summary') or 'No repeated pattern history is currently available.'}")
+        repeat_count = int(pattern.get("repeat_count") or 0)
+        if repeat_count > 0:
+            st.caption(f"Repeat count in recent context: {repeat_count}")
+        evidence_points = [str(item) for item in (pattern.get("evidence_points") or []) if str(item).strip()]
+        if evidence_points:
+            st.caption("Supporting pattern evidence")
+            for point in evidence_points[:5]:
+                st.write(f"- {point}")
 
 
 def _render_employee_trend_and_drilldown(detail_context: dict) -> None:
@@ -320,11 +376,15 @@ def _render_employee_trend_and_drilldown(detail_context: dict) -> None:
         return
 
     trend_df = pd.DataFrame(trend_points)
-    chart_df = trend_df[["Date", "UPH"]].copy()
+    chart_columns = ["Date", "UPH"]
+    if "Target UPH" in trend_df.columns and trend_df["Target UPH"].notna().any():
+        chart_columns.append("Target UPH")
+    chart_df = trend_df[chart_columns].copy()
     chart_df["Date"] = pd.to_datetime(chart_df["Date"], errors="coerce")
     chart_df = chart_df.dropna(subset=["Date"]).sort_values("Date")
     chart_df = chart_df.set_index("Date")
-    st.line_chart(chart_df[["UPH"]], use_container_width=True)
+    st.line_chart(chart_df[[column for column in chart_df.columns if column in {"UPH", "Target UPH"}]], use_container_width=True)
+    st.caption("Recent performance is shown as a lightweight trend so changes are easier to spot without moving into raw records immediately.")
 
     with st.expander("Contributing time periods", expanded=False):
         periods = detail_context.get("contributing_periods") or {}
@@ -353,6 +413,42 @@ def _render_employee_trend_and_drilldown(detail_context: dict) -> None:
         else:
             st.caption("No excluded records in this lookback window.")
 
+    with st.expander("Source import/job references", expanded=False):
+        source_references = detail_context.get("source_references") or []
+        if not source_references:
+            st.caption("No source import or upload references are attached to the visible rows.")
+        else:
+            st.dataframe(pd.DataFrame(source_references), use_container_width=True, hide_index=True)
+
+
+def _render_related_action_events(*, timeline: list[dict]) -> None:
+    st.subheader("Related Action Events")
+    st.caption("Recent action and follow-through events linked to this employee. Full timeline remains available lower in the page.")
+    if not timeline:
+        show_partial_data_state("No related action events are on file for this employee yet.")
+        return
+
+    for event in timeline[:5]:
+        with st.container(border=True):
+            event_label = str(event.get("event_type") or "event").replace("_", " ").title()
+            event_time = str(event.get("event_at") or "")[:16].replace("T", " ") or "Time not recorded"
+            st.markdown(f"**{event_label}**")
+            st.caption(event_time)
+            context_bits = []
+            if str(event.get("action_id") or "").strip():
+                context_bits.append(f"Action #{event.get('action_id')}")
+            if str(event.get("linked_exception_id") or "").strip():
+                context_bits.append(f"Exception #{event.get('linked_exception_id')}")
+            if str(event.get("status") or "").strip():
+                context_bits.append(str(event.get("status") or "").replace("_", " "))
+            if context_bits:
+                st.caption(" | ".join(context_bits))
+            if str(event.get("outcome") or "").strip():
+                st.caption(f"Outcome: {event.get('outcome')}")
+            note_text = str(event.get("notes") or "").strip()
+            if note_text:
+                st.write(note_text[:220])
+
 
 def _render_employee_activity_comparisons(*, tenant_id: str, emp_id: str, expected_uph: float, history_rows: list[dict]) -> None:
     comparisons = list_recent_activity_comparisons(
@@ -363,7 +459,7 @@ def _render_employee_activity_comparisons(*, tenant_id: str, emp_id: str, expect
         include_weak_signals=True,
         limit=4,
     )
-    st.subheader("Logged Activity Comparison")
+    st.subheader("Before/After Summaries")
     st.caption("Deterministic before/after view of whether recent logged activity was followed by improvement, similar conditions, or performance still below expected.")
     if not comparisons:
         show_partial_data_state("No recent logged activity has enough comparable before/after data yet.")
@@ -412,6 +508,126 @@ def _render_team_activity_comparisons(*, tenant_id: str, history_rows: list[dict
     m3.metric("Still below expected", int(summary.get("still_below_expected_count", 0) or 0))
     for comparison in comparisons:
         _render_activity_comparison_card(comparison, show_employee_id=True)
+
+
+def _render_team_process_view(
+    *,
+    history_rows: list[dict],
+    goal_status: list[dict],
+    filtered_emps: list[dict],
+) -> None:
+    st.subheader("Team / Process Signals")
+    st.caption("Use this view to understand whether recent patterns are isolated to one person or systemic across a process.")
+
+    context = build_team_process_contexts(goal_status_rows=goal_status, history_rows=history_rows)
+    cards = context.get("cards") or []
+    if not cards:
+        show_partial_data_state("No team/process signal context is available yet.")
+        return
+
+    if not bool(context.get("has_notable_change")):
+        show_healthy_state()
+        st.caption(str(context.get("healthy_message") or "No meaningful team-level changes from recent performance."))
+
+    employee_name_by_id = {
+        str(employee.get("emp_id") or ""): str(employee.get("name") or employee.get("emp_id") or "Unknown")
+        for employee in filtered_emps or []
+    }
+
+    for card in cards[:6]:
+        process_name = str(card.get("process_name") or "Unassigned")
+        with st.container(border=True):
+            st.markdown(f"**{process_name}**")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.caption("Current state")
+            c1.write(str(card.get("current_state") or "").capitalize())
+            c2.caption("Compared to what")
+            c2.write(str(card.get("compared_to_what") or ""))
+            c3.caption("Confidence")
+            c3.write(str(card.get("confidence_label") or "Low").lower())
+            c4.caption("Data completeness")
+            c4.write(str(card.get("data_completeness_label") or "Limited data").lower())
+            st.caption(str(card.get("data_completeness_note") or ""))
+            if str(card.get("trend_explanation") or "").strip():
+                st.caption(str(card.get("trend_explanation") or ""))
+            st.caption(str(card.get("workload_context") or ""))
+            comparison_breakdown = card.get("comparison_breakdown") or {}
+            for key in ("compared_to_target", "compared_to_recent_performance", "compared_to_recent_average"):
+                text = str(comparison_breakdown.get(key) or "").strip()
+                if text:
+                    st.caption(text)
+
+            pattern_messages = [str(item) for item in (card.get("pattern_messages") or []) if str(item).strip()]
+            if pattern_messages:
+                st.markdown("**Pattern signals**")
+                for message in pattern_messages[:3]:
+                    st.write(f"- {message}")
+
+            st.markdown("**Why this is being surfaced**")
+            for signal in (card.get("major_signals") or [])[:3]:
+                with st.container(border=False):
+                    st.caption(f"What happened: {signal.get('what_happened')}")
+                    st.caption(f"Compared to what: {signal.get('compared_to_what')}")
+                    st.caption(f"Why now: {signal.get('why_showing')}")
+
+            affected_ids = [str(eid) for eid in (card.get("employee_ids") or []) if str(eid).strip()]
+            if affected_ids:
+                st.caption(f"People affected: {int(card.get('affected_people_count') or 0)}")
+                drill_cols = st.columns(min(3, len(affected_ids)))
+                for idx, employee_id in enumerate(affected_ids[:3]):
+                    employee_label = employee_name_by_id.get(employee_id, employee_id)
+                    if drill_cols[idx].button(
+                        f"Open {employee_label}",
+                        key=f"team_process_open_employee_{process_name}_{employee_id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["cn_selected_emp"] = employee_id
+                        st.rerun()
+
+            with st.expander("Time-based breakdown", expanded=False):
+                trend_points = card.get("trend_points") or []
+                if not trend_points:
+                    st.caption("No recent trend points are available for this process.")
+                else:
+                    trend_df = pd.DataFrame(trend_points)
+                    chart_columns = ["Date", "UPH"]
+                    if "Target UPH" in trend_df.columns and trend_df["Target UPH"].notna().any():
+                        chart_columns.append("Target UPH")
+                    chart_df = trend_df[chart_columns].copy()
+                    chart_df["Date"] = pd.to_datetime(chart_df["Date"], errors="coerce")
+                    chart_df = chart_df.dropna(subset=["Date"]).sort_values("Date").set_index("Date")
+                    st.line_chart(
+                        chart_df[[column for column in chart_df.columns if column in {"UPH", "Target UPH"}]],
+                        use_container_width=True,
+                    )
+                    periods = card.get("time_breakdown") or {}
+                    st.caption(
+                        "Recent comparison windows: "
+                        f"trailing {len(periods.get('trailing_dates') or [])} day(s), "
+                        f"prior {len(periods.get('prior_dates') or [])} day(s)."
+                    )
+
+            with st.expander("Included and excluded supporting data", expanded=False):
+                included_records = card.get("included_records") or []
+                excluded_records = card.get("excluded_records") or []
+                e1, e2 = st.columns(2)
+                e1.metric("Included records", len(included_records))
+                e2.metric("Excluded records", len(excluded_records))
+                if included_records:
+                    st.dataframe(pd.DataFrame(included_records), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No included records in this recent window.")
+                if excluded_records:
+                    st.dataframe(pd.DataFrame(excluded_records), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No excluded records in this recent window.")
+
+            with st.expander("Source import context", expanded=False):
+                source_references = card.get("source_references") or []
+                if not source_references:
+                    st.caption("No source import/job references were attached to these process records.")
+                else:
+                    st.dataframe(pd.DataFrame(source_references), use_container_width=True, hide_index=True)
 
 def page_employees():
     st.title("👥 Employees")
@@ -624,15 +840,17 @@ def _emp_coaching():
         eid  = str(r.get("EmployeeID", r.get("Employee Name", "")))
         name = r.get("Employee Name", "")
         dept = r.get("Department", "")
-        trend      = r.get("trend", "")
+        trend      = normalize_trend_state(r.get("trend", ""))
         goal_st    = r.get("goal_status", "")
         change_pct = r.get("change_pct", 0)
         avg_uph    = r.get("Average UPH", 0)
         target     = r.get("Target UPH", "—")
 
         reasons = []
-        if trend == "down":
-            reasons.append(f"Performance dropping ({change_pct:+.1f}%)")
+        if trend == "declining":
+            reasons.append(f"Performance slipping ({change_pct:+.1f}%)")
+        elif trend == "inconsistent":
+            reasons.append("Recent pace is inconsistent")
         if goal_st == "below_goal":
             reasons.append(f"Below target (UPH {avg_uph:.1f} vs target {target})")
 
@@ -651,7 +869,8 @@ def _emp_coaching():
             for ai in action_items:
                 ac1, ac2, ac3 = st.columns([3, 5, 1])
                 badge = ""
-                if ai["trend"] == "down": badge += " ↓"
+                if ai["trend"] == "declining": badge += " ↓"
+                elif ai["trend"] == "improving": badge += " ↑"
                 if ai["goal_st"] == "below_goal": badge += " ⚠️"
                 ac1.markdown(f"**{ai['name']}**{badge}")
                 ac2.caption(f"{ai['dept']} · {' · '.join(ai['reasons'])}")
@@ -692,9 +911,10 @@ def _emp_coaching():
             # Add trend indicator from goal_status
             _gs_match = next((r for r in gs if str(r.get("EmployeeID","")) == e["emp_id"]), None)
             if _gs_match:
-                _t = _gs_match.get("trend","")
-                if _t == "down": indicators += " ↓"
-                elif _t == "up": indicators += " ↑"
+                _t = normalize_trend_state(_gs_match.get("trend",""))
+                if _t == "declining": indicators += " ↓"
+                elif _t == "improving": indicators += " ↑"
+                elif _t == "inconsistent": indicators += " ~"
             roster.append({
                 " ": indicators.strip(),
                 "Name": e["name"],
@@ -717,13 +937,19 @@ def _emp_coaching():
 
     with col_detail:
         if not selected_emp:
+            _render_team_process_view(
+                history_rows=history_rows,
+                goal_status=gs,
+                filtered_emps=filtered_emps,
+            )
+            st.divider()
             _render_team_activity_comparisons(
                 tenant_id=tenant_id,
                 history_rows=history_rows,
                 goal_status=gs,
             )
             st.divider()
-            show_partial_data_state("Select an employee from the list to view details and timeline evidence.")
+            show_partial_data_state("Select an employee from the roster to open employee detail and record-level drill-down.")
         else:
             emp_id   = selected_emp["emp_id"]
             emp_name = selected_emp["name"]
@@ -797,6 +1023,9 @@ def _emp_coaching():
                 goal_row=_emp_gs or {},
                 history_rows=history_rows,
             )
+            _timeline = get_employee_action_timeline(emp_id, tenant_id=tenant_id)
+            _recent_exception_rows = list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=6)
+            _follow_through_summary = summarize_follow_through_events(tenant_id=tenant_id, employee_id=emp_id, limit=6)
             if _emp_gs:
                 _trend_icon = {"up": "↑", "down": "↓", "flat": "→"}.get(_emp_gs.get("trend",""), "—")
                 _chg = _emp_gs.get("change_pct", 0)
@@ -835,9 +1064,24 @@ def _emp_coaching():
                     st.caption("No coaching on record yet.")
 
             _render_employee_signal_summary(_detail_context)
+            if (
+                not bool(_detail_context.get("has_notable_signal"))
+                and not _timeline
+                and not _recent_exception_rows
+                and not (_follow_through_summary.get("rows") or [])
+            ):
+                show_healthy_state()
+                if str(_detail_context.get("healthy_state_message") or "").strip():
+                    st.caption(str(_detail_context.get("healthy_state_message") or ""))
             _render_employee_signal_why(_detail_context)
             _render_employee_signal_basis(_detail_context)
+            _render_employee_before_after_summary(_detail_context)
             _render_employee_trend_and_drilldown(_detail_context)
+            _render_employee_pattern_history(_detail_context)
+
+            st.divider()
+
+            _render_related_action_events(timeline=_timeline)
 
             st.divider()
 
@@ -923,7 +1167,6 @@ def _emp_coaching():
                 st.caption("No open actions for this employee.")
 
             # What has been tried (interventions + events)
-            _timeline = get_employee_action_timeline(emp_id, tenant_id=tenant_id)
             _tried_interventions = sorted({
                 str(a.get("action_type") or "").replace("_", " ").title()
                 for a in _emp_actions if str(a.get("action_type") or "").strip()
@@ -1146,6 +1389,7 @@ def _emp_coaching():
                         later_outcome=later_outcome,
                         existing_action_id=_target_action_options.get(_target_choice, ""),
                         tenant_id=tenant_id,
+                        user_role=str(st.session_state.get("user_role", "") or ""),
                     )
                     if not _cycle_result:
                         st.error("Could not save coaching cycle as an action event.")
@@ -1182,7 +1426,10 @@ def _emp_coaching():
                 # Advance to next below-goal or trending-down employee
                 _skip_candidates = sorted(
                     [r for r in st.session_state.get("goal_status", [])
-                     if (r.get("goal_status") == "below_goal" or r.get("trend") == "down")
+                     if (
+                         r.get("goal_status") == "below_goal"
+                         or normalize_trend_state(r.get("trend") or "") in {"declining", "below_expected", "inconsistent"}
+                     )
                      and str(r.get("EmployeeID", r.get("Employee Name", ""))) != str(emp_id)],
                     key=lambda x: float(x.get("risk_score", 0) or 0), reverse=True
                 )

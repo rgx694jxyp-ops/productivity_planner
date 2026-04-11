@@ -97,7 +97,7 @@ def test_today_view_signal_sections_are_present():
             "Department": "Pack",
             "Average UPH": 50,
             "Target UPH": 60,
-            "trend": "down",
+            "trend": "declining",
             "change_pct": -12.5,
             "goal_status": "below_goal",
         }
@@ -157,7 +157,7 @@ def test_team_process_view_signals_builds_below_expected_cards():
             "Department": "Pack",
             "Average UPH": 45,
             "Target UPH": 57,
-            "trend": "down",
+            "trend": "below_expected",
             "change_pct": -8.0,
             "goal_status": "below_goal",
         }

@@ -5,6 +5,7 @@ from typing import Any
 
 from services.billing_service import get_subscription_entitlement
 from services.observability import log_operational_event
+from services.access_control_service import can_manage_team as role_can_manage_team
 
 PLAN_RANKS = {
     "starter": 1,
@@ -253,8 +254,8 @@ def enforce_people_limit(
 
 
 def can_manage_team(tenant_id: str, user_role: str) -> bool:
-    role_name = str(user_role or "").lower().strip()
-    return role_name == "admin" or compare_plan_names(get_current_plan(tenant_id), "admin")
+    _ = tenant_id  # Compatibility: keep signature unchanged for existing callers.
+    return role_can_manage_team(user_role)
 
 
 def get_available_employee_views(tenant_id: str) -> list[str]:

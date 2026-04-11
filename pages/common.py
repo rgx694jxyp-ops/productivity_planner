@@ -1,6 +1,7 @@
 import streamlit as st
 from datetime import datetime
 from core.dependencies import require_db
+from services.trend_classification_service import normalize_trend_state
 
 
 def get_user_timezone_now(tenant_id: str = ""):
@@ -23,6 +24,19 @@ def load_goal_status_history(spinner_text: str = "Loading data…"):
     """Shared bootstrap for pages that depend on goal_status/history in session."""
     if not require_db():
         return None, None
+
+    try:
+        from services.daily_snapshot_service import get_latest_snapshot_goal_status
+
+        tenant_id = str(st.session_state.get("tenant_id", "") or "")
+        snapshot_goal_status, snapshot_history, snapshot_date = get_latest_snapshot_goal_status(tenant_id=tenant_id, days=30)
+        if snapshot_goal_status:
+            st.session_state["goal_status"] = snapshot_goal_status
+            st.session_state["history"] = snapshot_history
+            st.session_state["_latest_snapshot_date"] = snapshot_date
+            return snapshot_goal_status, snapshot_history
+    except Exception:
+        pass
 
     if not st.session_state.pipeline_done and not st.session_state.get("_archived_loaded"):
         with st.spinner(spinner_text):
@@ -59,7 +73,7 @@ def _build_coaching_recommendations():
         dept = r.get("Department", "")
         uph = r.get("Average UPH")
         target = r.get("Target UPH")
-        trend_dir = r.get("trend", "")
+        trend_dir = normalize_trend_state(r.get("trend", ""))
 
         if not name:
             continue
@@ -98,14 +112,14 @@ def _build_coaching_recommendations():
             )
             rec["actions"].append("Review workstation setup and process efficiency for immediate improvements.")
             rec["actions"].append("Pair with a high performer for side-by-side work to share techniques.")
-            if trend_dir == "down":
+            if trend_dir == "declining":
                 rec["actions"].append("URGENT: Performance is declining. Investigate equipment, training, or workload blockers.")
         elif target and gap_pct < -10:
             rec["priority"] = "medium"
             rec["status"] = f"{gap_pct}% below target"
             rec["actions"].append(f"Monitor closely — {name} is moderately below the {target} UPH target.")
             rec["actions"].append("Provide targeted training on efficiency techniques.")
-            if trend_dir == "up":
+            if trend_dir == "improving":
                 rec["actions"].append("Positive sign: trend is improving. Continue current support.")
             else:
                 rec["actions"].append("Set a 2-week improvement checkpoint to track progress.")
@@ -127,7 +141,7 @@ def _build_coaching_recommendations():
             rec["status"] = "No target set"
             rec["actions"].append(f"Set a department target for {dept} to enable performance tracking.")
 
-        if trend_dir == "down" and rec["priority"] == "low":
+        if trend_dir == "declining" and rec["priority"] == "low":
             rec["priority"] = "medium"
             rec["actions"].append("Note: Trend is declining — schedule a check-in.")
 

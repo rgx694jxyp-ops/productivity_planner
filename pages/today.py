@@ -25,8 +25,9 @@ from services.exception_tracking_service import (
     resolve_operational_exception,
     summarize_open_operational_exceptions,
 )
+from services.attention_scoring_service import AttentionItem, AttentionSummary
 from services.follow_through_service import FOLLOW_THROUGH_STATUSES, log_follow_through_event
-from services.today_home_service import build_today_home_sections
+from services.today_home_service import build_today_attention_summary, build_today_home_sections
 from services.signal_traceability_service import traceability_payload_from_card
 from ui.state_panels import (
     show_error_state,
@@ -140,6 +141,32 @@ def _apply_today_styles() -> None:
             color: #5d7693;
             margin-bottom: 8px;
         }
+        .attention-item-high {
+            border-left: 4px solid #c0392b;
+            padding-left: 10px;
+            margin-bottom: 4px;
+        }
+        .attention-item-medium {
+            border-left: 4px solid #e67e22;
+            padding-left: 10px;
+            margin-bottom: 4px;
+        }
+        .attention-item-low {
+            border-left: 4px solid #7f8c8d;
+            padding-left: 10px;
+            margin-bottom: 4px;
+        }
+        .attention-score-badge {
+            display: inline-block;
+            font-size: 0.78rem;
+            font-weight: 700;
+            padding: 1px 8px;
+            border-radius: 10px;
+            margin-right: 6px;
+        }
+        .attention-score-high  { background: #fdecea; color: #c0392b; }
+        .attention-score-medium { background: #fef5e7; color: #e67e22; }
+        .attention-score-low   { background: #f0f0f0; color: #555; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -359,6 +386,7 @@ def _render_exception_create_form(*, tenant_id: str, today_value: date) -> None:
             notes = st.text_area("Notes (optional)", value="")
             submitted = st.form_submit_button("Save exception", type="primary")
             if submitted:
+                _user_role = str(st.session_state.get("user_role", "") or "")
                 result = create_operational_exception(
                     exception_date=exception_date.isoformat(),
                     category=category,
@@ -371,6 +399,7 @@ def _render_exception_create_form(*, tenant_id: str, today_value: date) -> None:
                     notes=notes,
                     created_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
                     tenant_id=tenant_id,
+                    user_role=_user_role,
                 )
                 if result:
                     show_success_state("Operational exception saved.")
@@ -515,6 +544,84 @@ def _go_to_drill_down(item: InsightCardContract) -> None:
         st.session_state["goto_page"] = "today"
 
     st.rerun()
+
+
+def _render_attention_priority_section(attention: AttentionSummary) -> None:
+    """Render the ranked priority attention list at the top of the Today screen."""
+    st.markdown('<div class="today-section-label">Priority Attention</div>', unsafe_allow_html=True)
+
+    if attention.is_healthy:
+        st.markdown(
+            '<div class="today-supporting-note">No strong signals need attention right now. '
+            "The queue is clear based on current data.</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    high_items = [item for item in attention.ranked_items if item.attention_tier == "high"]
+    medium_items = [item for item in attention.ranked_items if item.attention_tier == "medium"]
+    low_items = [item for item in attention.ranked_items if item.attention_tier == "low"]
+
+    total_shown = len(high_items) + len(medium_items) + len(low_items)
+    note_parts = []
+    if high_items:
+        note_parts.append(f"{len(high_items)} high-priority")
+    if medium_items:
+        note_parts.append(f"{len(medium_items)} medium-priority")
+    if low_items:
+        note_parts.append(f"{len(low_items)} low-priority")
+    if attention.suppressed_count:
+        note_parts.append(f"{attention.suppressed_count} suppressed (weak signal)")
+
+    st.markdown(
+        f'<div class="today-supporting-note">{", ".join(note_parts)} item{"s" if total_shown != 1 else ""} '
+        f"ranked from {attention.total_evaluated} evaluated. Ranked by trend severity, repeat patterns, "
+        "overdue follow-ups, and signal confidence.</div>",
+        unsafe_allow_html=True,
+    )
+
+    for item in attention.ranked_items:
+        tier = item.attention_tier
+        tier_css = f"attention-item-{tier}"
+        badge_css = f"attention-score-{tier}"
+        tier_label = tier.title()
+
+        with st.container(border=True):
+            st.markdown(
+                f'<div class="{tier_css}">'
+                f'<span class="attention-score-badge {badge_css}">{tier_label} · {item.attention_score}</span>'
+                f"<strong>{item.employee_id}</strong>"
+                + (f" <span style='color:#5d7693;font-size:0.88rem;'>({item.process_name})</span>" if item.process_name and item.process_name.lower() != "unassigned" else "")
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="today-insight-line">{item.attention_summary}</div>',
+                unsafe_allow_html=True,
+            )
+            if item.attention_reasons:
+                with st.expander("Why ranked here", expanded=False):
+                    for reason in item.attention_reasons:
+                        icon = "↑" if any(
+                            f.plain_reason == reason and f.weight > 0
+                            for f in item.factors_applied
+                        ) else "↓"
+                        st.markdown(f"- {icon} {reason}")
+                    st.caption(
+                        f"Score: {item.attention_score}/100 · "
+                        f"Factors applied: {len(item.factors_applied)}"
+                    )
+            col1, _ = st.columns([1, 3])
+            with col1:
+                if st.button(
+                    "Open employee detail",
+                    key=f"attn_drill_{item.employee_id}_{item.process_name}",
+                    use_container_width=True,
+                ):
+                    st.session_state["goto_page"] = "team"
+                    st.session_state["emp_view"] = "Performance Journal"
+                    st.session_state["cn_selected_emp"] = item.employee_id
+                    st.rerun()
 
 
 def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
@@ -663,6 +770,12 @@ def page_today() -> None:
             import_summary=import_summary,
             today=today_value,
         )
+        open_exception_rows = list_open_operational_exceptions(tenant_id=st.session_state.tenant_id, limit=200)
+        attention_summary = build_today_attention_summary(
+            goal_status=goal_status,
+            queue_items=queue_items,
+            open_exception_rows=open_exception_rows,
+        )
     except Exception as exc:
         show_error_state(f"Today screen data could not load cleanly: {exc}")
         return
@@ -682,6 +795,9 @@ def page_today() -> None:
         show_low_confidence_state("Low-confidence signals are shown with clear caveats and may update as new data arrives.")
     if state_flags["healthy"] and counts.get("all", 0) == 0:
         show_healthy_state()
+
+    _render_attention_priority_section(attention_summary)
+    st.write("")
 
     st.markdown('<div class="today-section-label">Queue Summary</div>', unsafe_allow_html=True)
     _render_summary_strip(counts, st.session_state.today_queue_filter)

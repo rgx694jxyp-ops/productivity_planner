@@ -1086,22 +1086,40 @@ def export_client_to_dict(client_id: str) -> dict:
 # ── Tenant Goals (DB-backed) ───────────────────────────────────────────────
 
 def load_goals_db(tenant_id: str = "") -> dict:
-    """Load goals from tenant_goals table. Returns {dept_targets:{}, flagged_employees:{}}."""
+    """Load goals from tenant_goals table."""
     tid = tenant_id or get_tenant_id()
     if not tid:
-        return {"dept_targets": {}, "flagged_employees": {}}
+        return {
+            "default_target_uph": 0,
+            "dept_targets": {},
+            "process_targets": {},
+            "employee_target_overrides": {},
+            "configured_processes": [],
+            "flagged_employees": {},
+        }
     try:
         sb = get_client()
         r = sb.table("tenant_goals").select("*").eq("tenant_id", tid).execute()
         if r.data:
             row = r.data[0]
             return {
+                "default_target_uph": row.get("default_target_uph") or 0,
                 "dept_targets": row.get("dept_targets") or {},
+                "process_targets": row.get("process_targets") or {},
+                "employee_target_overrides": row.get("employee_target_overrides") or {},
+                "configured_processes": row.get("configured_processes") or [],
                 "flagged_employees": row.get("flagged_employees") or {},
             }
     except Exception:
         pass
-    return {"dept_targets": {}, "flagged_employees": {}}
+    return {
+        "default_target_uph": 0,
+        "dept_targets": {},
+        "process_targets": {},
+        "employee_target_overrides": {},
+        "configured_processes": [],
+        "flagged_employees": {},
+    }
 
 
 def save_goals_db(data: dict, tenant_id: str = ""):
@@ -1113,7 +1131,11 @@ def save_goals_db(data: dict, tenant_id: str = ""):
         sb = get_client()
         sb.table("tenant_goals").upsert({
             "tenant_id": tid,
+            "default_target_uph": data.get("default_target_uph", 0),
             "dept_targets": data.get("dept_targets", {}),
+            "process_targets": data.get("process_targets", {}),
+            "employee_target_overrides": data.get("employee_target_overrides", {}),
+            "configured_processes": data.get("configured_processes", []),
             "flagged_employees": data.get("flagged_employees", {}),
         }, on_conflict="tenant_id").execute()
     except Exception as e:

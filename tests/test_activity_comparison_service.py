@@ -20,6 +20,9 @@ def test_compare_logged_activity_detects_improvement_against_prior_period():
     assert comparison["outcome_key"] == "improved_compared_to_prior_period"
     assert comparison["before_avg_uph"] == 81.0
     assert comparison["after_avg_uph"] == 93.0
+    assert comparison["comparison_breakdown"]["compared_to_target"].startswith("Compared to target")
+    assert comparison["comparison_breakdown"]["compared_to_recent_performance"].startswith("Compared to recent performance")
+    assert comparison["comparison_breakdown"]["compared_to_recent_average"].startswith("Compared to recent average")
     assert "Log date:" in comparison["time_context"]
     assert "Data completeness:" in comparison["data_completeness_note"]
 

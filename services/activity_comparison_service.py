@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from repositories import action_events_repo
+from services.target_service import build_comparison_descriptions
 
 COMPARABLE_ACTIVITY_EVENT_TYPES: set[str] = {
     "coached",
@@ -188,6 +189,16 @@ def compare_logged_activity(
     compared_to_what = (
         f"Compared with the {window_days}-day period before the log date versus the {window_days}-day period after it."
     )
+    comparison_breakdown = build_comparison_descriptions(
+        target_context={
+            "target_uph": expected_uph,
+            "target_source_label": "resolved target",
+            "process_name": "",
+        },
+        comparison_days=window_days,
+        recent_avg=float(after_avg or 0.0),
+        prior_avg=float(before_avg or 0.0),
+    )
     evidence_parts = [
         f"Before: {before_avg:.1f} UPH across {before_count} day(s)" if before_avg is not None else f"Before: {before_count} comparable day(s)",
         f"After: {after_avg:.1f} UPH across {after_count} day(s)" if after_avg is not None else f"After: {after_count} comparable day(s)",
@@ -220,6 +231,7 @@ def compare_logged_activity(
         "outcome_label": outcome_label,
         "what_happened": f"A logged activity was recorded on {activity_date.isoformat()}.",
         "compared_to_what": compared_to_what,
+        "comparison_breakdown": comparison_breakdown,
         "why_shown": why_shown,
         "confidence_label": confidence,
         "data_supports": " | ".join(evidence_parts),

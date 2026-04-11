@@ -69,8 +69,43 @@ def test_confirm_import_returns_safe_error_message(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "persist_import_rows", lambda rows, tenant_id: (_ for _ in ()).throw(RuntimeError("password=secret")))
 
-    result = orchestrator.confirm_import(preview, tenant_id="tenant-a", upload_name="batch.csv")
+    result = orchestrator.confirm_import(preview, tenant_id="tenant-a", upload_name="batch.csv", user_role="manager")
 
     assert result.success is False
     assert result.issues[0].message == "Import failed while saving data."
     assert "password=secret" not in result.message
+
+
+def test_preview_import_blocks_exact_duplicate_file(monkeypatch):
+    monkeypatch.setattr(
+        orchestrator,
+        "review_mapping",
+        lambda mapping: MappingReview(mapped={"EmployeeID": "EmployeeID"}, required_missing=[], optional_unmapped=[]),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "parse_sessions_to_rows",
+        lambda sessions, fallback_date: [{"emp_id": "E1", "work_date": "2026-04-10", "department": "Pack", "uph": 80, "units": 160, "hours_worked": 2}],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "validate_rows",
+        lambda rows: (rows, [], 0),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_find_matching_upload_by_fingerprint",
+        lambda tenant_id, fingerprint, days=3650: {"id": 99},
+    )
+
+    result = orchestrator.preview_import(
+        [{"mapping": {"EmployeeID": "EmployeeID"}}],
+        fallback_date=date(2026, 4, 10),
+        tenant_id="tenant-a",
+        user_role="manager",
+    )
+
+    assert result.success is True
+    assert result.can_import is False
+    assert result.exact_duplicate_import is True
+    assert "identical to a previous import" in result.message.lower()

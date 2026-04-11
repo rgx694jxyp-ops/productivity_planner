@@ -1,6 +1,6 @@
 # Productivity Planner — Architecture Overview
 
-Last updated: 2026-04-07
+Last updated: 2026-04-10
 Branch: stabilization-architecture-pass
 Stack: Python, Streamlit, Supabase (Postgres/Auth), Stripe, Supabase Edge Functions (Deno)
 
@@ -127,6 +127,11 @@ Failure handling:
 - Technical details in hidden expanders.
 - Structured import_failure events + app error logs.
 
+Jobs scaffolding:
+- jobs/runner.py executes heavy operations synchronously today.
+- jobs/entrypoints.py wraps preview and postprocess operations with stable job interfaces.
+- Request metadata already models run mode/backend to support async workers later without changing call sites.
+
 ## Email Jobs Flow
 
 Service orchestration:
@@ -182,6 +187,13 @@ Operational events (JSONL):
 Service-layer observability:
 - services/observability.py provides Streamlit-free logging adapters used by services.
 - This keeps business workflows reusable by non-Streamlit runtimes (workers/APIs).
+
+Audit-oriented operational events now cover:
+- import lifecycle (started/completed/failed)
+- import issue-handling and excluded-data decisions
+- target changes
+- exception created/resolved
+- action events created/completed
 
 User-safe failures:
 - core.dependencies.show_user_error used by critical workflows.

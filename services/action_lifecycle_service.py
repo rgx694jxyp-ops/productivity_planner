@@ -16,7 +16,9 @@ from domain.actions import (
     runtime_status,
 )
 from repositories import action_events_repo, actions_repo
+from services.access_control_service import require_write
 from services.app_logging import log_error, log_info, log_warn
+from services.observability import log_operational_event
 from services.action_query_service import (
     _extract_row_dept,
     _extract_row_name,
@@ -60,9 +62,11 @@ def create_action(
     latest_uph: float = 0.0,
     priority: str = "medium",
     tenant_id: str = "",
+    user_role: str = "",
 ) -> dict:
     """Create a new action and log creation event. Raises no exceptions — returns {} on failure."""
     try:
+        require_write(user_role)
         result = actions_repo.create_action(
             employee_id=employee_id,
             employee_name=employee_name,
@@ -116,6 +120,16 @@ def mark_action_resolved(
             },
             tenant_id=tenant_id,
         )
+        if result:
+            log_operational_event(
+                "action_completed",
+                status="completed",
+                tenant_id=tenant_id,
+                context={
+                    "action_id": str(action_id or ""),
+                    "resolution_type": str(resolution_type or ""),
+                },
+            )
         return result
     except Exception as e:
         log_error(
@@ -346,6 +360,17 @@ def log_action_event(
             next_follow_up_at=next_follow_up_at,
             tenant_id=tenant_id,
         )
+        if result:
+            log_operational_event(
+                "action_event_created",
+                status="completed",
+                tenant_id=tenant_id,
+                context={
+                    "action_id": str(action_id or ""),
+                    "event_type": str(event_type or ""),
+                    "event_id": str(result.get("id") or ""),
+                },
+            )
         return result
     except Exception as e:
         log_error(
@@ -413,6 +438,7 @@ def log_coaching_lifecycle_entry(
     later_outcome: str = "pending",
     existing_action_id: str = "",
     tenant_id: str = "",
+    user_role: str = "",
 ) -> dict:
     """Log coaching as a tracked lifecycle event.
 
@@ -452,6 +478,7 @@ def log_coaching_lifecycle_entry(
                 note=action_note,
                 created_by=performed_by,
                 tenant_id=tenant_id,
+                user_role=user_role,
             )
             created_new = bool(target_action)
 
@@ -583,6 +610,7 @@ def trigger_repeated_low_performance(
                     baseline_uph=baseline,
                     latest_uph=latest_uph,
                     tenant_id=tenant_id,
+                    user_role="admin",
                 )
                 if action:
                     result["created"] += 1
@@ -740,6 +768,7 @@ def trigger_ignored_high_performer(
                     baseline_uph=threshold,
                     latest_uph=avg_recent,
                     tenant_id=tenant_id,
+                    user_role="admin",
                 )
                 if action:
                     result["created"] += 1

@@ -19,7 +19,9 @@ from services.plain_language_service import (
     describe_change_pct,
     describe_goal_status,
     describe_trend,
+    explain_trend_state,
 )
+from services.trend_classification_service import normalize_trend_state
 from services.signal_traceability_service import infer_traceability_context
 from services.signal_quality_service import rank_and_filter_signals
 from services.signal_pattern_memory_service import (
@@ -218,8 +220,9 @@ def interpret_below_expected_performance(*, row: dict, today: date) -> InsightCa
     target_uph = _safe_float(row.get("Target UPH"), 0.0)
     total_units = _safe_float(row.get("Total Units"), 0.0)
     hours_worked = _safe_float(row.get("Hours Worked"), 0.0)
-    trend = str(row.get("trend") or "unknown")
+    trend = normalize_trend_state(row.get("trend") or "unknown")
     trend_text = describe_trend(trend)
+    trend_explanation = explain_trend_state(trend)
     status_text = describe_goal_status(str(row.get("goal_status") or "unknown"))
 
     missing_fields: list[str] = []
@@ -245,7 +248,7 @@ def interpret_below_expected_performance(*, row: dict, today: date) -> InsightCa
             if target_uph > 0
             else "Compared with this role's expected output context when targets are available."
         )
-        + f" {workload_note}"
+        + f" {workload_note} {trend_explanation}"
     )
     if pattern_memory.pattern_detected:
         compared_text = f"{compared_text} {pattern_memory.summary}"
@@ -303,6 +306,7 @@ def interpret_below_expected_performance(*, row: dict, today: date) -> InsightCa
         metadata={
             "department": dept,
             "trend": trend,
+            "trend_explanation": trend_explanation,
             "pattern_detected": pattern_memory.pattern_detected,
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
@@ -316,8 +320,9 @@ def interpret_changed_from_normal(*, row: dict, today: date) -> InsightCardContr
     name = str(row.get("Employee") or row.get("Employee Name") or emp_id or "Unknown")
     dept = str(row.get("Department") or "Team")
     change_pct = _safe_float(row.get("change_pct"), 0.0)
-    trend = str(row.get("trend") or "flat")
+    trend = normalize_trend_state(row.get("trend") or "flat")
     trend_text = describe_trend(trend)
+    trend_explanation = explain_trend_state(trend)
     avg_uph = _safe_float(row.get("Average UPH"), 0.0)
     target_uph = _safe_float(row.get("Target UPH"), 0.0)
     total_units = _safe_float(row.get("Total Units"), 0.0)
@@ -339,7 +344,7 @@ def interpret_changed_from_normal(*, row: dict, today: date) -> InsightCardContr
             if target_uph > 0
             else "Compared with this person's recent trend baseline."
         )
-        + f" {workload_note}"
+        + f" {workload_note} {trend_explanation}"
     )
     if pattern_memory.pattern_detected:
         compared_text = f"{compared_text} {pattern_memory.summary}"
@@ -355,7 +360,7 @@ def interpret_changed_from_normal(*, row: dict, today: date) -> InsightCardContr
         insight_id=f"changed_normal:{emp_id or name}",
         insight_kind="trend_change",
         title=f"Changed from normal: {name}",
-        what_happened=f"Current pace is {trend_text} ({describe_change_pct(change_pct)}).",
+        what_happened=f"Current pace is {trend_text}. Recent change versus the prior window is {describe_change_pct(change_pct)}.",
         compared_to_what=compared_text,
         why_flagged="Surfaced because trend direction and percent change cross visibility thresholds.",
         confidence=confidence,
@@ -400,6 +405,7 @@ def interpret_changed_from_normal(*, row: dict, today: date) -> InsightCardContr
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
             "pattern_summary": pattern_memory.summary,
+            "trend_explanation": trend_explanation,
         },
     )
 
@@ -792,7 +798,7 @@ def interpret_today_view_signals(
     changed_from_normal_rows = [
         row
         for row in (goal_status or [])
-        if str(row.get("trend") or "") in {"down", "up"}
+        if normalize_trend_state(row.get("trend") or "") in {"below_expected", "declining", "improving", "inconsistent"}
     ]
     changed_from_normal_rows.sort(key=lambda row: abs(_safe_float(row.get("change_pct"), 0.0)), reverse=True)
     changed_from_normal = [
@@ -816,7 +822,7 @@ def interpret_today_view_signals(
         if _safe_int(import_summary.get("days"), 0) <= 1 or summary_card.data_completeness.status != "complete":
             data_warnings.append(summary_card)
 
-    insufficient_rows = [row for row in (goal_status or []) if str(row.get("trend") or "") == "insufficient_data"]
+    insufficient_rows = [row for row in (goal_status or []) if normalize_trend_state(row.get("trend") or "") == "insufficient_data"]
     if insufficient_rows:
         missing_ratio = len(insufficient_rows) / max(len(goal_status or []), 1)
         data_warnings.append(
@@ -932,7 +938,7 @@ def interpret_import_data_trust_view_signals(
     if import_summary:
         cards.append(interpret_suspicious_or_incomplete_data(import_summary=import_summary, today=today))
 
-    insufficient_rows = [row for row in (goal_status or []) if str(row.get("trend") or "") == "insufficient_data"]
+    insufficient_rows = [row for row in (goal_status or []) if normalize_trend_state(row.get("trend") or "") == "insufficient_data"]
     if insufficient_rows:
         cards.append(
             _card(

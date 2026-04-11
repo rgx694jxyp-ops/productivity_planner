@@ -6,6 +6,8 @@ from datetime import date
 
 from domain.operational_exceptions import normalize_exception_category
 from repositories import operational_exceptions_repo
+from services.access_control_service import require_write
+from services.observability import log_operational_event
 
 
 def create_operational_exception(
@@ -21,12 +23,14 @@ def create_operational_exception(
     notes: str = "",
     created_by: str = "",
     tenant_id: str = "",
+    user_role: str = "",
 ) -> dict:
+    require_write(user_role)
     cleaned_summary = str(summary or "").strip()
     if not cleaned_summary:
         return {}
 
-    return operational_exceptions_repo.create_operational_exception(
+    result = operational_exceptions_repo.create_operational_exception(
         exception_date=exception_date,
         category=normalize_exception_category(category),
         summary=cleaned_summary,
@@ -39,6 +43,18 @@ def create_operational_exception(
         created_by=created_by,
         tenant_id=tenant_id,
     )
+    if result:
+        log_operational_event(
+            "exception_created",
+            status="completed",
+            tenant_id=tenant_id,
+            context={
+                "exception_id": str(result.get("id") or ""),
+                "employee_id": str(employee_id or ""),
+                "category": str(normalize_exception_category(category) or "unknown"),
+            },
+        )
+    return result
 
 
 def resolve_operational_exception(
@@ -48,12 +64,20 @@ def resolve_operational_exception(
     resolved_by: str = "",
     tenant_id: str = "",
 ) -> dict:
-    return operational_exceptions_repo.resolve_operational_exception(
+    result = operational_exceptions_repo.resolve_operational_exception(
         exception_id,
         resolution_note=resolution_note,
         resolved_by=resolved_by,
         tenant_id=tenant_id,
     )
+    if result:
+        log_operational_event(
+            "exception_resolved",
+            status="completed",
+            tenant_id=tenant_id,
+            context={"exception_id": str(exception_id or ""), "resolved_by": str(resolved_by or "")},
+        )
+    return result
 
 
 def list_open_operational_exceptions(*, tenant_id: str = "", employee_id: str = "", limit: int = 100) -> list[dict]:

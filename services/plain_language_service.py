@@ -4,11 +4,29 @@ from __future__ import annotations
 
 
 TREND_LABELS: dict[str, str] = {
-    "down": "below expected pace",
-    "up": "above expected pace",
-    "flat": "near expected pace",
-    "insufficient_data": "not enough history yet",
+    "stable": "holding steady",
+    "below_expected": "below expected pace",
+    "declining": "slipping from recent pace",
+    "improving": "moving up from recent pace",
+    "inconsistent": "moving around from day to day",
+    "insufficient_data": "not enough recent history yet",
+    "down": "slipping from recent pace",
+    "up": "moving up from recent pace",
+    "flat": "holding steady",
     "unknown": "trend not available",
+}
+
+TREND_EXPLANATIONS: dict[str, str] = {
+    "stable": "Recent performance looks similar to the recent average.",
+    "below_expected": "Recent performance is under the expected pace, but not changing enough to call it improving or declining.",
+    "declining": "Recent performance is lower than the prior comparable window.",
+    "improving": "Recent performance is higher than the prior comparable window.",
+    "inconsistent": "Recent performance moves around enough that the pattern is not steady yet.",
+    "insufficient_data": "There are not enough comparable days yet to classify the pattern confidently.",
+    "down": "Recent performance is lower than the prior comparable window.",
+    "up": "Recent performance is higher than the prior comparable window.",
+    "flat": "Recent performance looks similar to the recent average.",
+    "unknown": "Trend details are not available.",
 }
 
 GOAL_STATUS_LABELS: dict[str, str] = {
@@ -46,6 +64,10 @@ RECOMMENDATION_TO_ACTION_CODE: dict[str, str] = {
 
 def describe_trend(trend: str) -> str:
     return TREND_LABELS.get(str(trend or "").strip().lower(), TREND_LABELS["unknown"])
+
+
+def explain_trend_state(trend: str) -> str:
+    return TREND_EXPLANATIONS.get(str(trend or "").strip().lower(), TREND_EXPLANATIONS["unknown"])
 
 
 def describe_goal_status(status: str) -> str:

@@ -43,3 +43,24 @@ def tenant_scoped_count(table_name: str, count_column: str, tenant_id: str = "")
 
 def log_error(category: str, message: str, detail: str = "", severity: str = "error") -> None:
     _db_module().log_error(category, message, detail=detail, severity=severity)
+
+
+def require_tenant(tenant_id: str = "") -> str:
+    """Return *tenant_id* (or the session tenant) and raise if neither is set.
+
+    Use this at the start of any repository write operation to guarantee that
+    a cross-tenant mutation cannot silently succeed due to an empty ``tenant_id``.
+
+    Returns:
+        The resolved non-empty tenant UUID string.
+
+    Raises:
+        ValueError: When no tenant context is available.
+    """
+    tid = str(tenant_id or "").strip() or str(get_tenant_id() or "").strip()
+    if not tid:
+        raise ValueError(
+            "No tenant context. Set tenant_id explicitly or ensure the user "
+            "session contains a valid tenant_id before calling this function."
+        )
+    return tid

@@ -42,6 +42,7 @@ def test_create_operational_exception_rejects_blank_summary():
             category="equipment",
             summary="   ",
             tenant_id="tenant-a",
+            user_role="manager",
         )
     finally:
         exception_tracking_service.operational_exceptions_repo.create_operational_exception = original

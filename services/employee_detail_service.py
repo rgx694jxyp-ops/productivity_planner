@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
+from services.target_service import build_comparison_descriptions, resolve_target_context
+from services.trend_classification_service import classify_trend_state, normalize_trend_state
+
 
 def _parse_date(value: Any) -> date | None:
     text = str(value or "").strip()
@@ -63,6 +67,58 @@ def _confidence_label(coverage_ratio: float, included_count: int) -> str:
     return "Low"
 
 
+def _completeness_label(coverage_ratio: float, included_count: int) -> str:
+    if coverage_ratio >= 0.7 and included_count >= 7:
+        return "Data mostly complete"
+    if coverage_ratio >= 0.4 and included_count >= 4:
+        return "Partial data"
+    return "Limited data"
+
+
+def _source_value(raw: dict, *keys: str) -> str:
+    for key in keys:
+        value = str(raw.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _build_source_references(*, included_rows: list[dict], excluded_rows: list[dict]) -> list[dict]:
+    references: list[dict] = []
+    seen_keys: set[tuple[str, str, str, str, str]] = set()
+
+    for label, rows in (("Included", included_rows), ("Excluded", excluded_rows)):
+        for row in rows:
+            raw = row.get("raw") or {}
+            source_file = _source_value(raw, "source_file", "Source File", "filename", "import_file")
+            import_job_id = _source_value(raw, "import_job_id", "job_id", "import_job", "Import Job")
+            upload_id = _source_value(raw, "upload_id", "source_upload_id", "import_upload_id")
+            upload_name = _source_value(raw, "upload_name", "source_upload_name")
+            if not any((source_file, import_job_id, upload_id, upload_name)):
+                continue
+            row_date = ""
+            if isinstance(row.get("date"), date):
+                row_date = row["date"].isoformat()
+            else:
+                row_date = str(row.get("date") or "")
+            dedupe_key = (label, row_date, source_file, import_job_id, upload_id or upload_name)
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            references.append(
+                {
+                    "Date": row_date,
+                    "Included": label,
+                    "Source File": source_file,
+                    "Import Job": import_job_id,
+                    "Upload": upload_name or upload_id,
+                }
+            )
+
+    references.sort(key=lambda item: (str(item.get("Date") or ""), str(item.get("Included") or "")), reverse=True)
+    return references[:12]
+
+
 def build_employee_detail_context(
     *,
     emp_id: str,
@@ -80,10 +136,10 @@ def build_employee_detail_context(
         units = _units(row)
         hours = _hours(row)
         if not row_date:
-            excluded_rows.append({"date": "", "reason": "Missing/invalid date", "uph": uph, "units": units, "hours": hours})
+            excluded_rows.append({"date": "", "reason": "Missing/invalid date", "uph": uph, "units": units, "hours": hours, "raw": row})
             continue
         if uph <= 0:
-            excluded_rows.append({"date": row_date.isoformat(), "reason": "Missing/invalid UPH", "uph": uph, "units": units, "hours": hours})
+            excluded_rows.append({"date": row_date.isoformat(), "reason": "Missing/invalid UPH", "uph": uph, "units": units, "hours": hours, "raw": row})
             continue
         mapped_rows.append({"date": row_date, "uph": uph, "units": units, "hours": hours, "raw": row})
 
@@ -97,38 +153,29 @@ def build_employee_detail_context(
 
     goal_status = str(goal_row.get("goal_status") or "").strip().lower()
     trend = str(goal_row.get("trend") or "").strip().lower()
-    target_uph = _safe_float(goal_row.get("Target UPH"))
+    target_context = resolve_target_context(
+        employee_id=emp_id,
+        process_name=goal_row.get("Resolved Process") or goal_row.get("Department") or goal_row.get("department") or "",
+        explicit_target=_safe_float(goal_row.get("Target UPH")),
+    )
+    target_uph = _safe_float(target_context.get("target_uph"))
     current_uph = _safe_float(goal_row.get("Average UPH")) if _safe_float(goal_row.get("Average UPH")) > 0 else trailing_avg
-
-    if target_uph > 0 and current_uph < target_uph:
-        current_state = "below expected pace"
-    elif target_uph > 0 and current_uph >= target_uph:
-        current_state = "at or above expected pace"
-    else:
-        current_state = "pace status available with limited target context"
+    comparison_descriptions = build_comparison_descriptions(
+        target_context=target_context,
+        comparison_days=comparison_days,
+        recent_avg=trailing_avg,
+        prior_avg=prior_avg,
+    )
 
     compared_to_what = (
         f"Compared with the latest {comparison_days} comparable days"
         + (f" versus the prior {comparison_days} comparable days" if prior_rows else " (prior window not yet complete)")
-        + (f" and target {target_uph:.1f} UPH" if target_uph > 0 else "")
+        + (f", plus target {target_uph:.1f} UPH from the {target_context.get('target_source_label', 'configured target')}" if target_uph > 0 else "")
     )
-
-    trigger_parts: list[str] = []
-    if goal_status:
-        trigger_parts.append(f"goal status marked as {goal_status.replace('_', ' ')}")
-    if trend:
-        trigger_parts.append(f"trend marked as {trend}")
-    if trailing_rows:
-        trigger_parts.append("recent activity/follow-through entries exist for this employee")
-    trigger_text = "; ".join(trigger_parts) if trigger_parts else "employee drill-down selected"
 
     coverage_ratio = round(len(trend_rows) / float(lookback_days), 2) if lookback_days > 0 else 0.0
-    completeness_note = (
-        f"{len(trend_rows)} included and {len(excluded_rows)} excluded records in the latest {lookback_days}-day window"
-        f" (coverage {int(coverage_ratio * 100)}%)."
-    )
-
     confidence_label = _confidence_label(coverage_ratio, len(trend_rows))
+    completeness_label = _completeness_label(coverage_ratio, len(trend_rows))
 
     if trailing_rows and prior_rows:
         delta = round(trailing_avg - prior_avg, 2)
@@ -141,6 +188,20 @@ def build_employee_detail_context(
     else:
         delta = 0.0
         before_after_label = "no clear change yet"
+
+    trend_result = classify_trend_state(
+        recent_average_uph=trailing_avg if trailing_avg > 0 else current_uph,
+        prior_average_uph=prior_avg,
+        expected_uph=target_uph,
+        included_count=len(trend_rows),
+        recent_values=[float(row.get("uph") or 0.0) for row in trailing_rows if float(row.get("uph") or 0.0) > 0],
+    )
+    current_state = str(trend_result.get("label") or normalize_trend_state(goal_row.get("trend") or ""))
+
+    completeness_note = (
+        f"{completeness_label}: {len(trend_rows)} included and {len(excluded_rows)} excluded records in the latest {lookback_days}-day window"
+        f" (coverage {int(coverage_ratio * 100)}%)."
+    )
 
     def _avg(items: list[dict], key: str) -> float:
         if not items:
@@ -160,6 +221,43 @@ def build_employee_detail_context(
         else "Workload/volume context is limited because units/hours fields are incomplete in one or both windows."
     )
 
+    if trend_result.get("state") == "below_expected" and target_uph > 0 and current_uph > 0:
+        trigger_reason = f"Recent observed pace is {current_uph:.1f} UPH versus {target_uph:.1f} UPH from the {target_context.get('target_source_label', 'configured target')}."
+    elif trend_result.get("state") == "improving" and prior_rows:
+        trigger_reason = f"Recent average moved by {delta:+.1f} UPH versus the prior comparable window."
+    elif trend_result.get("state") == "declining" and prior_rows:
+        trigger_reason = f"Recent average moved by {delta:+.1f} UPH versus the prior comparable window."
+    elif trend_result.get("state") == "inconsistent":
+        trigger_reason = f"Recent comparable days vary by {float(trend_result.get('volatility_span_uph') or 0):.1f} UPH, so the pattern is not steady yet."
+    else:
+        trigger_reason = str(trend_result.get("plain_explanation") or "Recent comparable days look broadly similar to the prior context.")
+
+    why_now_parts: list[str] = []
+    if goal_status:
+        why_now_parts.append(f"the latest goal status is {goal_status.replace('_', ' ')}")
+    if trend:
+        why_now_parts.append(f"recent direction is {trend}")
+    if trailing_rows:
+        why_now_parts.append(f"{len(trailing_rows)} recent comparable day(s) are available")
+    why_now = (
+        "Shown now because " + ", ".join(why_now_parts) + "."
+        if why_now_parts
+        else "Shown now because this employee drill-down has enough recent context to summarize."
+    )
+
+    pattern_memory = detect_pattern_memory_from_goal_row(row=goal_row or {})
+    pattern_history = {
+        "has_pattern": bool(pattern_memory.pattern_detected),
+        "summary": (
+            pattern_memory.summary
+            if pattern_memory.pattern_detected
+            else "No repeated pattern is standing out in the recent trend context."
+        ),
+        "repeat_count": int(pattern_memory.repeat_count or 0),
+        "pattern_kind": str(pattern_memory.pattern_kind or "none"),
+        "evidence_points": list(pattern_memory.evidence_points or []),
+    }
+
     trend_points = [
         {
             "Date": row["date"].isoformat(),
@@ -169,6 +267,53 @@ def build_employee_detail_context(
         }
         for row in trend_rows
     ]
+
+    source_references = _build_source_references(included_rows=trend_rows, excluded_rows=excluded_rows)
+    if target_uph > 0 and prior_rows:
+        baseline_used = f"Configured target baseline: {target_uph:.1f} UPH from the {target_context.get('target_source_label', 'configured target')} plus the prior {comparison_days} comparable days."
+    elif target_uph > 0:
+        baseline_used = f"Configured target baseline: {target_uph:.1f} UPH from the {target_context.get('target_source_label', 'configured target')}. Prior comparison window is still limited."
+    elif prior_rows:
+        baseline_used = f"Baseline comes from the prior {comparison_days} comparable days because no configured target is set."
+    else:
+        baseline_used = "No configured target or complete prior baseline is currently available."
+
+    has_notable_signal = bool(
+        (target_uph > 0 and current_uph > 0 and current_uph < target_uph)
+        or delta >= 1.0
+        or bool(trend_result.get("is_notable"))
+        or pattern_history["has_pattern"]
+    )
+    healthy_state_message = "" if has_notable_signal else "No major changes in recent performance."
+
+    summary_block = {
+        "current_state": current_state,
+        "trend_state": str(trend_result.get("state") or normalize_trend_state(goal_row.get("trend") or "")),
+        "trend_explanation": str(trend_result.get("plain_explanation") or ""),
+        "compared_to_what": compared_to_what,
+        "confidence_label": confidence_label,
+        "data_completeness_note": completeness_note,
+        "data_completeness_label": completeness_label,
+    }
+
+    why_this_is_showing = {
+        "trigger": trigger_reason,
+        "comparison_used": compared_to_what,
+        "why_now": why_now,
+        "comparison_breakdown": comparison_descriptions,
+    }
+
+    what_this_is_based_on = {
+        "timeframe_used": f"Latest {lookback_days} calendar days with valid records for this employee; primary comparison uses up to {comparison_days} recent included days.",
+        "baseline_used": baseline_used,
+        "workload_context": workload_context,
+        "missing_data_note": (
+            "Excluded records are shown in drill-down for transparency."
+            if excluded_rows
+            else "No excluded records in the current lookback window."
+        ),
+        "comparison_breakdown": comparison_descriptions,
+    }
 
     included_records = [
         {
@@ -183,24 +328,28 @@ def build_employee_detail_context(
     excluded_records = excluded_rows[-lookback_days:]
 
     return {
+        "signal_summary": summary_block,
+        "why_this_is_showing": why_this_is_showing,
+        "what_this_is_based_on": what_this_is_based_on,
         "current_state": current_state,
         "compared_to_what": compared_to_what,
         "confidence_label": confidence_label,
         "data_completeness_note": completeness_note,
+        "data_completeness_label": completeness_label,
         "what_happened": f"Current observed pace is {current_uph:.1f} UPH." if current_uph > 0 else "Current pace is not fully available.",
-        "why_showing": f"This appears because {trigger_text}.",
+        "why_showing": why_now,
         "comparison_logic": (
             f"Deterministic comparison uses the latest {comparison_days} included days versus the prior {comparison_days} included days, "
             "with no manual overrides."
         ),
-        "timeframe_used": f"Latest {lookback_days} calendar days with valid records for this employee.",
-        "baseline_used": (f"Target baseline: {target_uph:.1f} UPH." if target_uph > 0 else "No target baseline is currently set."),
+        "comparison_breakdown": comparison_descriptions,
+        "target_context": target_context,
+        "trend_state": str(trend_result.get("state") or normalize_trend_state(goal_row.get("trend") or "")),
+        "trend_explanation": str(trend_result.get("plain_explanation") or ""),
+        "timeframe_used": what_this_is_based_on["timeframe_used"],
+        "baseline_used": baseline_used,
         "workload_context": workload_context,
-        "missing_data_note": (
-            "Excluded records are shown in drill-down for transparency."
-            if excluded_records
-            else "No excluded records in the current lookback window."
-        ),
+        "missing_data_note": what_this_is_based_on["missing_data_note"],
         "before_after_summary": {
             "label": before_after_label,
             "trailing_avg_uph": trailing_avg,
@@ -209,6 +358,9 @@ def build_employee_detail_context(
             "trailing_days": len(trailing_rows),
             "prior_days": len(prior_rows),
         },
+        "pattern_history": pattern_history,
+        "healthy_state_message": healthy_state_message,
+        "has_notable_signal": has_notable_signal,
         "trend_points": trend_points,
         "contributing_periods": {
             "trailing_dates": [row["date"].isoformat() for row in trailing_rows],
@@ -216,4 +368,5 @@ def build_employee_detail_context(
         },
         "included_records": included_records,
         "excluded_records": excluded_records,
+        "source_references": source_references,
     }

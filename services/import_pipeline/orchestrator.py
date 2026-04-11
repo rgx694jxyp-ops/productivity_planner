@@ -13,6 +13,7 @@ from services.import_pipeline.mapper import review_mapping
 from services.import_pipeline.models import ImportCommitResult, ImportIssue, ImportPreviewResult, ImportSummary, MappingReview
 from services.import_pipeline.parser import parse_sessions_to_rows
 from services.import_pipeline.validator import validate_rows
+from services.access_control_service import require_write
 from services.import_trust_service import trust_summary_from_issues
 
 
@@ -68,7 +69,8 @@ def _find_matching_upload_by_fingerprint(tenant_id: str, fingerprint: str, days:
     return None
 
 
-def preview_import(sessions: list[dict], *, fallback_date: date, tenant_id: str = "") -> ImportPreviewResult:
+def preview_import(sessions: list[dict], *, fallback_date: date, tenant_id: str = "", user_role: str = "") -> ImportPreviewResult:
+    require_write(user_role)
     try:
         all_required_missing: set[str] = set()
         all_optional_unmapped: set[str] = set()
@@ -174,7 +176,8 @@ def preview_import(sessions: list[dict], *, fallback_date: date, tenant_id: str 
         )
 
 
-def confirm_import(preview: ImportPreviewResult, *, tenant_id: str, upload_name: str = "Import") -> ImportCommitResult:
+def confirm_import(preview: ImportPreviewResult, *, tenant_id: str, upload_name: str = "Import", user_role: str = "") -> ImportCommitResult:
+    require_write(user_role)
     if not preview.can_import:
         log_warn(
             "import_confirm_blocked",
