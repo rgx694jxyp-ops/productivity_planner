@@ -187,6 +187,7 @@ def build_today_attention_summary(
     queue_items: list[dict[str, Any]],
     open_exception_rows: list[dict[str, Any]] | None = None,
     eligible_employee_ids: set[str] | None = None,
+    weak_data_mode: bool = False,
     max_items: int = 10,
 ) -> AttentionSummary:
     """Score and rank Today screen items by attention priority.
@@ -221,5 +222,6 @@ def build_today_attention_summary(
         snapshots=normalized,
         queue_items=queue_items,
         open_exception_rows=open_exception_rows,
+        keep_low=bool(weak_data_mode),
         max_items=max_items,
     )

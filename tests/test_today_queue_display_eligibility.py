@@ -268,8 +268,8 @@ def test_today_value_strip_prefers_existing_goal_status_and_import_summary_data(
     assert value_strip.cards[0].headline == "Alex at 118 UPH"
     assert value_strip.cards[1].headline == "Blair down 14%"
     assert value_strip.cards[2].headline == "Casey · Dock"
-    assert value_strip.cards[3].headline == "Some rows were flagged"
-    assert value_strip.cards[3].detail == "38/40 rows usable"
+    assert value_strip.cards[3].headline == "Data needs a quick double-check"
+    assert value_strip.cards[3].detail == "38/40 rows usable · Confidence: Medium"
 
 
 def test_today_value_strip_omits_blocks_without_clear_supporting_data():

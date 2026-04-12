@@ -3,16 +3,24 @@ from core.runtime import st, traceback
 
 
 def dispatch_page(page: str) -> None:
-    from pages.coaching_intel import page_coaching_intel
-    from pages.cost_impact import page_cost_impact
-    from pages.dashboard import page_dashboard
-    from pages.email_page import page_email
-    from pages.employees import page_employees
-    from pages.import_page import page_import
-    from pages.productivity import page_productivity
-    from pages.settings_page import page_settings
-    from pages.shift_plan import page_shift_plan
-    from pages.today import page_today
+    try:
+        from pages.coaching_intel import page_coaching_intel
+        from pages.cost_impact import page_cost_impact
+        from pages.dashboard import page_dashboard
+        from pages.email_page import page_email
+        from pages.employees import page_employees
+        from pages.import_page import page_import
+        from pages.productivity import page_productivity
+        from pages.settings_page import page_settings
+        from pages.shift_plan import page_shift_plan
+        from pages.today import page_today
+    except Exception as import_error:
+        tb = traceback.format_exc()
+        log_app_error("page", f"Page module import failed ({page}): {import_error}", detail=tb, severity="error")
+        st.error("The app could not load one or more page modules.")
+        with st.expander("Technical details"):
+            st.code(tb)
+        return
 
     handlers = {
         "today": page_today,

@@ -2,7 +2,7 @@ from datetime import date
 import re
 
 from domain.display_signal import DisplaySignal, SignalConfidence, SignalLabel
-from services.attention_scoring_service import AttentionItem, AttentionSummary
+from services.attention_scoring_service import AttentionFactor, AttentionItem, AttentionSummary
 from services.today_view_model_service import build_today_queue_view_model
 
 
@@ -244,3 +244,56 @@ def test_today_card_expanded_lines_humanize_iso_dates(monkeypatch):
 
     iso_pattern = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
     assert all(not iso_pattern.search(line) for line in card.expanded_lines)
+
+
+def test_today_card_expanded_lines_include_source_and_exception_context(monkeypatch):
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=31.2,
+        comparison_start_date=date(2026, 4, 6),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=40.0,
+        confidence=SignalConfidence.HIGH,
+        data_completeness=None,
+        flags={},
+    )
+
+    item = AttentionItem(
+        employee_id="E9",
+        process_name="Receiving",
+        attention_score=85,
+        attention_tier="high",
+        attention_reasons=["Context line"],
+        attention_summary="summary",
+        factors_applied=[],
+        snapshot={
+            "employee_id": "E9",
+            "process_name": "Receiving",
+            "source_summary": "daily performance upload",
+        },
+    )
+    item = AttentionItem(
+        employee_id=item.employee_id,
+        process_name=item.process_name,
+        attention_score=item.attention_score,
+        attention_tier=item.attention_tier,
+        attention_reasons=item.attention_reasons,
+        attention_summary=item.attention_summary,
+        factors_applied=[AttentionFactor("open_exception", 15, "Has unresolved operational exception")],
+        snapshot=item.snapshot,
+    )
+
+    monkeypatch.setattr("services.today_view_model_service.build_display_signal_from_attention_item", lambda item, today: signal)
+
+    vm = build_today_queue_view_model(attention=_summary(item), suppressed_cards=[], today=date(2026, 4, 11))
+    card = vm.primary_cards[0]
+
+    joined = " | ".join(card.expanded_lines).lower()
+    assert "signal source:" in joined
+    assert "open operational exception is still unresolved" in joined
+    assert card.collapsed_hint.startswith("Flagged due to")
+    assert card.collapsed_evidence.startswith("Source: ")
+    assert card.collapsed_issue == "Active issue linked"

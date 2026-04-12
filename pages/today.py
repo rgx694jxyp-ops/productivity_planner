@@ -37,10 +37,14 @@ from services.signal_formatting_service import (
     SignalDisplayMode,
 )
 from services.today_home_service import get_today_signals
+from services.today_page_meaning_service import (
+    TodayQueueRenderPlan,
+    build_today_queue_render_plan,
+    build_today_surface_meaning,
+)
 from services.today_view_model_service import (
     TodayQueueCardViewModel,
     TodayValueStripViewModel,
-    build_today_queue_view_model,
     build_today_value_strip_view_model,
 )
 from services.signal_traceability_service import traceability_payload_from_card
@@ -171,6 +175,44 @@ def _apply_today_styles() -> None:
             font-weight: 600;
             margin-top: 7px;
         }
+        .today-confidence-chip {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 0.74rem;
+            font-weight: 700;
+            margin-top: 4px;
+            margin-bottom: 2px;
+        }
+        .today-confidence-chip-low {
+            background: #eef3f8;
+            color: #49647f;
+            border: 1px solid #d4e0ec;
+        }
+        .today-confidence-chip-medium {
+            background: #fff3df;
+            color: #8a5a00;
+            border: 1px solid #efd3a4;
+        }
+        .today-confidence-chip-high {
+            background: #e8f5e9;
+            color: #1f6f2a;
+            border: 1px solid #b9e0be;
+        }
+        .today-freshness-meta {
+            color: #6c8198;
+            font-size: 0.8rem;
+            margin-top: 4px;
+        }
+        .today-stale-banner {
+            background: #fff7e8;
+            border: 1px solid #f0d9a7;
+            border-radius: 10px;
+            padding: 10px 12px;
+            margin-bottom: 10px;
+            color: #7a5600;
+            font-size: 0.9rem;
+        }
         .today-placeholder {
             background: #f8fbff;
             border: 1px dashed #c9d9ea;
@@ -282,32 +324,35 @@ def _show_flash_message() -> None:
         show_success_state(message)
 
 
-def _compute_data_state_flags(goal_status: list[dict], import_summary: dict, home_sections: dict[str, list[InsightCardContract]]) -> dict[str, bool]:
-    days = int(import_summary.get("days") or 0)
-    has_goal_data = bool(goal_status)
-    below_goal_count = sum(1 for row in goal_status if str(row.get("goal_status") or "") == "below_goal")
-    low_conf_cards = [
-        card
-        for section_cards in (home_sections or {}).values()
-        for card in section_cards
-        if str(card.confidence.level or "") == "low"
-    ]
-    partial_rows = [row for row in goal_status if str(row.get("trend") or "") == "insufficient_data"]
+def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bool:
+    """Try to rebuild today's payload once when it is missing or deferred."""
+    try:
+        from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
 
-    return {
-        "no_data": not has_goal_data and days == 0,
-        "partial_data": bool(partial_rows) or (0 < days < 3),
-        "low_confidence": bool(low_conf_cards),
-        "healthy": has_goal_data and below_goal_count == 0,
-    }
+        try:
+            compute_daily_signals(
+                signal_date=today_value,
+                tenant_id=tenant_id,
+            )
+            st.session_state["_post_import_refresh_pending"] = False
+        except Exception as compute_err:
+            message = str(compute_err or "")
+            if "daily_signals" in message or "PGRST205" in message:
+                st.session_state["_today_precomputed_payload"] = build_transient_today_payload(
+                    signal_date=today_value,
+                    tenant_id=tenant_id,
+                )
+            else:
+                raise
 
-
-def _today_status_line(*, state_flags: dict[str, bool], has_queue_items: bool) -> str:
-    if not has_queue_items and bool(state_flags.get("healthy")):
-        return "Status: No important changes surfaced today."
-    if bool(state_flags.get("no_data")) or bool(state_flags.get("partial_data")) or bool(state_flags.get("low_confidence")):
-        return "Status: Limited data today. Queue items are shown with confidence labels."
-    return ""
+        if hasattr(get_today_signals, "cache_clear"):
+            get_today_signals.cache_clear()
+        elif hasattr(get_today_signals, "clear"):
+            get_today_signals.clear()
+        return True
+    except Exception as recovery_err:
+        show_error_state(f"Today signal recovery failed: {recovery_err}")
+        return False
 
 
 def _queue_counts(queue_items: list[dict]) -> dict[str, int]:
@@ -392,14 +437,14 @@ def _render_empty_state() -> None:
 def _render_first_time_empty_state() -> None:
     """Onboarding-focused empty state for users who just completed first import."""
     with st.container(border=True):
-        st.markdown("### Welcome! 🎉")
+        st.markdown("### First signals are ready")
         st.markdown(
-            "You've just imported your team data. The action queue starts filling up once you begin logging "
-            "coaching conversations and follow-ups."
+            "You have enough data to start with early signal review. Some signals may be low confidence until "
+            "more shifts are imported."
         )
-        st.info("**Next step:** Go to **👥 Team** to see your employees, pick someone, and log your first coaching note.")
-        if st.button("👥 View team →", type="primary", use_container_width=True, key="first_time_view_team"):
-            st.session_state["goto_page"] = "team"
+        st.info("Next step: Review the signals shown here first, then drill into people who need a closer look.")
+        if st.button("📁 Import more shifts", type="secondary", use_container_width=True, key="first_time_import_more"):
+            st.session_state["goto_page"] = "import"
             st.rerun()
 
 
@@ -734,10 +779,27 @@ def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: 
     return unique_lines
 
 
+def _confidence_chip(line_5_text: str) -> str:
+    text = str(line_5_text or "").strip()
+    lowered = text.lower()
+    if not lowered:
+        return ""
+    if "low confidence" in lowered:
+        return '<div class="today-confidence-chip today-confidence-chip-low">Low confidence</div>'
+    if "confidence: high" in lowered:
+        return '<div class="today-confidence-chip today-confidence-chip-high">High confidence</div>'
+    if "confidence: medium" in lowered:
+        return '<div class="today-confidence-chip today-confidence-chip-medium">Medium confidence</div>'
+    return ""
+
+
 def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, compact: bool = False, show_action: bool = True) -> None:
     with st.container(border=True):
         st.markdown(f'<div class="today-insight-title">{card.line_1}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="today-insight-line">{card.line_2}</div>', unsafe_allow_html=True)
+        chip_html = _confidence_chip(str(card.line_5 or ""))
+        if chip_html:
+            st.markdown(chip_html, unsafe_allow_html=True)
         if not compact and str(card.line_3 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_3}</div>', unsafe_allow_html=True)
         if not compact and str(card.line_4 or "").strip():
@@ -747,6 +809,18 @@ def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, co
             st.markdown(f'<div class="today-confidence-badge-low">{line_5_text}</div>', unsafe_allow_html=True)
         else:
             st.markdown(f'<div class="today-insight-meta">{line_5_text}</div>', unsafe_allow_html=True)
+        freshness_text = str(card.freshness_line or "").strip()
+        if freshness_text:
+            st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
+        collapsed_hint = str(getattr(card, "collapsed_hint", "") or "").strip()
+        if collapsed_hint:
+            st.markdown(f'<div class="today-insight-meta">{collapsed_hint}</div>', unsafe_allow_html=True)
+        collapsed_evidence = str(getattr(card, "collapsed_evidence", "") or "").strip()
+        if collapsed_evidence:
+            st.markdown(f'<div class="today-insight-meta">{collapsed_evidence}</div>', unsafe_allow_html=True)
+        collapsed_issue = str(getattr(card, "collapsed_issue", "") or "").strip()
+        if collapsed_issue:
+            st.markdown(f'<div class="today-insight-meta">{collapsed_issue}</div>', unsafe_allow_html=True)
 
         if not compact and card.expanded_lines:
             with st.expander("Why this is shown", expanded=False):
@@ -766,32 +840,44 @@ def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, co
                 st.rerun()
 
 
-def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_cards: list[InsightCardContract] | None = None) -> None:
-    queue_vm = build_today_queue_view_model(
+def _render_unified_attention_queue(
+    attention: AttentionSummary,
+    *,
+    suppressed_cards: list[InsightCardContract] | None = None,
+    is_stale: bool = False,
+    show_secondary_open: bool = False,
+    weak_data_mode: bool = False,
+) -> None:
+    plan: TodayQueueRenderPlan = build_today_queue_render_plan(
         attention=attention,
         suppressed_cards=suppressed_cards,
-        today=date.today(),
+        today_value=date.today(),
+        is_stale=is_stale,
+        weak_data_mode=weak_data_mode,
+        show_secondary_open=show_secondary_open,
     )
 
-    st.markdown(f'<div class="today-section-label">{queue_vm.main_section_title}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="today-section-label">{plan.section_title}</div>', unsafe_allow_html=True)
+    if plan.weak_data_note:
+        st.markdown(f'<div class="today-supporting-note">{plan.weak_data_note}</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="today-supporting-note">Start here.</div>',
+        f'<div class="today-supporting-note">{plan.start_note}</div>',
         unsafe_allow_html=True,
     )
 
-    if not queue_vm.primary_cards:
-        st.markdown('<div class="today-placeholder">No items need immediate attention right now.</div>', unsafe_allow_html=True)
+    if plan.primary_placeholder:
+        st.markdown(f'<div class="today-placeholder">{plan.primary_placeholder}</div>', unsafe_allow_html=True)
     else:
-        for idx, card in enumerate(queue_vm.primary_cards):
+        for idx, card in enumerate(plan.primary_cards):
             _render_attention_card(
                 card=card,
                 key_prefix=f"today_attention_primary_{idx}",
             )
 
-    if queue_vm.secondary_cards:
-        st.markdown('<div class="today-secondary-subcaption">Low-confidence or limited-history signals</div>', unsafe_allow_html=True)
-        with st.expander("Other items", expanded=False):
-            for idx, card in enumerate(queue_vm.secondary_cards[:20]):
+    if plan.secondary_cards:
+        st.markdown(f'<div class="today-secondary-subcaption">{plan.secondary_caption}</div>', unsafe_allow_html=True)
+        with st.expander("Other items", expanded=bool(plan.secondary_expanded)):
+            for idx, card in enumerate(plan.secondary_cards[:20]):
                 _render_attention_card(
                     card=card,
                     key_prefix=f"today_attention_other_{idx}",
@@ -799,19 +885,11 @@ def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_c
                     show_action=False,
                 )
 
-    if queue_vm.suppressed:
-        st.session_state["_today_suppressed_signals_debug"] = [
-            {
-                "source": row.source,
-                "employee": row.employee,
-                "process": row.process,
-                "label": row.label,
-            }
-            for row in queue_vm.suppressed
-        ]
+    if plan.suppressed_debug_rows:
+        st.session_state["_today_suppressed_signals_debug"] = list(plan.suppressed_debug_rows)
 
 
-def _render_today_value_strip(value_strip: TodayValueStripViewModel) -> None:
+def _render_today_value_strip(value_strip: TodayValueStripViewModel, *, freshness_note: str = "", is_stale: bool = False) -> None:
     if not value_strip.cards:
         return
 
@@ -820,14 +898,19 @@ def _render_today_value_strip(value_strip: TodayValueStripViewModel) -> None:
         '<div class="today-supporting-note">A small read on today&apos;s data before you work the queue.</div>',
         unsafe_allow_html=True,
     )
+    if str(freshness_note or "").strip():
+        st.caption(freshness_note)
 
     columns = st.columns(len(value_strip.cards))
     for column, card in zip(columns, value_strip.cards):
         with column:
+            display_title = str(card.title or "")
+            if is_stale and "today" in display_title.lower():
+                display_title = display_title.replace("today", "latest snapshot").replace("Today", "Latest snapshot")
             st.markdown(
                 (
                     '<div class="today-value-card">'
-                    f'<div class="today-value-title">{card.title}</div>'
+                    f'<div class="today-value-title">{display_title}</div>'
                     f'<div class="today-value-headline">{card.headline}</div>'
                     f'<div class="today-value-detail">{card.detail}</div>'
                     '</div>'
@@ -969,16 +1052,8 @@ def page_today() -> None:
         if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"today", ""}:
             render_traceability_panel(_trace_ctx, heading="Signal source context")
 
-        st.markdown(
-        """
-    <div class="today-hero">
-        <div class="today-hero-kicker">Today Queue</div>
-        <div class="today-hero-title">Review today&apos;s signals</div>
-        <div class="today-hero-copy">See what needs attention or what you can review next.</div>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
+        st.markdown('<div class="today-section-label">Today queue</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-supporting-note">Start here and work top to bottom.</div>', unsafe_allow_html=True)
         _show_flash_message()
 
         refresh_col, _ = st.columns([1, 4])
@@ -1018,15 +1093,34 @@ def page_today() -> None:
                     return
 
         try:
+            tenant_id = str(st.session_state.get("tenant_id", "") or "")
+            recovery_attempted = False
+
+            # If large-import refresh was deferred, recover payload here so Today never stalls.
+            if bool(st.session_state.get("_post_import_refresh_pending")):
+                with st.spinner("Finalizing imported signals for Today…"):
+                    _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                recovery_attempted = True
+
             # Today page is read-only: it renders precomputed signals and summaries
             # and does not run trigger pipelines, trend computation, or scoring.
             precomputed = get_today_signals(
-                tenant_id=st.session_state.tenant_id,
+                tenant_id=tenant_id,
                 as_of_date=today_value.isoformat(),
             )
             if not precomputed:
-                st.info("Updating today's items.")
-                return
+                if not recovery_attempted:
+                    with st.spinner("Preparing today's queue…"):
+                        recovery_attempted = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                    if recovery_attempted:
+                        precomputed = get_today_signals(
+                            tenant_id=tenant_id,
+                            as_of_date=today_value.isoformat(),
+                        )
+
+                if not precomputed:
+                    st.info("Today's queue is still preparing. Use Refresh signals if this does not clear shortly.")
+                    return
 
             queue_items = list(precomputed.get("queue_items") or [])
             counts = _queue_counts(queue_items)
@@ -1066,20 +1160,45 @@ def page_today() -> None:
             show_error_state(f"Today screen data could not load cleanly: {exc}")
             return
 
-        state_flags = _compute_data_state_flags(goal_status, import_summary, home_sections)
-        status_line = _today_status_line(state_flags=state_flags, has_queue_items=counts.get("all", 0) > 0)
-        if status_line:
-            st.caption(status_line)
-
-        value_strip = build_today_value_strip_view_model(
+        meaning = build_today_surface_meaning(
             goal_status=goal_status,
             import_summary=import_summary,
+            home_sections=home_sections,
+            has_queue_items=counts.get("all", 0) > 0,
+            as_of_date=str(precomputed.get("as_of_date") or ""),
+            today_value=today_value,
         )
-        _render_today_value_strip(value_strip)
+
+        if meaning.status_line:
+            st.caption(meaning.status_line)
+
+        if meaning.stale_banner:
+            st.markdown(
+                f'<div class="today-stale-banner">{meaning.stale_banner}</div>',
+                unsafe_allow_html=True,
+            )
 
         _render_unified_attention_queue(
             attention_summary,
             suppressed_cards=home_sections.get("suppressed_signals", []),
+            is_stale=bool(meaning.state_flags.get("stale_data")),
+            show_secondary_open=bool(st.session_state.get("_first_import_just_completed")),
+            weak_data_mode=bool(meaning.weak_data_mode),
         )
+
+        value_strip = build_today_value_strip_view_model(
+            goal_status=goal_status,
+            import_summary=meaning.import_summary,
+        )
+        if value_strip.cards:
+            with st.expander("Supporting context", expanded=False):
+                _render_today_value_strip(
+                    value_strip,
+                    freshness_note=meaning.freshness_note,
+                    is_stale=bool(meaning.state_flags.get("stale_data")),
+                )
+
+        if bool(st.session_state.get("_first_import_just_completed")):
+            st.session_state["_first_import_just_completed"] = False
     finally:
         st.session_state["_ui_render_guard_active"] = False

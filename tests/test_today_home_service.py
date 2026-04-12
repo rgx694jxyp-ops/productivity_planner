@@ -71,3 +71,26 @@ def test_build_today_attention_summary_filters_to_eligible_employee_ids():
 
     assert summary.ranked_items
     assert all(item.employee_id == "E1" for item in summary.ranked_items)
+
+
+def test_build_today_attention_summary_keeps_low_tier_when_weak_data_mode_enabled():
+    summary = build_today_attention_summary(
+        goal_status=[
+            {
+                "EmployeeID": "E9",
+                "Department": "Packing",
+                "trend": "insufficient_data",
+                "confidence_label": "low",
+                "repeat_count": 0,
+                "Target UPH": 0,
+                "Average UPH": 0,
+            },
+        ],
+        queue_items=[],
+        open_exception_rows=[],
+        weak_data_mode=True,
+        max_items=10,
+    )
+
+    assert summary.total_evaluated == 1
+    assert len(summary.ranked_items) == 1

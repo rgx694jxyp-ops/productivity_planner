@@ -1098,7 +1098,7 @@ def _import_step3(tenant_id: str):
                     "and comparisons may shift after cleanup."
                 )
         _ic_c1, _ic_c2 = st.columns(2)
-        _ic_btn_label = f"View team ({_ic_below} need attention)" if _ic_below > 0 else "View your team"
+        _ic_btn_label = f"See latest signals ({_ic_below} need attention)" if _ic_below > 0 else "See latest signals"
         if _ic_c1.button(f"👥 {_ic_btn_label}", type="primary", use_container_width=True, key="ic_start_day"):
             del st.session_state["_import_complete_summary"]
             st.session_state["_first_import_just_completed"] = True

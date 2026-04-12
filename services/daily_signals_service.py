@@ -47,6 +47,89 @@ def _to_dt(value: Any) -> datetime | None:
         return None
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _infer_days_from_goal_status(goal_status: list[dict[str, Any]]) -> int:
+    counts: list[int] = []
+    for row in goal_status or []:
+        value = _safe_int(row.get("Record Count"), 0)
+        if value > 0:
+            counts.append(value)
+    if counts:
+        return max(counts)
+    if goal_status:
+        return 1
+    return 0
+
+
+def _build_import_summary(*, tenant_id: str, goal_status: list[dict[str, Any]]) -> dict[str, Any]:
+    emp_count = len({str(row.get("EmployeeID") or "").strip() for row in goal_status if str(row.get("EmployeeID") or "").strip()})
+    below_count = sum(1 for row in goal_status if str(row.get("goal_status") or "") == "below_goal")
+    inferred_days = _infer_days_from_goal_status(goal_status)
+
+    base_summary: dict[str, Any] = {
+        "days": inferred_days,
+        "emp_count": emp_count,
+        "below": below_count,
+        "risks": 0,
+    }
+
+    try:
+        from services.import_service import _decode_jsonish, _list_recent_uploads
+
+        uploads = _list_recent_uploads(tenant_id=tenant_id, days=30)
+        if not uploads:
+            return base_summary
+
+        latest = next((row for row in uploads if bool(row.get("is_active"))), uploads[0])
+        meta = _decode_jsonish(latest.get("header_mapping")) if latest else {}
+        stats = dict(meta.get("stats") or {}) if isinstance(meta, dict) else {}
+
+        rows_processed = _safe_int(stats.get("candidate_rows"), 0)
+        valid_rows = _safe_int(stats.get("accepted_rows"), _safe_int(stats.get("inserted_rows"), 0))
+        warning_rows = _safe_int(stats.get("warnings"), 0)
+        rejected_rows = _safe_int(stats.get("rejected_rows"), max(0, rows_processed - valid_rows))
+        confidence_score = _safe_int(stats.get("confidence_score"), 0)
+        trust_status = str(stats.get("trust_status") or "").strip().lower()
+
+        trust_payload = {
+            "status": trust_status,
+            "confidence_score": confidence_score,
+        } if trust_status else {}
+
+        return {
+            **base_summary,
+            "rows_processed": rows_processed,
+            "valid_rows": valid_rows,
+            "warning_rows": warning_rows,
+            "rejected_rows": rejected_rows,
+            "trust": trust_payload,
+        }
+    except Exception:
+        return base_summary
+
+
+def _is_weak_data_mode(import_summary: dict[str, Any]) -> bool:
+    summary = dict(import_summary or {})
+    days = _safe_int(summary.get("days"), 0)
+    trust = dict(summary.get("trust") or {})
+    trust_status = str(trust.get("status") or "").strip().lower()
+    confidence_score = _safe_int(trust.get("confidence_score"), 0)
+
+    if 0 < days <= 2:
+        return True
+    if trust_status in {"partial", "low_confidence", "invalid"}:
+        return True
+    if confidence_score > 0 and confidence_score < 75:
+        return True
+    return False
+
+
 def _serialize_insight_card(card: InsightCardContract) -> dict[str, Any]:
     return {
         "insight_id": card.insight_id,
@@ -154,12 +237,7 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
     )
     goal_status = goal_status or []
 
-    import_summary = {
-        "days": 0,
-        "emp_count": len({str(row.get("EmployeeID") or "").strip() for row in goal_status if str(row.get("EmployeeID") or "").strip()}),
-        "below": sum(1 for row in goal_status if str(row.get("goal_status") or "") == "below_goal"),
-        "risks": 0,
-    }
+    import_summary = _build_import_summary(tenant_id=tenant_id, goal_status=goal_status)
 
     home_sections = build_today_home_sections(
         queue_items=queue_items,
@@ -179,6 +257,7 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
         queue_items=queue_items,
         open_exception_rows=open_exception_rows,
         eligible_employee_ids=eligible_employee_ids,
+        weak_data_mode=_is_weak_data_mode(import_summary),
     )
 
     rows: list[dict[str, Any]] = []
@@ -297,12 +376,7 @@ def build_transient_today_payload(*, signal_date: date, tenant_id: str) -> dict[
     )
     goal_status = goal_status or []
 
-    import_summary = {
-        "days": 0,
-        "emp_count": len({str(row.get("EmployeeID") or "").strip() for row in goal_status if str(row.get("EmployeeID") or "").strip()}),
-        "below": sum(1 for row in goal_status if str(row.get("goal_status") or "") == "below_goal"),
-        "risks": 0,
-    }
+    import_summary = _build_import_summary(tenant_id=tenant_id, goal_status=goal_status)
 
     home_sections = build_today_home_sections(
         queue_items=queue_items,
@@ -322,6 +396,7 @@ def build_transient_today_payload(*, signal_date: date, tenant_id: str) -> dict[
         queue_items=queue_items,
         open_exception_rows=open_exception_rows,
         eligible_employee_ids=eligible_employee_ids,
+        weak_data_mode=_is_weak_data_mode(import_summary),
     )
 
     return {

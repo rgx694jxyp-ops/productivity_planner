@@ -45,6 +45,10 @@ class TodayQueueCardViewModel:
     line_4: str
     line_5: str
     expanded_lines: list[str]
+    freshness_line: str = ""
+    collapsed_hint: str = ""
+    collapsed_evidence: str = ""
+    collapsed_issue: str = ""
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,7 @@ class _RankedCard:
     confidence_rank: int
     severity_rank: int
     recency_rank: int
+    tie_breaker: tuple[str, str, str, str]
 
 
 _ATTENTION_STATES = {"EARLY_TREND", "STABLE_TREND", "PATTERN"}
@@ -214,11 +219,11 @@ def _build_data_health_block(import_summary: dict[str, Any] | None) -> TodayValu
     warning_rows = _safe_int(summary.get("warning_rows")) or 0
 
     if status == "valid" and score >= 80:
-        headline = "Data looks good"
+        headline = "Data confidence is high"
     elif status in {"partial", "low_confidence"} or warning_rows > 0 or score >= 50:
-        headline = "Some rows were flagged"
+        headline = "Data needs a quick double-check"
     else:
-        headline = "Review import details"
+        headline = "Data confidence is limited"
 
     if valid_rows is not None and rows_processed is not None and rows_processed > 0:
         detail = f"{valid_rows}/{rows_processed} rows usable"
@@ -226,6 +231,16 @@ def _build_data_health_block(import_summary: dict[str, Any] | None) -> TodayValu
         detail = f"{days} day(s) across {emp_count} employees"
     else:
         detail = "Latest import summary is available"
+
+    trust_level = ""
+    if status == "valid" and score >= 80:
+        trust_level = "Confidence: High"
+    elif status in {"partial", "low_confidence"} or warning_rows > 0 or score >= 50:
+        trust_level = "Confidence: Medium"
+    elif status:
+        trust_level = "Confidence: Low"
+    if trust_level:
+        detail = f"{detail} · {trust_level}"
 
     return TodayValueBlockViewModel(
         title="Data health",
@@ -292,15 +307,38 @@ def _attention_primary_signal(item: Any, signal: DisplaySignal) -> str:
 
 def _attention_context_lines(item: Any, signal: DisplaySignal, max_lines: int = 2) -> list[str]:
     lines: list[str] = []
+    snapshot = dict(getattr(item, "snapshot", {}) or {})
     for text in list(getattr(signal, "supporting_text", []) or []):
         clean = str(text or "").strip()
         if clean:
             lines.append(clean)
+
+    source_label = str(
+        snapshot.get("source_summary")
+        or snapshot.get("source_name")
+        or snapshot.get("source")
+        or snapshot.get("dataset_name")
+        or ""
+    ).strip()
+    if source_label:
+        lines.append(f"Signal source: {source_label}")
+
+    factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
+    if "open_exception" in factor_keys:
+        lines.append("Open operational exception is still unresolved")
+
+    import_job = str(snapshot.get("import_job_id") or "").strip()
+    if import_job:
+        lines.append(f"Import job: {import_job}")
+
+    included_rows = _safe_int(snapshot.get("included_rows"))
+    if included_rows is not None and included_rows > 0:
+        lines.append(f"Included rows: {included_rows}")
+
     observed = format_observed_line(signal)
     if observed:
         lines.append(observed)
 
-    factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
     if factor_keys.intersection({"overdue_followup", "due_today_followup", "open_exception"}):
         lines.append(signal_wording("follow_up_not_completed"))
     if factor_keys.intersection({"repeat_1", "repeat_2", "repeat_3_or_more"}):
@@ -323,6 +361,63 @@ def _attention_context_lines(item: Any, signal: DisplaySignal, max_lines: int = 
         if len(unique) >= max_lines:
             break
     return unique
+
+
+def _has_open_exception(item: Any, signal: DisplaySignal) -> bool:
+    factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
+    if "open_exception" in factor_keys:
+        return True
+    flags = dict(signal.flags or {})
+    return bool(flags.get("open_exception"))
+
+
+def _collapsed_evidence_line(item: Any, signal: DisplaySignal) -> str:
+    snapshot = dict(getattr(item, "snapshot", {}) or {})
+    source_label = str(
+        snapshot.get("source_summary")
+        or snapshot.get("source_name")
+        or snapshot.get("source")
+        or snapshot.get("dataset_name")
+        or ""
+    ).strip()
+    if source_label:
+        return f"Source: {source_label}"
+
+    included_rows = _safe_int(snapshot.get("included_rows"))
+    if included_rows is not None and included_rows > 0:
+        return f"Evidence: {included_rows} rows in latest snapshot"
+
+    import_job = str(snapshot.get("import_job_id") or "").strip()
+    if import_job:
+        return f"Evidence: import job {import_job}"
+
+    observed = format_observed_line(signal)
+    return observed or ""
+
+
+def _ranking_hint(item: Any, signal: DisplaySignal) -> str:
+    factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
+    reasons: list[str] = []
+
+    if factor_keys.intersection({"trend_declining", "trend_below_expected", "trend_inconsistent"}):
+        reasons.append("recent drop")
+    if factor_keys.intersection({"repeat_1", "repeat_2", "repeat_3_or_more"}):
+        reasons.append("repeat pattern")
+    if factor_keys.intersection({"overdue_followup", "due_today_followup"}) or bool((signal.flags or {}).get("overdue")) or bool((signal.flags or {}).get("due_today")):
+        reasons.append("follow-up status")
+    if "open_exception" in factor_keys:
+        reasons.append("active issue")
+
+    if not reasons:
+        label = str(format_signal_label(signal) or "").strip().lower()
+        if label:
+            reasons.append(label)
+
+    if len(reasons) >= 2:
+        return f"Flagged due to {reasons[0]} and {reasons[1]}."
+    if reasons:
+        return f"Flagged due to {reasons[0]}."
+    return ""
 
 
 def _is_follow_up_signal(signal: DisplaySignal) -> bool:
@@ -406,6 +501,9 @@ def _follow_up_due_line(item: Any, signal: DisplaySignal) -> str:
 
 def _short_follow_up_context(item: Any, signal: DisplaySignal) -> str:
     snapshot = dict(getattr(item, "snapshot", {}) or {})
+    factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
+    if "open_exception" in factor_keys:
+        return "Active issue linked"
     repeat_count = int(snapshot.get("repeat_count") or 0)
     if repeat_count >= 2:
         return f"Seen {repeat_count} times this week"
@@ -416,6 +514,18 @@ def _short_follow_up_context(item: Any, signal: DisplaySignal) -> str:
 def _confidence_level_value(signal: DisplaySignal) -> str:
     value = getattr(signal.confidence_level, "value", signal.confidence_level)
     return str(value or getattr(signal.confidence, "value", "low")).strip().lower()
+
+
+def _freshness_line(signal: DisplaySignal) -> str:
+    observed = getattr(signal, "observed_date", None)
+    if observed is None:
+        return ""
+    age_days = max(0, (date.today() - observed).days)
+    if age_days == 0:
+        return "Data age: current shift/day. Safe for live review."
+    if age_days == 1:
+        return "Data age: 1 day old. Confirm recent shift changes before acting."
+    return f"Data age: {age_days} days old. Treat as latest snapshot/backlog review, not live floor state."
 
 
 def _low_data_recent_count(source: Any, signal: DisplaySignal) -> int | None:
@@ -503,6 +613,15 @@ def _recency_rank(signal: DisplaySignal) -> int:
     return -int(signal.observed_date.toordinal())
 
 
+def _tie_breaker(item: Any, signal: DisplaySignal) -> tuple[str, str, str, str]:
+    snapshot = dict(getattr(item, "snapshot", {}) or {})
+    employee_key = str(getattr(item, "employee_id", "") or snapshot.get("employee_id") or snapshot.get("EmployeeID") or "").strip().lower()
+    process_key = str(getattr(item, "process_name", "") or snapshot.get("process_name") or snapshot.get("Department") or "").strip().lower()
+    label_key = str(format_signal_label(signal) or "").strip().lower()
+    summary_key = str(getattr(item, "attention_summary", "") or "").strip().lower()
+    return (employee_key, process_key, label_key, summary_key)
+
+
 def _sort_ranked_cards(rows: list[_RankedCard]) -> list[_RankedCard]:
     return sorted(
         rows,
@@ -513,8 +632,115 @@ def _sort_ranked_cards(rows: list[_RankedCard]) -> list[_RankedCard]:
             row.confidence_rank,
             row.severity_rank,
             row.recency_rank,
+            row.tie_breaker,
         ),
     )
+
+
+def _merge_lines(existing: list[str], incoming: list[str], *, max_lines: int = 3) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for line in [*list(existing or []), *list(incoming or [])]:
+        clean = str(line or "").strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(clean)
+        if len(merged) >= max_lines:
+            break
+    return merged
+
+
+def _merge_ranked_cards(preferred: _RankedCard, incoming: _RankedCard) -> _RankedCard:
+    additional_reason = ""
+    incoming_reason = str(incoming.card.line_2 or "").strip()
+    preferred_reason = str(preferred.card.line_2 or "").strip()
+    if incoming_reason and preferred_reason and incoming_reason.lower() != preferred_reason.lower():
+        additional_reason = f"Additional signal: {incoming_reason}"
+
+    merged_lines = _merge_lines(
+        list(preferred.card.expanded_lines or []),
+        [additional_reason, *list(incoming.card.expanded_lines or [])],
+        max_lines=3,
+    )
+
+    return _RankedCard(
+        card=TodayQueueCardViewModel(
+            employee_id=preferred.card.employee_id,
+            process_id=preferred.card.process_id,
+            state=preferred.card.state,
+            line_1=preferred.card.line_1,
+            line_2=preferred.card.line_2,
+            line_3=preferred.card.line_3,
+            line_4=preferred.card.line_4,
+            line_5=preferred.card.line_5,
+            expanded_lines=merged_lines,
+            freshness_line=preferred.card.freshness_line or incoming.card.freshness_line,
+            collapsed_hint=preferred.card.collapsed_hint or incoming.card.collapsed_hint,
+            collapsed_evidence=preferred.card.collapsed_evidence or incoming.card.collapsed_evidence,
+            collapsed_issue=preferred.card.collapsed_issue or incoming.card.collapsed_issue,
+        ),
+        bucket_rank=preferred.bucket_rank,
+        status_rank=preferred.status_rank,
+        repeat_rank=preferred.repeat_rank,
+        confidence_rank=preferred.confidence_rank,
+        severity_rank=preferred.severity_rank,
+        recency_rank=preferred.recency_rank,
+        tie_breaker=preferred.tie_breaker,
+    )
+
+
+def _dedupe_ranked_cards(rows: list[_RankedCard]) -> list[_RankedCard]:
+    deduped: list[_RankedCard] = []
+    index_by_key: dict[tuple[str, str], int] = {}
+
+    for row in rows:
+        card = row.card
+        key = (str(card.employee_id or "").strip().lower(), str(card.process_id or "").strip().lower())
+        if key not in index_by_key:
+            index_by_key[key] = len(deduped)
+            deduped.append(row)
+            continue
+
+        current_index = index_by_key[key]
+        current = deduped[current_index]
+
+        deduped[current_index] = _merge_ranked_cards(current, row)
+
+    return deduped
+
+
+def _merge_secondary_into_primary_duplicates(
+    primary_rows: list[_RankedCard],
+    secondary_rows: list[_RankedCard],
+) -> tuple[list[_RankedCard], list[_RankedCard]]:
+    merged_primary = list(primary_rows)
+    merged_secondary: list[_RankedCard] = []
+    primary_index: dict[tuple[str, str], int] = {
+        (str(row.card.employee_id or "").strip().lower(), str(row.card.process_id or "").strip().lower()): idx
+        for idx, row in enumerate(merged_primary)
+    }
+
+    for row in list(secondary_rows or []):
+        key = (str(row.card.employee_id or "").strip().lower(), str(row.card.process_id or "").strip().lower())
+        if key in primary_index:
+            idx = primary_index[key]
+            merged_primary[idx] = _merge_ranked_cards(merged_primary[idx], row)
+            continue
+        merged_secondary.append(row)
+
+    return merged_primary, merged_secondary
+
+
+def _should_force_primary(item: Any, signal: DisplaySignal) -> bool:
+    factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
+    flags = dict(signal.flags or {})
+    if bool(flags.get("overdue")) or bool(flags.get("due_today")):
+        return True
+    return bool(factor_keys.intersection({"overdue_followup", "due_today_followup", "open_exception"}))
 
 
 def _section_title(primary_cards: list[TodayQueueCardViewModel], secondary_cards: list[TodayQueueCardViewModel]) -> str:
@@ -580,12 +806,15 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             line_4=line_4,
             line_5=line_5,
             expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, max_lines=3),
+            collapsed_hint=_ranking_hint(item, signal),
+            collapsed_evidence=_collapsed_evidence_line(item, signal),
+            collapsed_issue="Active issue linked" if _has_open_exception(item, signal) else "",
         )
 
     if current_state_mode:
         line_2 = format_signal_label(signal)
         line_3 = format_observed_line(signal)
-        line_4 = format_confidence_line(signal)
+        line_4 = ""
         return TodayQueueCardViewModel(
             employee_id=str(getattr(item, "employee_id", "") or ""),
             process_id=str(getattr(item, "process_name", "") or ""),
@@ -594,8 +823,12 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             line_2=line_2,
             line_3=line_3,
             line_4=line_4,
-            line_5="",
+            line_5=format_confidence_line(signal),
             expanded_lines=[],
+            freshness_line=_freshness_line(signal),
+            collapsed_hint=_ranking_hint(item, signal),
+            collapsed_evidence=_collapsed_evidence_line(item, signal),
+            collapsed_issue="Active issue linked" if _has_open_exception(item, signal) else "",
         )
 
     if _is_follow_up_signal(signal):
@@ -625,6 +858,10 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
         line_4=line_4,
         line_5=line_5,
         expanded_lines=expanded,
+        freshness_line=_freshness_line(signal),
+        collapsed_hint=_ranking_hint(item, signal),
+        collapsed_evidence=_collapsed_evidence_line(item, signal),
+        collapsed_issue="Active issue linked" if _has_open_exception(item, signal) else "",
     )
 
 
@@ -657,7 +894,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
     if current_state_mode:
         line_2 = format_signal_label(signal)
         line_3 = format_observed_line(signal)
-        line_4 = format_confidence_line(signal)
+        line_4 = ""
         return TodayQueueCardViewModel(
             employee_id=str(card.drill_down.entity_id or ""),
             process_id=process_name,
@@ -666,8 +903,9 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             line_2=line_2,
             line_3=line_3,
             line_4=line_4,
-            line_5="",
+            line_5=format_confidence_line(signal),
             expanded_lines=[],
+            freshness_line=_freshness_line(signal),
         )
 
     if _is_follow_up_signal(signal):
@@ -689,6 +927,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
         line_4=line_4,
         line_5=line_5,
         expanded_lines=expanded,
+        freshness_line=_freshness_line(signal),
     )
 
 
@@ -735,9 +974,11 @@ def build_today_queue_view_model(
             confidence_rank=_confidence_rank(signal),
             severity_rank=_severity_rank(item),
             recency_rank=_recency_rank(signal),
+            tie_breaker=_tie_breaker(item, signal),
         )
         mode = get_signal_display_mode(signal)
-        if (not eligible_primary) or mode == SignalDisplayMode.CURRENT_STATE or _confidence_level_value(signal) == "low" or str(getattr(item, "attention_tier", "")) == "low":
+        force_primary = _should_force_primary(item, signal)
+        if ((not eligible_primary) and (not force_primary)) or mode == SignalDisplayMode.CURRENT_STATE or (_confidence_level_value(signal) == "low" and (not force_primary)) or (str(getattr(item, "attention_tier", "")) == "low" and (not force_primary)):
             secondary_ranked.append(ranked)
         else:
             primary_ranked.append(ranked)
@@ -756,11 +997,21 @@ def build_today_queue_view_model(
                 confidence_rank=_confidence_rank(signal),
                 severity_rank=0,
                 recency_rank=_recency_rank(signal),
+                tie_breaker=(
+                    str(card.drill_down.entity_id or "").strip().lower(),
+                    str(signal.process or "").strip().lower(),
+                    str(format_signal_label(signal) or "").strip().lower(),
+                    str(card.title or "").strip().lower(),
+                ),
             )
         )
 
-    primary_cards = [row.card for row in _sort_ranked_cards(primary_ranked)]
-    secondary_cards = [row.card for row in _sort_ranked_cards(secondary_ranked)]
+    secondary_deduped = _dedupe_ranked_cards(_sort_ranked_cards(secondary_ranked))
+    primary_deduped = _dedupe_ranked_cards(_sort_ranked_cards(primary_ranked))
+    primary_deduped, secondary_deduped = _merge_secondary_into_primary_duplicates(primary_deduped, secondary_deduped)
+
+    primary_cards = [row.card for row in primary_deduped]
+    secondary_cards = [row.card for row in secondary_deduped]
 
     if not primary_cards:
         promoted_current = [card for card in secondary_cards if str(card.state or "") == "CURRENT"]

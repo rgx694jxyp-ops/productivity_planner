@@ -159,3 +159,121 @@ def test_low_data_does_not_outrank_strong_valid_signal(monkeypatch):
     vm = build_today_queue_view_model(attention=_summary([low_data, strong]), suppressed_cards=[], today=date(2026, 4, 11))
     assert vm.primary_cards[0].employee_id == "E6"
     assert any(card.employee_id == "E5" for card in vm.secondary_cards)
+
+
+def test_overdue_low_confidence_signal_stays_in_primary(monkeypatch):
+    overdue = _item(employee_id="E7", score=35, tier="low")
+
+    signals = {
+        "E7": DisplaySignal(
+            employee_name="E7",
+            process="Receiving",
+            signal_label=SignalLabel.FOLLOW_UP_OVERDUE,
+            observed_date=date(2026, 4, 11),
+            observed_value=30.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.LOW,
+            data_completeness=None,
+            flags={"overdue": True},
+        )
+    }
+
+    monkeypatch.setattr(
+        "services.today_view_model_service.build_display_signal_from_attention_item",
+        lambda item, today: signals[str(item.employee_id)],
+    )
+
+    vm = build_today_queue_view_model(attention=_summary([overdue]), suppressed_cards=[], today=date(2026, 4, 11))
+    assert len(vm.primary_cards) == 1
+    assert vm.primary_cards[0].employee_id == "E7"
+
+
+def test_duplicate_employee_process_cards_are_merged_with_conflict_line(monkeypatch):
+    first = _item(employee_id="E8", score=85)
+    second = _item(employee_id="E8", score=80)
+
+    signals = {
+        85: DisplaySignal(
+            employee_name="E8",
+            process="Receiving",
+            signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+            observed_date=date(2026, 4, 11),
+            observed_value=31.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.HIGH,
+            data_completeness=None,
+            flags={},
+        ),
+        80: DisplaySignal(
+            employee_name="E8",
+            process="Receiving",
+            signal_label=SignalLabel.INCONSISTENT_PACE,
+            observed_date=date(2026, 4, 11),
+            observed_value=31.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.HIGH,
+            data_completeness=None,
+            flags={},
+        ),
+    }
+
+    monkeypatch.setattr(
+        "services.today_view_model_service.build_display_signal_from_attention_item",
+        lambda item, today: signals[int(item.attention_score)],
+    )
+
+    vm = build_today_queue_view_model(attention=_summary([first, second]), suppressed_cards=[], today=date(2026, 4, 11))
+    assert len(vm.primary_cards) == 1
+    assert any(line.startswith("Additional signal: ") for line in vm.primary_cards[0].expanded_lines)
+
+
+def test_cross_bucket_duplicate_is_merged_into_primary(monkeypatch):
+    primary_item = _item(employee_id="E10", score=90, tier="high")
+    secondary_item = _item(employee_id="E10", score=40, tier="low")
+
+    signals = {
+        90: DisplaySignal(
+            employee_name="E10",
+            process="Receiving",
+            signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+            observed_date=date(2026, 4, 11),
+            observed_value=31.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.HIGH,
+            data_completeness=None,
+            flags={},
+        ),
+        40: DisplaySignal(
+            employee_name="E10",
+            process="Receiving",
+            signal_label=SignalLabel.INCONSISTENT_PACE,
+            observed_date=date(2026, 4, 11),
+            observed_value=31.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.LOW,
+            data_completeness=None,
+            flags={},
+        ),
+    }
+
+    monkeypatch.setattr(
+        "services.today_view_model_service.build_display_signal_from_attention_item",
+        lambda item, today: signals[int(item.attention_score)],
+    )
+
+    vm = build_today_queue_view_model(attention=_summary([primary_item, secondary_item]), suppressed_cards=[], today=date(2026, 4, 11))
+
+    assert len(vm.primary_cards) == 1
+    assert vm.primary_cards[0].employee_id == "E10"
+    assert len(vm.secondary_cards) == 0
+    assert any(line.startswith("Additional signal: ") for line in vm.primary_cards[0].expanded_lines)
