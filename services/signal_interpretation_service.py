@@ -15,11 +15,12 @@ from domain.insight_card_contract import (
     TraceabilityContext,
     VolumeWorkloadContext,
 )
-from domain.display_signal import SignalLabel
+from domain.display_signal import DisplaySignalState, SignalLabel
 from services.display_signal_factory import build_display_signal
 from services.signal_formatting_service import (
     format_comparison_line,
     format_confidence_line,
+    format_friendly_date,
     format_observed_line,
     format_signal_label,
     get_signal_display_mode,
@@ -189,20 +190,20 @@ def _is_low_data_state(
 
 
 def _low_data_note(sample_size: int) -> str:
-    if sample_size <= 0:
-        return "Only limited recent records available"
-    suffix = "record" if sample_size == 1 else "records"
-    return f"Only {sample_size} recent {suffix} available"
+    return f"Only {max(0, sample_size)} recent record(s) available"
 
 
-def _build_low_data_compact_lines(sample_size: int) -> CompactSignalLines:
+def _build_low_data_compact_lines(sample_size: int, observed_date: date | None = None) -> CompactSignalLines:
+    supporting_lines = [_low_data_note(sample_size)]
+    if observed_date is not None:
+        supporting_lines.append(f"Observed: {format_friendly_date(observed_date)}")
     return CompactSignalLines(
         line_1="",
         line_2="Not enough history yet",
-        line_3="",
-        line_4="",
+        line_3=supporting_lines[0] if len(supporting_lines) > 0 else "",
+        line_4=supporting_lines[1] if len(supporting_lines) > 1 else "",
         line_5="Low confidence",
-        expanded_line="No recent performance data" if sample_size <= 0 else _low_data_note(sample_size),
+        expanded_line="",
     )
 
 
@@ -225,16 +226,17 @@ def _build_compact_signal_lines(
     baseline_value = workload_context.baseline_volume
     baseline_unit = workload_context.baseline_volume_unit
 
-    has_observed = observed_value is not None
-    has_baseline = baseline_value is not None
-    if _is_low_data_state(confidence=confidence, data_completeness=data_completeness, metadata=metadata) and not (has_observed and not has_baseline):
-        return _build_low_data_compact_lines(sample_size)
-
     today_ref = _coerce_date(metadata.get("today_date")) or (time_context.window_end.date() if time_context.window_end else date.today())
     observed_date = (
         _coerce_date(metadata.get("observed_date"))
         or (time_context.window_end.date() if time_context.window_end else None)
     )
+
+    has_observed = observed_value is not None
+    has_baseline = baseline_value is not None
+    if _is_low_data_state(confidence=confidence, data_completeness=data_completeness, metadata=metadata) and not has_observed:
+        return _build_low_data_compact_lines(sample_size, observed_date)
+
     is_shift_level = bool(metadata.get("is_shift_level") or False)
     observed_window = format_observed_label(observed_date, today=today_ref, is_shift_level=is_shift_level)
 
@@ -274,7 +276,27 @@ def _build_compact_signal_lines(
 
     comparison_start = min(comparison_dates) if comparison_dates else None
     comparison_end = max(comparison_dates) if comparison_dates else None
+    explicit_state = None
+    pattern_count = _safe_int(metadata.get("repeat_count"), 0)
+    minimum_trend_points = _safe_int(confidence.minimum_expected_points, 3) or 3
+    has_observed = observed_value is not None
+    has_valid_comparison = comparison_start is not None and comparison_end is not None and baseline_value is not None
+    metric_labels = {"below_expected_pace", "lower_than_recent_pace", "inconsistent_pace", "improving_pace"}
+    if not has_observed:
+        explicit_state = DisplaySignalState.LOW_DATA
+    elif mapped_label in metric_labels and sample_size < 3:
+        explicit_state = DisplaySignalState.CURRENT
+    elif mapped_label in metric_labels and not has_valid_comparison:
+        explicit_state = DisplaySignalState.CURRENT
+    elif mapped_label == "repeated_pattern" and pattern_count > 1:
+        explicit_state = DisplaySignalState.PATTERN
+    elif str(confidence.level or "low").lower() == "low" or sample_size < minimum_trend_points:
+        explicit_state = DisplaySignalState.EARLY_TREND
+    else:
+        explicit_state = DisplaySignalState.STABLE_TREND
+
     display_signal = build_display_signal(
+        employee_id=metadata.get("employee_id") or employee_name,
         employee_name=employee_name,
         process=process_name,
         signal_label=mapped_label,
@@ -283,9 +305,19 @@ def _build_compact_signal_lines(
         comparison_start_date=comparison_start,
         comparison_end_date=comparison_end,
         comparison_value=baseline_value,
+        state=explicit_state.value,
+        usable_points=sample_size,
+        minimum_trend_points=minimum_trend_points,
+        pattern_count=pattern_count or None,
+        pattern_window_label=metadata.get("pattern_window_label"),
         confidence=str(confidence.level or "low"),
         data_completeness=str(data_completeness.status or "unknown"),
         flags={"repeat": int(metadata.get("repeat_count") or 0) > 0},
+        supporting_text=[
+            str(metadata.get("pattern_summary") or ""),
+            str(metadata.get("trend_explanation") or ""),
+        ],
+        delta_percent=metadata.get("change_pct"),
         today=today_ref,
     )
 
@@ -294,10 +326,10 @@ def _build_compact_signal_lines(
         return CompactSignalLines(
             line_1="",
             line_2=format_signal_label(display_signal),
-            line_3="",
-            line_4="",
+            line_3=_low_data_note(sample_size),
+            line_4=f"Observed: {format_friendly_date(observed_date)}" if observed_date is not None else "",
             line_5=format_confidence_line(display_signal),
-            expanded_line="No recent performance data",
+            expanded_line="",
         )
 
     if mode == SignalDisplayMode.CURRENT_STATE:
@@ -620,6 +652,7 @@ def interpret_below_expected_performance(*, row: dict, today: date) -> InsightCa
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
             "pattern_summary": pattern_memory.summary,
+            "pattern_window_label": "this week" if int(pattern_memory.repeat_count or 0) >= 2 else None,
         },
     )
 
@@ -723,6 +756,7 @@ def interpret_changed_from_normal(*, row: dict, today: date) -> InsightCardContr
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
             "pattern_summary": pattern_memory.summary,
+            "pattern_window_label": "this week" if int(pattern_memory.repeat_count or 0) >= 2 else None,
             "trend_explanation": trend_explanation,
         },
     )
@@ -808,6 +842,7 @@ def interpret_repeated_decline(*, action: dict, today: date) -> InsightCardContr
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
             "pattern_summary": pattern_memory.summary,
+            "pattern_window_label": "this week" if int(pattern_memory.repeat_count or 0) >= 2 else None,
             "pattern_recent_window_days": pattern_memory.recent_window_days,
         },
     )
@@ -889,6 +924,7 @@ def interpret_unresolved_issue(*, action: dict, today: date) -> InsightCardContr
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
             "pattern_summary": pattern_memory.summary,
+            "pattern_window_label": "this week" if int(pattern_memory.repeat_count or 0) >= 2 else None,
             "pattern_recent_window_days": pattern_memory.recent_window_days,
         },
     )
@@ -981,6 +1017,7 @@ def interpret_follow_up_due(*, action: dict, today: date) -> InsightCardContract
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
             "pattern_summary": pattern_memory.summary,
+            "pattern_window_label": "this week" if int(pattern_memory.repeat_count or 0) >= 2 else None,
             "pattern_recent_window_days": pattern_memory.recent_window_days,
         },
     )

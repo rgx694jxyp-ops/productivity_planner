@@ -196,6 +196,24 @@ def _render_data_confidence_panel(trust: dict) -> None:
         st.caption("Data issues can reduce confidence in today’s interpretation, especially trend and comparison sections.")
 
 
+def _render_import_ready_message(summary: dict) -> None:
+    rows_ready = int(summary.get("valid_rows", 0) or summary.get("rows_processed", 0) or 0)
+    employees = int(summary.get("emp_count", 0) or 0)
+    row_label = "row" if rows_ready == 1 else "rows"
+    employee_label = "employee" if employees == 1 else "employees"
+
+    st.markdown(
+        f'<div class="dpd-import-done" style="background:#ffffff;border:1px solid #d9e2ef;border-radius:10px;padding:14px 16px;">'
+        f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">Your data is ready</div>'
+        f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;margin-top:6px;"><strong>{rows_ready:,}</strong> {row_label} across <strong>{employees:,}</strong> {employee_label}</div>'
+        f'<div class="dpd-import-row" style="color:#000000;font-size:15px;line-height:1.5;margin-top:8px;">Data looks good</div>'
+        f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:10px;">You can start reviewing performance now</div>'
+        f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:4px;">Comparisons will appear after more data is available</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_issue_group_handling(
     *,
     trust: dict,
@@ -1008,34 +1026,10 @@ def _import_step3(tenant_id: str):
     # ── Post-import confidence summary (shown once after pipeline completes) ──
     if st.session_state.get("_import_complete_summary"):
         _sm = st.session_state["_import_complete_summary"]
-        _ic_emp   = _sm.get("emp_count", 0)
-        _ic_days  = _sm.get("days", 1)
         _ic_below = _sm.get("below", 0)
         _ic_risks = _sm.get("risks", 0)
-        _ic_rank  = _sm.get("ranked", 0)
         _ic_trust = _sm.get("trust") or {}
-        _ic_below_line = (
-            f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-warn" style="color:#8a5a00;">⚠</span>&nbsp;'
-            f'<strong>{_ic_below}</strong> employees below goal &nbsp;·&nbsp; {_ic_risks} high-priority risks</div>'
-            if _ic_below > 0 else
-            f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;"><span class="dpd-import-ok" style="color:#1f6f2a;">✔</span>&nbsp;All employees on target</div>'
-        )
-        _ic_next_label = f"You have {_ic_below} employee{'s' if _ic_below != 1 else ''} below goal." if _ic_below > 0 else "All employees are on target. "
-        _ic_context = (
-            f"Ready to coach and track outcomes." if _ic_below > 0 
-            else f"Great shape! Start logging notes to track team trends."
-        )
-        st.markdown(
-            f'<div class="dpd-import-done" style="background:#ffffff;border:1px solid #d9e2ef;border-radius:10px;padding:14px 16px;">'
-            f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">✔ Import complete — ready to go</div>'
-            f'<div class="dpd-import-row" style="color:#000000;font-size:14px;line-height:1.5;margin-bottom:8px;"><span style="color:#5d7693;">'
-            f'<strong>{_ic_emp}</strong> employees · <strong>{_ic_days}</strong> {"day" if _ic_days == 1 else "days"} of data</span></div>'
-            f'{_ic_below_line}'
-            f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:10px;">{_ic_next_label} {_ic_context}</div>'
-            f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:6px;">You can start reviewing performance now. Comparisons will appear after more data is available.</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+        _render_import_ready_message(_sm)
 
         # ── First interpreted insight ─────────────────────────────────────────
         try:
@@ -2280,11 +2274,8 @@ def _import_step3(tenant_id: str):
 
     if st.session_state.get("pipeline_done") and st.session_state.get("alloc_rows"):
         _uc = len({r["emp_id"] for r in st.session_state.alloc_rows})
-        _gs = st.session_state.get("goal_status", []) or []
-        _below = len([r for r in _gs if r.get("goal_status") == "below_goal"])
-        _risks = len([r for r in _gs if r.get("goal_status") == "below_goal" and normalize_trend_state(r.get("trend") or "") == "declining"])
         col2.success(
-            f"✓ {_uc} employees processed — {_below} below goal, {_risks} high-priority risks detected."
+            f"✓ Your data is ready — {_uc} employee{'s' if _uc != 1 else ''} available for review now."
         )
 
     if st.button("↺ Start fresh import", use_container_width=True):

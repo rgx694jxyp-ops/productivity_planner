@@ -1,6 +1,6 @@
 from datetime import date
 
-from domain.display_signal import DisplaySignal, SignalConfidence, SignalLabel
+from domain.display_signal import DisplaySignal, DisplaySignalState, SignalConfidence, SignalLabel
 from services.signal_formatting_service import (
     format_comparison_line,
     format_confidence_line,
@@ -37,6 +37,52 @@ def test_signal_formatting_full_signal_lines():
     assert format_signal_label(signal) == "Below expected pace"
     assert format_observed_line(signal) == "Observed: Apr 11 (38.1 UPH)"
     assert format_comparison_line(signal) == "Compared to: Apr 6–Apr 10 avg (45.0 UPH)"
+    assert format_confidence_line(signal) == "Confidence: High"
+
+
+def test_early_trend_renders_short_comparison_window():
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOWER_THAN_RECENT_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=38.1,
+        comparison_start_date=date(2026, 4, 9),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=42.0,
+        confidence=SignalConfidence.LOW,
+        state=DisplaySignalState.EARLY_TREND,
+        primary_label="Lower than recent pace",
+        data_completeness=None,
+        flags={},
+    )
+
+    assert format_signal_label(signal) == "Lower than recent pace"
+    assert format_observed_line(signal) == "Observed: Apr 11 (38.1 UPH)"
+    assert format_comparison_line(signal) == "Compared to: Apr 9–Apr 10 avg (42.0 UPH)"
+    assert format_confidence_line(signal) == "Confidence: Low"
+
+
+def test_stable_trend_renders_full_comparison_window():
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOWER_THAN_RECENT_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=38.1,
+        comparison_start_date=date(2026, 4, 6),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=42.0,
+        confidence=SignalConfidence.HIGH,
+        state=DisplaySignalState.STABLE_TREND,
+        primary_label="Lower than recent pace",
+        data_completeness=None,
+        flags={},
+    )
+
+    assert format_signal_label(signal) == "Lower than recent pace"
+    assert format_observed_line(signal) == "Observed: Apr 11 (38.1 UPH)"
+    assert format_comparison_line(signal) == "Compared to: Apr 6–Apr 10 avg (42.0 UPH)"
     assert format_confidence_line(signal) == "Confidence: High"
 
 
@@ -81,6 +127,30 @@ def test_signal_display_mode_current_state_when_no_comparison():
         flags={},
     )
     assert get_signal_display_mode(signal) == SignalDisplayMode.CURRENT_STATE
+    assert format_signal_label(signal) == "Current pace: 38.1 UPH"
+    assert format_observed_line(signal) == "Apr 11"
+    assert format_confidence_line(signal) == "Low confidence"
+
+
+def test_current_state_renders_current_pace_with_date_and_low_confidence():
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=38.1,
+        comparison_start_date=None,
+        comparison_end_date=None,
+        comparison_value=None,
+        confidence=SignalConfidence.HIGH,
+        state=DisplaySignalState.CURRENT,
+        primary_label="Current pace",
+        observed_unit="UPH",
+        is_low_data=True,
+        data_completeness=None,
+        flags={},
+    )
+
     assert format_signal_label(signal) == "Current pace: 38.1 UPH"
     assert format_observed_line(signal) == "Apr 11"
     assert format_confidence_line(signal) == "Low confidence"
@@ -254,7 +324,31 @@ def test_low_data_expanded_format_is_strict_and_friendly():
     assert lines == ["Only 2 recent record(s) available", "Observed: Apr 11"]
 
 
-def test_low_data_lines_max_count_is_enforced():
+def test_low_data_expanded_format_prefers_sanitized_supporting_text():
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOW_DATA,
+        observed_date=date(2026, 4, 11),
+        observed_value=None,
+        comparison_start_date=None,
+        comparison_end_date=None,
+        comparison_value=None,
+        confidence=SignalConfidence.LOW,
+        supporting_text=[
+            "Only 1 recent record(s) available",
+            "Low confidence",
+            "Missing baseline",
+        ],
+        data_completeness=None,
+        flags={},
+    )
+
+    lines = format_low_data_expanded_lines(signal, recent_record_count=3)
+    assert lines == ["Only 1 recent record(s) available", "Observed: Apr 11"]
+
+
+def test_low_data_has_max_two_supporting_lines():
     signal = DisplaySignal(
         employee_name="Alex",
         process="Receiving",
@@ -269,13 +363,11 @@ def test_low_data_lines_max_count_is_enforced():
         flags={},
     )
 
-    collapsed = format_low_data_collapsed_lines(signal)
     expanded = format_low_data_expanded_lines(signal, recent_record_count=3)
-    assert len(collapsed) <= 3
-    assert len(expanded) <= 3
+    assert len(expanded) <= 2
 
 
-def test_low_data_lines_exclude_system_phrases():
+def test_low_data_contains_no_system_phrases():
     signal = DisplaySignal(
         employee_name="Alex",
         process="Receiving",
@@ -291,7 +383,7 @@ def test_low_data_lines_exclude_system_phrases():
     )
 
     lines = format_low_data_collapsed_lines(signal) + format_low_data_expanded_lines(signal, recent_record_count=1)
-    banned = ("system", "artifact", "missing baseline")
+    banned = ("system", "artifact", "missing baseline", "insufficient comparison window", "trend reliability", "clear caveats")
     for line in lines:
         text = line.lower()
         for phrase in banned:

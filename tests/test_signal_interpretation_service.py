@@ -88,6 +88,26 @@ def test_interpret_follow_up_due_includes_pattern_memory_metadata_when_repeat_si
     assert card.metadata.get("pattern_detected") is True
     assert card.metadata.get("repeat_count", 0) >= 2
     assert "repeated" in str(card.metadata.get("pattern_summary", "")).lower()
+    assert card.metadata.get("pattern_window_label") == "this week"
+
+
+def test_interpret_below_expected_exposes_repeat_metadata_without_overriding_main_signal_meaning():
+    row = {
+        "EmployeeID": "E1",
+        "Employee": "Alex",
+        "Department": "Picking",
+        "Average UPH": 42,
+        "Target UPH": 55,
+        "trend": "down",
+        "goal_status": "below_goal",
+        "recent_trend_history": ["down", "declining", "below_expected"],
+        "recent_goal_status_history": ["below_goal", "below_goal"],
+    }
+
+    card = interpret_below_expected_performance(row=row, today=date(2026, 4, 9))
+
+    assert card.metadata.get("repeat_count", 0) >= 2
+    assert card.metadata.get("pattern_window_label") == "this week"
 
 
 def test_today_view_signal_sections_are_present():
@@ -236,8 +256,30 @@ def test_low_data_signal_compact_output_is_minimal():
     compact = card.metadata.get("compact_lines") or {}
 
     assert compact.get("line_2") == "Not enough history yet"
+    assert compact.get("line_3") == "Only 1 recent record(s) available"
+    assert compact.get("line_4") == "Observed: Apr 8"
     assert compact.get("line_5") == "Low confidence"
     assert compact.get("line_1") == ""
-    assert compact.get("line_3") == ""
-    assert compact.get("line_4") == ""
-    assert "Only" in str(compact.get("expanded_line") or "")
+    assert compact.get("expanded_line") == ""
+
+
+def test_below_expected_low_history_uses_current_snapshot_compact_output():
+    row = {
+        "EmployeeID": "E12",
+        "Employee": "Riley",
+        "Department": "Dock",
+        "Average UPH": 52,
+        "Target UPH": 58,
+        "trend": "down",
+        "goal_status": "below_goal",
+    }
+
+    card = interpret_below_expected_performance(row=row, today=date(2026, 4, 9))
+    compact = card.metadata.get("compact_lines") or {}
+
+    assert compact.get("line_1") == "Riley · Dock"
+    assert compact.get("line_2") == "Current pace: 52.0 UPH"
+    assert compact.get("line_3") == "Apr 8"
+    assert compact.get("line_4") == "Low confidence"
+    assert compact.get("line_5") == ""
+    assert compact.get("expanded_line") == "No comparison available"

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from enum import Enum
 
-from domain.display_signal import DisplaySignal, SignalLabel
+from domain.display_signal import DisplaySignal, DisplaySignalState, SignalLabel
 from services.plain_language_service import signal_wording
 
 
@@ -35,6 +35,9 @@ _LOW_DATA_BLOCKED_PHRASES = {
     "artifact",
     "missing baseline",
     "baseline missing",
+    "insufficient comparison window",
+    "trend reliability",
+    "clear caveats",
 }
 
 
@@ -49,6 +52,59 @@ def _sanitize_low_data_line(text: str) -> str:
         if phrase in lowered:
             return ""
     return clean
+
+
+def _sanitize_low_data_support_line(text: str) -> str:
+    clean = _sanitize_low_data_line(text)
+    lowered = clean.lower()
+    if "low confidence" in lowered or "compared to:" in lowered:
+        return ""
+    return clean
+
+
+def _recent_record_count_from_signal(signal: DisplaySignal, recent_record_count: int | None) -> int | None:
+    if recent_record_count is not None:
+        return max(0, int(recent_record_count))
+    for key in ("recent_record_count", "usable_points", "sample_size", "included_rows"):
+        value = (signal.flags or {}).get(key)
+        try:
+            if value is not None:
+                return max(0, int(value))
+        except Exception:
+            continue
+    return None
+
+
+def _low_data_supporting_lines(signal: DisplaySignal, *, recent_record_count: int | None = None) -> list[str]:
+    lines: list[str] = []
+    fallback_lines: list[str] = []
+    for text in list(getattr(signal, "supporting_text", []) or []):
+        clean = _sanitize_low_data_support_line(str(text or ""))
+        if clean:
+            lines.append(clean)
+
+    has_count_line = any(line.lower().startswith("only ") for line in lines)
+    has_observed_line = any(line.lower().startswith("observed:") for line in lines)
+
+    count = _recent_record_count_from_signal(signal, recent_record_count)
+    if count is not None and not has_count_line:
+        fallback_lines.append(f"Only {count} recent record(s) available")
+    if signal.observed_date is not None and not has_observed_line:
+        observed_line = _sanitize_low_data_support_line(f"Observed: {format_friendly_date(signal.observed_date)}")
+        if observed_line:
+            fallback_lines.append(observed_line)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for line in [*lines, *fallback_lines]:
+        key = line.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(line)
+        if len(unique) >= 2:
+            break
+    return unique
 
 
 def format_low_data_collapsed_lines(signal: DisplaySignal) -> list[str]:
@@ -74,21 +130,7 @@ def format_low_data_expanded_lines(signal: DisplaySignal, *, recent_record_count
     mode = get_signal_display_mode(signal)
     if mode != SignalDisplayMode.LOW_DATA:
         return []
-
-    count = recent_record_count
-    if count is None:
-        try:
-            count = int(getattr(signal.confidence, "sample_size", 0) or 0)
-        except Exception:
-            count = 0
-    if count <= 0:
-        count = 1
-
-    lines = [
-        _sanitize_low_data_line(f"Only {count} recent record(s) available"),
-        _sanitize_low_data_line(f"Observed: {format_friendly_date(signal.observed_date)}"),
-    ]
-    return [line for line in lines if line][:2]
+    return _low_data_supporting_lines(signal, recent_record_count=recent_record_count)
 
 
 def is_signal_display_eligible(
@@ -133,10 +175,10 @@ def is_signal_display_eligible(
         "high": 3,
     }
     min_rank = confidence_rank.get(str(min_confidence_for_full_or_partial or "medium").strip().lower(), 2)
-    signal_rank = confidence_rank.get(signal.confidence.value, 1)
+    signal_rank = confidence_rank.get(str(getattr(signal.confidence_level, "value", signal.confidence_level) or "LOW").lower(), 1)
 
     if mode == SignalDisplayMode.LOW_DATA:
-        return bool(allow_low_data_case) and signal.signal_label == SignalLabel.LOW_DATA
+        return bool(allow_low_data_case) and bool(signal.is_low_data)
 
     if mode == SignalDisplayMode.CURRENT_STATE:
         if signal.observed_value is None:
@@ -160,9 +202,9 @@ def get_signal_display_mode(signal: DisplaySignal) -> SignalDisplayMode:
     - CURRENT_STATE: observed data exists but no comparison basis
     - FULL: observed + comparison are both present
     """
-    if signal.signal_label == SignalLabel.LOW_DATA or signal.observed_value is None:
+    if signal.state == DisplaySignalState.LOW_DATA or signal.observed_value is None:
         return SignalDisplayMode.LOW_DATA
-    if signal.comparison_value is None:
+    if signal.state == DisplaySignalState.CURRENT or signal.comparison_value is None:
         return SignalDisplayMode.CURRENT_STATE
     return SignalDisplayMode.FULL
 
@@ -172,9 +214,17 @@ def format_signal_label(signal: DisplaySignal) -> str:
     if mode == SignalDisplayMode.LOW_DATA:
         return signal_wording("not_enough_history_yet")
     if mode == SignalDisplayMode.CURRENT_STATE:
+        prefix = str(signal.primary_label or "Current pace").strip() or "Current pace"
         if signal.observed_value is None:
-            return "Current pace"
-        return f"Current pace: {signal.observed_value:.1f} UPH"
+            return prefix
+        observed_unit = str(signal.observed_unit or "UPH").strip() or "UPH"
+        if prefix.lower().startswith("current pace:"):
+            return prefix
+        return f"{prefix}: {signal.observed_value:.1f} {observed_unit}"
+
+    if str(signal.primary_label or "").strip() and signal.primary_label not in {"Current pace", "Current pace: 0.0 UPH"}:
+        # For non-current states, respect canonical precomputed primary label when available.
+        return str(signal.primary_label)
 
     if signal.signal_label == SignalLabel.BELOW_EXPECTED_PACE:
         return signal_wording("below_expected_pace")
@@ -202,7 +252,8 @@ def format_observed_line(signal: DisplaySignal) -> str:
     observed_text = format_friendly_date(signal.observed_date)
     if mode == SignalDisplayMode.CURRENT_STATE:
         return observed_text
-    return f"Observed: {observed_text} ({signal.observed_value:.1f} UPH)"
+    observed_unit = str(signal.observed_unit or "UPH").strip() or "UPH"
+    return f"Observed: {observed_text} ({signal.observed_value:.1f} {observed_unit})"
 
 
 def format_comparison_line(signal: DisplaySignal) -> str:
@@ -226,4 +277,5 @@ def format_confidence_line(signal: DisplaySignal) -> str:
     mode = get_signal_display_mode(signal)
     if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.CURRENT_STATE}:
         return "Low confidence"
-    return f"Confidence: {signal.confidence.value.title()}"
+    level_text = str(getattr(signal.confidence_level, "value", signal.confidence_level) or "LOW").title()
+    return f"Confidence: {level_text}"

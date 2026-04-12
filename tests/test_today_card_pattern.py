@@ -95,6 +95,11 @@ def test_today_card_pattern_low_data_signal(monkeypatch):
         comparison_end_date=None,
         comparison_value=None,
         confidence=SignalConfidence.LOW,
+        supporting_text=[
+            "Only 1 recent record(s) available",
+            "Low confidence",
+            "Missing baseline",
+        ],
         data_completeness=None,
         flags={},
     )
@@ -109,6 +114,7 @@ def test_today_card_pattern_low_data_signal(monkeypatch):
     assert card.line_3 == ""
     assert card.line_4 == ""
     assert card.line_5 == "Low confidence"
+    assert card.expanded_lines == ["Only 1 recent record(s) available", "Observed: Apr 11"]
 
 
 def test_today_card_expanded_lines_max_3_and_not_repeated(monkeypatch):
@@ -143,6 +149,70 @@ def test_today_card_expanded_lines_max_3_and_not_repeated(monkeypatch):
 
     assert len(card.expanded_lines) <= 3
     assert all(line.strip().lower() != card.line_2.strip().lower() for line in card.expanded_lines)
+
+
+def test_today_card_trend_lines_use_canonical_short_window_and_no_repeated_meaning(monkeypatch):
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOWER_THAN_RECENT_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=38.1,
+        comparison_start_date=date(2026, 4, 9),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=42.0,
+        confidence=SignalConfidence.LOW,
+        data_completeness=None,
+        flags={},
+    )
+
+    monkeypatch.setattr("services.today_view_model_service.build_display_signal_from_attention_item", lambda item, today: signal)
+    monkeypatch.setattr(
+        "services.today_view_model_service._attention_context_lines",
+        lambda item, signal, max_lines=2: [
+            "Observed: Apr 11 (38.1 UPH)",
+            "Compared to: Apr 9-Apr 10 avg (42.0 UPH)",
+            "Watch for continued drift",
+        ],
+    )
+
+    vm = build_today_queue_view_model(attention=_summary(_item()), suppressed_cards=[], today=date(2026, 4, 11))
+    card = vm.secondary_cards[0]
+
+    assert card.line_2 == "Lower than recent pace"
+    assert card.line_3 == "Observed: Apr 11 (38.1 UPH)"
+    assert card.line_4 == "Compared to: Apr 9–Apr 10 avg (42.0 UPH)"
+    assert card.line_5 == "Confidence: Low"
+    assert card.expanded_lines == ["Watch for continued drift"]
+
+
+def test_today_card_pattern_shows_one_repeat_support_line_without_overriding_trend_headline(monkeypatch):
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOWER_THAN_RECENT_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=38.1,
+        comparison_start_date=date(2026, 4, 9),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=42.0,
+        confidence=SignalConfidence.LOW,
+        pattern_count=3,
+        pattern_window_label="this week",
+        supporting_text=["Seen 3 times this week"],
+        data_completeness=None,
+        flags={},
+    )
+
+    monkeypatch.setattr("services.today_view_model_service.build_display_signal_from_attention_item", lambda item, today: signal)
+
+    vm = build_today_queue_view_model(attention=_summary(_item()), suppressed_cards=[], today=date(2026, 4, 11))
+    card = vm.secondary_cards[0]
+
+    assert card.line_2 == "Lower than recent pace"
+    assert card.line_3 == "Observed: Apr 11 (38.1 UPH)"
+    assert card.line_4 == "Compared to: Apr 9–Apr 10 avg (42.0 UPH)"
+    assert card.expanded_lines == ["Seen 3 times this week"]
 
 
 def test_today_card_expanded_lines_humanize_iso_dates(monkeypatch):

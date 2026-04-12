@@ -37,7 +37,12 @@ from services.signal_formatting_service import (
     SignalDisplayMode,
 )
 from services.today_home_service import get_today_signals
-from services.today_view_model_service import TodayQueueCardViewModel, build_today_queue_view_model
+from services.today_view_model_service import (
+    TodayQueueCardViewModel,
+    TodayValueStripViewModel,
+    build_today_queue_view_model,
+    build_today_value_strip_view_model,
+)
 from services.signal_traceability_service import traceability_payload_from_card
 from services.plain_language_service import signal_wording
 from ui.state_panels import (
@@ -179,6 +184,34 @@ def _apply_today_styles() -> None:
             margin-bottom: 10px;
             color: #5d7693;
             font-size: 0.92rem;
+        }
+        .today-value-card {
+            background: linear-gradient(180deg, #f9fbfe 0%, #eef4fb 100%);
+            border: 1px solid #d9e4f0;
+            border-radius: 14px;
+            padding: 14px 14px 12px;
+            min-height: 132px;
+            margin-bottom: 10px;
+        }
+        .today-value-title {
+            font-size: 0.74rem;
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: #6a8098;
+            margin-bottom: 8px;
+        }
+        .today-value-headline {
+            color: #0f2d52;
+            font-size: 1rem;
+            font-weight: 800;
+            line-height: 1.28;
+            margin-bottom: 6px;
+        }
+        .today-value-detail {
+            color: #49647f;
+            font-size: 0.87rem;
+            line-height: 1.38;
         }
         .today-secondary-label {
             margin-top: 10px;
@@ -646,8 +679,14 @@ def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: 
     lines: list[str] = []
     mode = get_signal_display_mode(signal)
 
-    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.CURRENT_STATE}:
+    if mode == SignalDisplayMode.LOW_DATA:
         lines.append(signal_wording("not_enough_history_yet"))
+        lines.append(format_confidence_line(signal))
+    elif mode == SignalDisplayMode.CURRENT_STATE:
+        lines.append(format_signal_label(signal))
+        observed_line = format_observed_line(signal)
+        if observed_line:
+            lines.append(observed_line)
         lines.append(format_confidence_line(signal))
     else:
         lines.append(format_signal_label(signal) + ".")
@@ -734,9 +773,7 @@ def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_c
         today=date.today(),
     )
 
-    has_trend_signals = any(str(card.line_4 or "").strip().lower().startswith("compared to:") for card in queue_vm.primary_cards)
-    section_title = "What needs attention today" if has_trend_signals else "What you can review today"
-    st.markdown(f'<div class="today-section-label">{section_title}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="today-section-label">{queue_vm.main_section_title}</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="today-supporting-note">Start here.</div>',
         unsafe_allow_html=True,
@@ -772,6 +809,31 @@ def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_c
             }
             for row in queue_vm.suppressed
         ]
+
+
+def _render_today_value_strip(value_strip: TodayValueStripViewModel) -> None:
+    if not value_strip.cards:
+        return
+
+    st.markdown('<div class="today-section-label">Quick read</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="today-supporting-note">A small read on today&apos;s data before you work the queue.</div>',
+        unsafe_allow_html=True,
+    )
+
+    columns = st.columns(len(value_strip.cards))
+    for column, card in zip(columns, value_strip.cards):
+        with column:
+            st.markdown(
+                (
+                    '<div class="today-value-card">'
+                    f'<div class="today-value-title">{card.title}</div>'
+                    f'<div class="today-value-headline">{card.headline}</div>'
+                    f'<div class="today-value-detail">{card.detail}</div>'
+                    '</div>'
+                ),
+                unsafe_allow_html=True,
+            )
 
 
 def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
@@ -911,8 +973,8 @@ def page_today() -> None:
         """
     <div class="today-hero">
         <div class="today-hero-kicker">Today Queue</div>
-        <div class="today-hero-title">What needs attention today</div>
-        <div class="today-hero-copy">See what needs attention and why.</div>
+        <div class="today-hero-title">Review today&apos;s signals</div>
+        <div class="today-hero-copy">See what needs attention or what you can review next.</div>
     </div>
     """,
         unsafe_allow_html=True,
@@ -1008,6 +1070,12 @@ def page_today() -> None:
         status_line = _today_status_line(state_flags=state_flags, has_queue_items=counts.get("all", 0) > 0)
         if status_line:
             st.caption(status_line)
+
+        value_strip = build_today_value_strip_view_model(
+            goal_status=goal_status,
+            import_summary=import_summary,
+        )
+        _render_today_value_strip(value_strip)
 
         _render_unified_attention_queue(
             attention_summary,
