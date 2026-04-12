@@ -312,14 +312,23 @@ def build_employee_detail_context(
 
     observed_date = trailing_rows[-1]["date"] if trailing_rows else (trend_rows[-1]["date"] if trend_rows else None)
     comparison_dates = [row["date"] for row in prior_rows] or [row["date"] for row in trailing_rows]
-    comparison_count = len(prior_rows) if prior_rows else len(comparison_dates)
+    if observed_date:
+        comparison_dates = [d for d in comparison_dates if isinstance(d, date) and d < observed_date]
+    else:
+        comparison_dates = []
+    comparison_count = len(comparison_dates)
     today_ref = _build_reference_today(trend_rows)
+
+    observed_label = format_observed_label(observed_date, today=today_ref)
+    comparison_label = format_comparison_window(comparison_dates, comparison_count or None)
+    has_observed_data = bool(observed_date and trailing_avg > 0)
+    has_comparison_data = bool(comparison_dates and prior_avg > 0 and comparison_label)
 
     summary_block = {
         "line_1": f"{employee_name} · {process_name}",
         "line_2": str(trend_result.get("label") or "Worth review").strip(),
-        "line_3": f"Observed: {format_observed_label(observed_date, today=today_ref)} ({trailing_avg:.1f})",
-        "line_4": f"Compared to: {format_comparison_window(comparison_dates, comparison_count or None)} avg ({prior_avg:.1f})",
+        "line_3": f"Observed: {observed_label} ({trailing_avg:.1f})",
+        "line_4": f"Compared to: {comparison_label} avg ({prior_avg:.1f})",
         "line_5": f"Confidence: {confidence_label}",
         "current_state": current_state,
         "trend_state": str(trend_result.get("state") or normalize_trend_state(goal_row.get("trend") or "")),
@@ -330,8 +339,9 @@ def build_employee_detail_context(
         "data_completeness_label": completeness_label,
     }
 
-    low_data_state = bool(str(confidence_label).strip().lower() == "low")
-    if low_data_state:
+    low_data_state = False
+    if not has_observed_data:
+        low_data_state = True
         summary_block.update(
             {
                 "line_1": "",
@@ -340,7 +350,19 @@ def build_employee_detail_context(
                 "line_4": "",
                 "line_5": "Confidence: Low",
                 "low_data_state": True,
-                "low_data_note": f"Only {len(trend_rows)} recent {'record' if len(trend_rows) == 1 else 'records'} available" if trend_rows else "Only limited recent records available",
+                "low_data_note": "No recent performance data",
+            }
+        )
+    elif not has_comparison_data:
+        low_data_state = True
+        summary_block.update(
+            {
+                "line_2": "Limited data available",
+                "line_3": f"Observed: {observed_label}",
+                "line_4": "",
+                "line_5": "Confidence: Low",
+                "low_data_state": True,
+                "low_data_note": "No comparison available",
             }
         )
 

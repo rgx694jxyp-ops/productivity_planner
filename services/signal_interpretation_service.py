@@ -61,13 +61,13 @@ def _coerce_date(value: object) -> date | None:
 
 def _format_short_date(value: date | None) -> str:
     if value is None:
-        return "n/a"
+        return ""
     return f"{value.strftime('%b')} {value.day}"
 
 
 def format_observed_label(observed_date: date | None, *, today: date | None = None, is_shift_level: bool = False) -> str:
     if observed_date is None:
-        return "n/a"
+        return ""
     if today is None:
         today = date.today()
     if observed_date == today:
@@ -80,7 +80,7 @@ def format_observed_label(observed_date: date | None, *, today: date | None = No
 def format_comparison_window(dates: list[date], count: int | None = None) -> str:
     valid_dates = sorted({d for d in dates if isinstance(d, date)})
     if not valid_dates:
-        return "n/a"
+        return ""
     start = _format_short_date(valid_dates[0])
     end = _format_short_date(valid_dates[-1])
     window = start if start == end else f"{start}\u2013{end}"
@@ -92,9 +92,23 @@ def format_comparison_window(dates: list[date], count: int | None = None) -> str
 
 def _format_metric(value: float | None, unit: str = "") -> str:
     if value is None:
-        return "n/a"
+        return ""
     unit_suffix = f" {unit.strip()}" if str(unit or "").strip() else ""
     return f"{float(value):.1f}{unit_suffix}"
+
+
+def _is_placeholder_text(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"", "n/a", "na", "null", "none", "undefined"}
+
+
+def _clean_signal_label(value: object) -> str:
+    text = str(value or "").strip()
+    if _is_placeholder_text(text):
+        return "Worth review"
+    if text.lower() == "recently surfaced":
+        return "Worth review"
+    return text
 
 
 def _derive_signal_label(title: str) -> str:
@@ -158,7 +172,7 @@ def _build_low_data_compact_lines(sample_size: int) -> dict[str, str]:
         "line_3": "",
         "line_4": "",
         "line_5": "Confidence: Low",
-        "expanded_line": _low_data_note(sample_size),
+        "expanded_line": "No recent performance data" if sample_size <= 0 else _low_data_note(sample_size),
     }
 
 
@@ -177,7 +191,7 @@ def _build_compact_signal_lines(
 
     employee_name = str(metadata.get("employee_name") or _derive_employee_name(title, "Team"))
     process_name = str(metadata.get("process_name") or workload_context.impacted_group_label or "General")
-    signal_label = str(metadata.get("signal_label") or _derive_signal_label(title))
+    signal_label = _clean_signal_label(metadata.get("signal_label") or _derive_signal_label(title))
 
     observed_value = workload_context.observed_volume
     observed_unit = workload_context.observed_volume_unit
@@ -199,13 +213,42 @@ def _build_compact_signal_lines(
             comparison_dates.append(time_context.compared_window_start.date())
         if time_context.compared_window_end:
             comparison_dates.append(time_context.compared_window_end.date())
+    if observed_date is not None:
+        comparison_dates = [d for d in comparison_dates if d < observed_date]
+    else:
+        comparison_dates = []
     compared_window = format_comparison_window(comparison_dates, count=_safe_int(metadata.get("comparison_count"), 0) or None)
+
+    observed_metric = _format_metric(observed_value, observed_unit)
+    baseline_metric = _format_metric(baseline_value, baseline_unit)
+    has_observed = bool(observed_window and not _is_placeholder_text(observed_metric))
+    has_comparison = bool(compared_window and not _is_placeholder_text(baseline_metric))
+
+    if not has_observed:
+        return {
+            "line_1": "",
+            "line_2": "Not enough history yet",
+            "line_3": "",
+            "line_4": "",
+            "line_5": "Confidence: Low",
+            "expanded_line": "No recent performance data",
+        }
+
+    if not has_comparison:
+        return {
+            "line_1": f"{employee_name} · {process_name}",
+            "line_2": "Limited data available",
+            "line_3": f"Observed: {observed_window}",
+            "line_4": "",
+            "line_5": "Confidence: Low",
+            "expanded_line": "No comparison available",
+        }
 
     return {
         "line_1": f"{employee_name} · {process_name}",
         "line_2": signal_label,
-        "line_3": f"Observed: {observed_window} ({_format_metric(observed_value, observed_unit)})",
-        "line_4": f"Compared to: {compared_window} avg ({_format_metric(baseline_value, baseline_unit)})",
+        "line_3": f"Observed: {observed_window} ({observed_metric})",
+        "line_4": f"Compared to: {compared_window} avg ({baseline_metric})",
         "line_5": f"Confidence: {str(confidence.level or 'low').title()}",
     }
 
@@ -863,7 +906,7 @@ def interpret_follow_up_due(*, action: dict, today: date) -> InsightCardContract
         metadata={
             "employee_name": name,
             "process_name": dept,
-            "signal_label": "Recently surfaced",
+            "signal_label": "Worth review",
             "today_date": today.isoformat(),
             "observed_date": observed_date.isoformat(),
             "comparison_dates": [today.isoformat()],
@@ -971,7 +1014,7 @@ def interpret_outcome_after_logged_activity(*, action: dict, today: date) -> Ins
         happened = "Outcome window exists, but before/after performance pair is incomplete."
 
     observed_date = _infer_observed_date(today, action.get("last_event_at"), action.get("follow_up_due_at"), action.get("created_at"))
-    signal_label = "Recently surfaced"
+    signal_label = "Limited data available"
     if baseline > 0 and latest > 0:
         if delta >= 1.0:
             signal_label = "Higher than recent pace"

@@ -628,9 +628,9 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
     with st.container(border=True):
         compact_lines = item.metadata.get("compact_lines") or {}
         line_1 = str(compact_lines.get("line_1") or item.title)
-        line_2 = str(compact_lines.get("line_2") or item.what_happened)
-        line_3 = str(compact_lines.get("line_3") or "Observed: n/a (n/a)")
-        line_4 = str(compact_lines.get("line_4") or "Compared to: n/a avg (n/a)")
+        line_2 = str(compact_lines.get("line_2") or "Worth review")
+        line_3 = str(compact_lines.get("line_3") or "")
+        line_4 = str(compact_lines.get("line_4") or "")
         line_5 = str(compact_lines.get("line_5") or f"Confidence: {item.confidence.level.title()}")
 
         for idx, text in enumerate((line_1, line_2, line_3, line_4, line_5), start=1):
@@ -646,7 +646,7 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
 
         low_data_state = bool(compact_lines.get("expanded_line"))
 
-        why_line = "Recently surfaced"
+        why_line = str(item.metadata.get("secondary_status") or "").strip()
         basis_line = str(compact_lines.get("line_4") or "").strip()
         data_note = str(item.data_completeness.summary or "").strip()
         has_extra = bool(low_data_state or why_line or basis_line or (data_note and item.data_completeness.status != "complete"))

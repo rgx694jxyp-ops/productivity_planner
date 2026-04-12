@@ -295,8 +295,8 @@ def _render_employee_signal_summary(detail_context: dict) -> None:
     with st.container(border=True):
         line_1 = str(summary.get("line_1") or "Employee · Team")
         line_2 = str(summary.get("line_2") or summary.get("current_state") or detail_context.get("current_state") or "No clear change yet")
-        line_3 = str(summary.get("line_3") or "Observed: n/a (n/a)")
-        line_4 = str(summary.get("line_4") or "Compared to: n/a avg (n/a)")
+        line_3 = str(summary.get("line_3") or "")
+        line_4 = str(summary.get("line_4") or "")
         line_5 = str(summary.get("line_5") or f"Confidence: {str(summary.get('confidence_label') or detail_context.get('confidence_label') or 'Low')}")
 
         for idx, line in enumerate((line_1, line_2, line_3, line_4, line_5), start=1):
@@ -314,7 +314,7 @@ def _render_employee_signal_explainer(detail_context: dict) -> None:
     basis = detail_context.get("what_this_is_based_on") or {}
     summary = detail_context.get("signal_summary") or {}
 
-    why_line = "Recently surfaced"
+    why_line = str(why.get("why_now") or why.get("trigger") or "").strip()
     basis_line = str(summary.get("line_4") or "").strip().replace("Compared to: ", "")
     data_note = str(
         summary.get("data_completeness_note")
