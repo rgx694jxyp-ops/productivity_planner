@@ -38,11 +38,11 @@ def test_edge_missing_observed_value_uses_low_data_fallback():
 
     assert get_signal_display_mode(signal) == SignalDisplayMode.LOW_DATA
     assert format_signal_label(signal) == "Not enough history yet"
-    assert format_confidence_line(signal) == "Confidence: Low"
+    assert format_confidence_line(signal) == "Low confidence"
     _assert_clean_text(format_signal_label(signal), format_observed_line(signal), format_comparison_line(signal), format_confidence_line(signal))
 
 
-def test_edge_missing_comparison_value_uses_partial_fallback():
+def test_edge_missing_comparison_value_uses_current_state_fallback():
     signal = build_display_signal(
         employee_name="Alex",
         process="Receiving",
@@ -56,10 +56,10 @@ def test_edge_missing_comparison_value_uses_partial_fallback():
         today=date(2026, 4, 11),
     )
 
-    assert get_signal_display_mode(signal) == SignalDisplayMode.PARTIAL
-    assert format_signal_label(signal) == signal_wording("not_enough_history_yet")
-    assert format_observed_line(signal) == "Observed: Apr 11"
-    assert format_confidence_line(signal) == "Confidence: Low"
+    assert get_signal_display_mode(signal) == SignalDisplayMode.CURRENT_STATE
+    assert format_signal_label(signal) == "Current pace: 38.4 UPH"
+    assert format_observed_line(signal) == "Apr 11"
+    assert format_confidence_line(signal) == "Low confidence"
     assert format_comparison_line(signal) == ""
     _assert_clean_text(format_signal_label(signal), format_observed_line(signal), format_confidence_line(signal))
 
@@ -123,8 +123,8 @@ def test_edge_only_one_to_two_points_keeps_low_confidence_signal_behavior():
         today=date(2026, 4, 11),
     )
 
-    assert get_signal_display_mode(signal) in {SignalDisplayMode.PARTIAL, SignalDisplayMode.LOW_DATA}
-    assert format_confidence_line(signal) == "Confidence: Low"
+    assert get_signal_display_mode(signal) in {SignalDisplayMode.CURRENT_STATE, SignalDisplayMode.LOW_DATA}
+    assert format_confidence_line(signal) == "Low confidence"
 
 
 def test_edge_duplicate_rows_are_collapsed_in_snapshot_generation():
@@ -285,9 +285,9 @@ def test_signal_formatting_consistency_across_modes():
     )
 
     assert format_observed_line(full).startswith("Observed:")
-    assert format_observed_line(partial).startswith("Observed:")
+    assert format_observed_line(partial) == "Apr 11"
     assert format_confidence_line(full).startswith("Confidence:")
-    assert format_confidence_line(partial).startswith("Confidence:")
+    assert format_confidence_line(partial) == "Low confidence"
 
 
 def test_comparison_labeling_is_clear_for_range_and_baseline():

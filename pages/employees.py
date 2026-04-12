@@ -106,12 +106,20 @@ _READ_CACHE_TTL_SECONDS = 45
 def _log_heavy_render_compute(name: str) -> None:
     if not bool(st.session_state.get("_ui_render_guard_active")):
         return
+    # Opt-in only: cache-miss warnings are useful for diagnostics but noisy in normal use.
+    if not bool(st.session_state.get("_ui_render_guard_emit_cache_miss_warnings", False)):
+        return
+    logged = set(st.session_state.get("_ui_render_guard_logged", []) or [])
+    if name in logged:
+        return
     try:
         _log_app_error(
             "ui_render_guard",
             f"Heavy compute executed during render cache miss: {name}",
             severity="warning",
         )
+        logged.add(name)
+        st.session_state["_ui_render_guard_logged"] = sorted(logged)
     except Exception:
         pass
 
@@ -413,7 +421,7 @@ def _render_employee_signal_summary(*, detail_context: dict, employee_name: str,
     st.subheader("Signal Summary")
     with st.container(border=True):
         mode = get_signal_display_mode(signal)
-        low_data_state = mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}
+        low_data_state = mode == SignalDisplayMode.LOW_DATA
         if low_data_state:
             collapsed_lines = format_low_data_collapsed_lines(signal)
             line_1 = ""
@@ -458,7 +466,7 @@ def _render_employee_signal_explainer(*, detail_context: dict, employee_name: st
         or ""
     ).strip()
 
-    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}:
+    if mode == SignalDisplayMode.LOW_DATA:
         sample_candidates = [
             (detail_context.get("signal_summary") or {}).get("sample_size"),
             (detail_context.get("signal_summary") or {}).get("included_rows"),

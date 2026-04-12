@@ -112,8 +112,18 @@ def get_client():
         pass
 
     try:
+        from httpx import Client as HttpxClient, Timeout
         from supabase import create_client
-        client = create_client(url, key)
+        from supabase.lib.client_options import SyncClientOptions
+
+        options = SyncClientOptions(
+            httpx_client=HttpxClient(
+                timeout=Timeout(timeout=10.0, connect=5.0),
+                verify=True,
+                follow_redirects=True,
+            )
+        )
+        client = create_client(url, key, options=options)
         try:
             import streamlit as st
             session = st.session_state.get("supabase_session")

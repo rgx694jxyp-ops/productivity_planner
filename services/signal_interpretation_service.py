@@ -201,7 +201,7 @@ def _build_low_data_compact_lines(sample_size: int) -> CompactSignalLines:
         line_2="Not enough history yet",
         line_3="",
         line_4="",
-        line_5="Confidence: Low",
+        line_5="Low confidence",
         expanded_line="No recent performance data" if sample_size <= 0 else _low_data_note(sample_size),
     )
 
@@ -216,9 +216,6 @@ def _build_compact_signal_lines(
     metadata: dict,
 ) -> CompactSignalLines:
     sample_size = _safe_int(confidence.sample_size, 0)
-    if _is_low_data_state(confidence=confidence, data_completeness=data_completeness, metadata=metadata):
-        return _build_low_data_compact_lines(sample_size)
-
     employee_name = str(metadata.get("employee_name") or _derive_employee_name(title, "Team"))
     process_name = str(metadata.get("process_name") or workload_context.impacted_group_label or "General")
     signal_label = _clean_signal_label(metadata.get("signal_label") or _derive_signal_label(title))
@@ -227,6 +224,11 @@ def _build_compact_signal_lines(
     observed_unit = workload_context.observed_volume_unit
     baseline_value = workload_context.baseline_volume
     baseline_unit = workload_context.baseline_volume_unit
+
+    has_observed = observed_value is not None
+    has_baseline = baseline_value is not None
+    if _is_low_data_state(confidence=confidence, data_completeness=data_completeness, metadata=metadata) and not (has_observed and not has_baseline):
+        return _build_low_data_compact_lines(sample_size)
 
     today_ref = _coerce_date(metadata.get("today_date")) or (time_context.window_end.date() if time_context.window_end else date.today())
     observed_date = (
@@ -298,13 +300,13 @@ def _build_compact_signal_lines(
             expanded_line="No recent performance data",
         )
 
-    if mode == SignalDisplayMode.PARTIAL:
+    if mode == SignalDisplayMode.CURRENT_STATE:
         return CompactSignalLines(
             line_1=f"{display_signal.employee_name} · {display_signal.process}",
             line_2=format_signal_label(display_signal),
             line_3=format_observed_line(display_signal),
-            line_4="",
-            line_5=format_confidence_line(display_signal),
+            line_4=format_confidence_line(display_signal),
+            line_5="",
             expanded_line="No comparison available",
         )
 

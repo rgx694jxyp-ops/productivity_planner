@@ -216,7 +216,7 @@ def _short_follow_up_context(item: Any, signal: DisplaySignal) -> str:
 
 def _bucket_rank(item: Any, signal: DisplaySignal) -> int:
     mode = get_signal_display_mode(signal)
-    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL} or signal.confidence.value == "low":
+    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.CURRENT_STATE} or signal.confidence.value == "low":
         return 2
 
     flags = dict(signal.flags or {})
@@ -310,7 +310,8 @@ def _dedupe_expanded(*, primary: str, lines: list[str], max_lines: int = 3) -> l
 def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel:
     employee_name, process_name = _attention_employee_and_process(item, signal)
     mode = get_signal_display_mode(signal)
-    low_data_state = mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}
+    low_data_state = mode == SignalDisplayMode.LOW_DATA
+    current_state_mode = mode == SignalDisplayMode.CURRENT_STATE
     line_1 = f"{employee_name} · {process_name}"
     line_2 = _attention_primary_signal(item, signal)
     line_5 = format_confidence_line(signal)
@@ -318,7 +319,7 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
     if low_data_state:
         collapsed = format_low_data_collapsed_lines(signal)
         line_2 = collapsed[0] if collapsed else signal_wording("not_enough_history_yet")
-        line_3 = f"Observed: {format_friendly_date(signal.observed_date)}"
+        line_3 = ""
         line_4 = ""
         expanded = format_low_data_expanded_lines(signal)
         return TodayQueueCardViewModel(
@@ -330,6 +331,21 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             line_4=line_4,
             line_5=line_5,
             expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, max_lines=3),
+        )
+
+    if current_state_mode:
+        line_2 = format_signal_label(signal)
+        line_3 = format_observed_line(signal)
+        line_4 = format_confidence_line(signal)
+        return TodayQueueCardViewModel(
+            employee_id=str(getattr(item, "employee_id", "") or ""),
+            process_id=str(getattr(item, "process_name", "") or ""),
+            line_1=line_1,
+            line_2=line_2,
+            line_3=line_3,
+            line_4=line_4,
+            line_5="",
+            expanded_lines=[],
         )
 
     if _is_follow_up_signal(signal):
@@ -368,7 +384,8 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
 
 def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) -> TodayQueueCardViewModel:
     mode = get_signal_display_mode(signal)
-    low_data_state = mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}
+    low_data_state = mode == SignalDisplayMode.LOW_DATA
+    current_state_mode = mode == SignalDisplayMode.CURRENT_STATE
     employee_name = str(signal.employee_name)
     process_name = str(signal.process)
     line_1 = f"{employee_name} · {process_name}"
@@ -384,10 +401,25 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             process_id=process_name,
             line_1=line_1,
             line_2=line_2,
-            line_3=f"Observed: {format_friendly_date(signal.observed_date)}",
+            line_3="",
             line_4="",
             line_5=line_5,
             expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, max_lines=3),
+        )
+
+    if current_state_mode:
+        line_2 = format_signal_label(signal)
+        line_3 = format_observed_line(signal)
+        line_4 = format_confidence_line(signal)
+        return TodayQueueCardViewModel(
+            employee_id=str(card.drill_down.entity_id or ""),
+            process_id=process_name,
+            line_1=line_1,
+            line_2=line_2,
+            line_3=line_3,
+            line_4=line_4,
+            line_5="",
+            expanded_lines=[],
         )
 
     if _is_follow_up_signal(signal):
@@ -418,8 +450,8 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
 
 
 def build_today_queue_view_model(
-    *,
     attention: AttentionSummary,
+    *,
     suppressed_cards: list[InsightCardContract] | None = None,
     today: date,
 ) -> TodayQueueViewModel:
@@ -462,7 +494,8 @@ def build_today_queue_view_model(
             severity_rank=_severity_rank(item),
             recency_rank=_recency_rank(signal),
         )
-        if (not eligible_primary) or signal.confidence.value == "low" or str(getattr(item, "attention_tier", "")) == "low":
+        mode = get_signal_display_mode(signal)
+        if (not eligible_primary) or mode == SignalDisplayMode.CURRENT_STATE or signal.confidence.value == "low" or str(getattr(item, "attention_tier", "")) == "low":
             secondary_ranked.append(ranked)
         else:
             primary_ranked.append(ranked)

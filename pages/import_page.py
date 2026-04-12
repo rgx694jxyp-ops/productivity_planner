@@ -1032,6 +1032,7 @@ def _import_step3(tenant_id: str):
             f'<strong>{_ic_emp}</strong> employees · <strong>{_ic_days}</strong> {"day" if _ic_days == 1 else "days"} of data</span></div>'
             f'{_ic_below_line}'
             f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:10px;">{_ic_next_label} {_ic_context}</div>'
+            f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:6px;">You can start reviewing performance now. Comparisons will appear after more data is available.</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -2155,6 +2156,8 @@ def _import_step3(tenant_id: str):
                 "alloc_rows":        alloc_rows,
                 "alloc_date":        canon_date,
                 "alloc_has_date":    has_date_col,
+                "pipeline_done":     True,
+                "pipeline_error":    "",
             })
 
             # Post-import refresh can be expensive on larger files. Defer heavy

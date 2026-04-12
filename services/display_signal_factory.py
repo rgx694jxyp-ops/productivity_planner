@@ -291,7 +291,9 @@ def build_display_signal_from_employee_detail_context(
     else:
         label = SignalLabel.LOWER_THAN_RECENT_PACE
 
-    observed_date = _safe_date((detail_context.get("contributing_periods") or {}).get("trailing_dates", [None])[-1]) or (today_value - timedelta(days=1))
+    trailing_dates = list((detail_context.get("contributing_periods") or {}).get("trailing_dates") or [])
+    trailing_last = trailing_dates[-1] if trailing_dates else None
+    observed_date = _safe_date(trailing_last) or (today_value - timedelta(days=1))
 
     prior_dates = [
         _safe_date(value)

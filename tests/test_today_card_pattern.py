@@ -106,9 +106,9 @@ def test_today_card_pattern_low_data_signal(monkeypatch):
 
     assert card.line_1 == "Jordan · Receiving"
     assert card.line_2 == "Not enough history yet"
-    assert card.line_3 == "Observed: Apr 11"
+    assert card.line_3 == ""
     assert card.line_4 == ""
-    assert card.line_5 == "Confidence: Low"
+    assert card.line_5 == "Low confidence"
 
 
 def test_today_card_expanded_lines_max_3_and_not_repeated(monkeypatch):

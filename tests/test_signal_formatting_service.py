@@ -58,7 +58,7 @@ def test_signal_formatting_low_data_fallbacks_are_clean():
     assert format_signal_label(signal) == "Not enough history yet"
     assert format_observed_line(signal) == ""
     assert format_comparison_line(signal) == ""
-    assert format_confidence_line(signal) == "Confidence: Low"
+    assert format_confidence_line(signal) == "Low confidence"
 
 
 def test_signal_display_mode_full_when_observed_and_comparison_exist():
@@ -66,7 +66,7 @@ def test_signal_display_mode_full_when_observed_and_comparison_exist():
     assert get_signal_display_mode(signal) == SignalDisplayMode.FULL
 
 
-def test_signal_display_mode_partial_when_no_comparison():
+def test_signal_display_mode_current_state_when_no_comparison():
     signal = DisplaySignal(
         employee_name="Alex",
         process="Receiving",
@@ -80,10 +80,10 @@ def test_signal_display_mode_partial_when_no_comparison():
         data_completeness=None,
         flags={},
     )
-    assert get_signal_display_mode(signal) == SignalDisplayMode.PARTIAL
-    assert format_signal_label(signal) == signal_wording("not_enough_history_yet")
-    assert format_observed_line(signal) == "Observed: Apr 11"
-    assert format_confidence_line(signal) == "Confidence: Low"
+    assert get_signal_display_mode(signal) == SignalDisplayMode.CURRENT_STATE
+    assert format_signal_label(signal) == "Current pace: 38.1 UPH"
+    assert format_observed_line(signal) == "Apr 11"
+    assert format_confidence_line(signal) == "Low confidence"
 
 
 def test_signal_display_mode_low_data_when_observed_missing():
@@ -103,7 +103,7 @@ def test_signal_display_mode_low_data_when_observed_missing():
     assert get_signal_display_mode(signal) == SignalDisplayMode.LOW_DATA
     assert format_signal_label(signal) == "Not enough history yet"
     assert format_observed_line(signal) == ""
-    assert format_confidence_line(signal) == "Confidence: Low"
+    assert format_confidence_line(signal) == "Low confidence"
 
 
 def test_signal_formatting_uses_canonical_wording_for_core_signals():
@@ -232,7 +232,7 @@ def test_low_data_collapsed_format_is_strict_and_clean():
     )
 
     lines = format_low_data_collapsed_lines(signal)
-    assert lines == ["Not enough history yet", "Confidence: Low"]
+    assert lines == ["Not enough history yet", "Low confidence"]
 
 
 def test_low_data_expanded_format_is_strict_and_friendly():

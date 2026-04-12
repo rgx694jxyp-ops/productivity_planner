@@ -236,7 +236,7 @@ def test_low_data_signal_compact_output_is_minimal():
     compact = card.metadata.get("compact_lines") or {}
 
     assert compact.get("line_2") == "Not enough history yet"
-    assert compact.get("line_5") == "Confidence: Low"
+    assert compact.get("line_5") == "Low confidence"
     assert compact.get("line_1") == ""
     assert compact.get("line_3") == ""
     assert compact.get("line_4") == ""

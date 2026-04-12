@@ -11,7 +11,7 @@ from services.plain_language_service import signal_wording
 
 class SignalDisplayMode(str, Enum):
     FULL = "FULL"
-    PARTIAL = "PARTIAL"
+    CURRENT_STATE = "CURRENT_STATE"
     LOW_DATA = "LOW_DATA"
 
 
@@ -57,11 +57,11 @@ def format_low_data_collapsed_lines(signal: DisplaySignal) -> list[str]:
     Always returns at most two non-empty lines.
     """
     mode = get_signal_display_mode(signal)
-    if mode not in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}:
+    if mode != SignalDisplayMode.LOW_DATA:
         return []
     lines = [
         _sanitize_low_data_line(signal_wording("not_enough_history_yet")),
-        _sanitize_low_data_line("Confidence: Low"),
+        _sanitize_low_data_line("Low confidence"),
     ]
     return [line for line in lines if line][:2]
 
@@ -72,7 +72,7 @@ def format_low_data_expanded_lines(signal: DisplaySignal, *, recent_record_count
     Always returns at most two non-empty lines.
     """
     mode = get_signal_display_mode(signal)
-    if mode not in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}:
+    if mode != SignalDisplayMode.LOW_DATA:
         return []
 
     count = recent_record_count
@@ -103,7 +103,7 @@ def is_signal_display_eligible(
     - Valid signal label (non-artifact/status-only)
     - Valid data OR valid low-data fallback
     - Valid date relationships
-    - Minimum confidence for FULL/PARTIAL, or explicit low-data allow
+    - Minimum confidence for FULL/CURRENT_STATE, or explicit low-data allow
     - Suppress obvious system artifacts
     """
     label_text = format_signal_label(signal).strip().lower()
@@ -138,10 +138,10 @@ def is_signal_display_eligible(
     if mode == SignalDisplayMode.LOW_DATA:
         return bool(allow_low_data_case) and signal.signal_label == SignalLabel.LOW_DATA
 
-    if mode == SignalDisplayMode.PARTIAL:
+    if mode == SignalDisplayMode.CURRENT_STATE:
         if signal.observed_value is None:
             return False
-        # Partial mode is valid readable fallback; keep confidence gate light.
+        # Current-state mode is a valid readable fallback when no baseline exists.
         return True
 
     # FULL mode
@@ -157,13 +157,13 @@ def get_signal_display_mode(signal: DisplaySignal) -> SignalDisplayMode:
 
     Rules:
     - LOW_DATA: no usable observed data
-    - PARTIAL: observed data exists but no comparison basis
+    - CURRENT_STATE: observed data exists but no comparison basis
     - FULL: observed + comparison are both present
     """
     if signal.signal_label == SignalLabel.LOW_DATA or signal.observed_value is None:
         return SignalDisplayMode.LOW_DATA
     if signal.comparison_value is None:
-        return SignalDisplayMode.PARTIAL
+        return SignalDisplayMode.CURRENT_STATE
     return SignalDisplayMode.FULL
 
 
@@ -171,8 +171,10 @@ def format_signal_label(signal: DisplaySignal) -> str:
     mode = get_signal_display_mode(signal)
     if mode == SignalDisplayMode.LOW_DATA:
         return signal_wording("not_enough_history_yet")
-    if mode == SignalDisplayMode.PARTIAL:
-        return signal_wording("not_enough_history_yet")
+    if mode == SignalDisplayMode.CURRENT_STATE:
+        if signal.observed_value is None:
+            return "Current pace"
+        return f"Current pace: {signal.observed_value:.1f} UPH"
 
     if signal.signal_label == SignalLabel.BELOW_EXPECTED_PACE:
         return signal_wording("below_expected_pace")
@@ -198,8 +200,8 @@ def format_observed_line(signal: DisplaySignal) -> str:
     if mode == SignalDisplayMode.LOW_DATA:
         return ""
     observed_text = format_friendly_date(signal.observed_date)
-    if mode == SignalDisplayMode.PARTIAL:
-        return f"Observed: {observed_text}"
+    if mode == SignalDisplayMode.CURRENT_STATE:
+        return observed_text
     return f"Observed: {observed_text} ({signal.observed_value:.1f} UPH)"
 
 
@@ -222,6 +224,6 @@ def format_comparison_line(signal: DisplaySignal) -> str:
 
 def format_confidence_line(signal: DisplaySignal) -> str:
     mode = get_signal_display_mode(signal)
-    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}:
-        return "Confidence: Low"
+    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.CURRENT_STATE}:
+        return "Low confidence"
     return f"Confidence: {signal.confidence.value.title()}"

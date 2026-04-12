@@ -155,6 +155,17 @@ def _apply_today_styles() -> None:
             font-size: 0.83rem;
             margin-top: 7px;
         }
+        .today-confidence-badge-low {
+            display: inline-block;
+            background: #eef3f8;
+            color: #49647f;
+            border: 1px solid #d4e0ec;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            margin-top: 7px;
+        }
         .today-placeholder {
             background: #f8fbff;
             border: 1px dashed #c9d9ea;
@@ -635,7 +646,7 @@ def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: 
     lines: list[str] = []
     mode = get_signal_display_mode(signal)
 
-    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}:
+    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.CURRENT_STATE}:
         lines.append(signal_wording("not_enough_history_yet"))
         lines.append(format_confidence_line(signal))
     else:
@@ -692,16 +703,20 @@ def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, co
             st.markdown(f'<div class="today-insight-line">{card.line_3}</div>', unsafe_allow_html=True)
         if not compact and str(card.line_4 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_4}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="today-insight-meta">{card.line_5}</div>', unsafe_allow_html=True)
+        line_5_text = str(card.line_5 or "").strip()
+        if line_5_text.lower() == "low confidence":
+            st.markdown(f'<div class="today-confidence-badge-low">{line_5_text}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="today-insight-meta">{line_5_text}</div>', unsafe_allow_html=True)
 
         if not compact and card.expanded_lines:
-            with st.expander("Signal explanation", expanded=False):
+            with st.expander("Why this is shown", expanded=False):
                 for line in card.expanded_lines[:3]:
                     st.write(line)
 
         if show_action:
             if st.button(
-                "Open employee detail",
+                "View details →",
                 key=f"{key_prefix}_{card.employee_id}_{card.process_id}",
                 use_container_width=False,
                 type="secondary",
@@ -713,16 +728,18 @@ def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, co
 
 
 def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_cards: list[InsightCardContract] | None = None) -> None:
-    st.markdown('<div class="today-section-label">What needs attention today</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="today-supporting-note">Start here. Items are surfaced by urgency signals from recent activity and follow-ups.</div>',
-        unsafe_allow_html=True,
-    )
-
     queue_vm = build_today_queue_view_model(
         attention=attention,
         suppressed_cards=suppressed_cards,
         today=date.today(),
+    )
+
+    has_trend_signals = any(str(card.line_4 or "").strip().lower().startswith("compared to:") for card in queue_vm.primary_cards)
+    section_title = "What needs attention today" if has_trend_signals else "What you can review today"
+    st.markdown(f'<div class="today-section-label">{section_title}</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="today-supporting-note">Start here.</div>',
+        unsafe_allow_html=True,
     )
 
     if not queue_vm.primary_cards:
@@ -735,10 +752,8 @@ def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_c
             )
 
     if queue_vm.secondary_cards:
-        st.markdown('<div class="today-secondary-label">Optional context</div>', unsafe_allow_html=True)
-        st.markdown('<div class="today-secondary-subcaption">Low-confidence or limited-history signals.</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="today-secondary-note">{len(queue_vm.secondary_cards)} item(s) available.</div>', unsafe_allow_html=True)
-        with st.expander("Other items (review if time)", expanded=False):
+        st.markdown('<div class="today-secondary-subcaption">Low-confidence or limited-history signals</div>', unsafe_allow_html=True)
+        with st.expander("Other items", expanded=False):
             for idx, card in enumerate(queue_vm.secondary_cards[:20]):
                 _render_attention_card(
                     card=card,
@@ -775,14 +790,21 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
         return
     mode = get_signal_display_mode(display_signal)
     with st.container(border=True):
-        low_data_state = mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}
+        low_data_state = mode == SignalDisplayMode.LOW_DATA
+        current_state_mode = mode == SignalDisplayMode.CURRENT_STATE
         collapsed_lines = format_low_data_collapsed_lines(display_signal) if low_data_state else []
         if low_data_state:
             line_1 = ""
             line_2 = collapsed_lines[0] if len(collapsed_lines) > 0 else signal_wording("not_enough_history_yet")
             line_3 = ""
             line_4 = ""
-            line_5 = collapsed_lines[1] if len(collapsed_lines) > 1 else "Confidence: Low"
+            line_5 = collapsed_lines[1] if len(collapsed_lines) > 1 else "Low confidence"
+        elif current_state_mode:
+            line_1 = f"{display_signal.employee_name} · {display_signal.process}"
+            line_2 = format_signal_label(display_signal)
+            line_3 = format_observed_line(display_signal)
+            line_4 = format_confidence_line(display_signal)
+            line_5 = ""
         else:
             line_1 = f"{display_signal.employee_name} · {display_signal.process}"
             line_2 = format_signal_label(display_signal)
@@ -797,7 +819,10 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
             if idx == 1:
                 st.markdown(f'<div class="today-insight-title">{line_text}</div>', unsafe_allow_html=True)
             elif idx == 5:
-                st.markdown(f'<div class="today-insight-meta">{line_text}</div>', unsafe_allow_html=True)
+                if line_text.lower() == "low confidence":
+                    st.markdown(f'<div class="today-confidence-badge-low">{line_text}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="today-insight-meta">{line_text}</div>', unsafe_allow_html=True)
             else:
                 st.markdown(f'<div class="today-insight-line">{line_text}</div>', unsafe_allow_html=True)
 
@@ -809,7 +834,7 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
         c1, c2 = st.columns([3, 2])
         with c1:
             if has_extra:
-                with st.expander("Signal explanation", expanded=False):
+                with st.expander("Why this is shown", expanded=False):
                     if low_data_state:
                         recent_count = _estimate_recent_record_count(item)
                         for line in format_low_data_expanded_lines(display_signal, recent_record_count=recent_count):
@@ -887,7 +912,7 @@ def page_today() -> None:
     <div class="today-hero">
         <div class="today-hero-kicker">Today Queue</div>
         <div class="today-hero-title">What needs attention today</div>
-        <div class="today-hero-copy">Review today\'s items and record follow-through.</div>
+        <div class="today-hero-copy">See what needs attention and why.</div>
     </div>
     """,
         unsafe_allow_html=True,
