@@ -710,10 +710,12 @@ def page_employees():
 
     try:
         tenant_id = st.session_state.get("tenant_id")
-        _views = get_available_employee_views(tenant_id)
+        _views = list(get_available_employee_views(tenant_id) or [])
+        if not _views:
+            _views = ["Performance Journal"]
         _default_view = st.session_state.get("emp_view", "Performance Journal")
         if _default_view not in _views:
-            _default_view = "Performance Journal"
+            _default_view = _views[0]
         if "employees_view_tab" not in st.session_state or st.session_state.get("employees_view_tab") not in _views:
             st.session_state["employees_view_tab"] = _default_view
         _selected_view = st.radio(
@@ -979,8 +981,12 @@ def _emp_coaching():
         )
         sel_rows = sel.selection.rows if sel and sel.selection else []
         if sel_rows:
-            selected_emp = filtered_emps[sel_rows[0]]
-            st.session_state["cn_selected_emp"] = selected_emp["emp_id"]
+            selected_idx = sel_rows[0]
+            if 0 <= selected_idx < len(filtered_emps):
+                selected_emp = filtered_emps[selected_idx]
+                st.session_state["cn_selected_emp"] = selected_emp["emp_id"]
+            else:
+                selected_emp = None
         else:
             selected_emp = None
 

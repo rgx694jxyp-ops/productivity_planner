@@ -170,6 +170,9 @@ def _short_reason(action: dict) -> str:
 def _good_looks_like(action: dict) -> str:
     success_metric = str(action.get("success_metric") or "").strip()
     if success_metric:
+        lower = success_metric.lower()
+        if any(token in lower for token in ("escalate", "move role", "role reset", "support plan")):
+            return "Track whether performance stabilizes versus baseline over the next review window."
         return success_metric
 
     baseline_uph = float(action.get("baseline_uph") or 0.0)
@@ -322,6 +325,42 @@ def _set_flash_and_refresh(message: str, action_id: str) -> None:
     st.rerun()
 
 
+def _follow_up_signal(action: dict) -> str:
+    queue_status = str(action.get("_queue_status") or "pending")
+    if queue_status in {"overdue", "due_today"}:
+        return "Follow-up not completed"
+    if bool(action.get("_is_repeat_issue")):
+        return "Seen again after coaching"
+    issue_type = str(action.get("issue_type") or "").strip().lower()
+    if issue_type in {"low_performance_unaddressed", "low_performance"}:
+        return "Follow-ups not improving"
+    return "Follow-up needs review"
+
+
+def _follow_up_context_line(action: dict) -> str:
+    failed_cycles = int(action.get("failed_cycles") or 0)
+    if failed_cycles >= 2:
+        return f"{failed_cycles} follow-ups logged with no improvement"
+    if bool(action.get("_is_repeat_issue")):
+        return "Seen again after coaching"
+    trigger_summary = str(action.get("trigger_summary") or "").strip()
+    if trigger_summary:
+        return trigger_summary[:120]
+    return ""
+
+
+def _follow_up_timing_line(action: dict, *, today: date) -> str:
+    due_date = parse_action_date(action.get("follow_up_due_at"))
+    if due_date is None:
+        return ""
+    day_delta = (due_date - today).days
+    if day_delta < 0:
+        return "Overdue"
+    if day_delta == 0:
+        return "Due today"
+    return ""
+
+
 def _submit_primary_action(action: dict, outcome: str, note: str, next_follow_up_at: str, tenant_id: str, performed_by: str) -> bool:
     action_id = str(action.get("id") or "")
     employee_id = str(action.get("employee_id") or "")
@@ -392,12 +431,13 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
     _render_queue_styles()
     action_id = str(action.get("id") or "")
     employee_name = str(action.get("employee_name") or action.get("employee_id") or "Unknown")
-    primary_cta = str(action.get("_primary_cta") or "Follow up")
+    primary_cta = "Log update"
     form_key = _action_form_key(action_id)
     department = str(action.get("department") or "").strip()
-    subtext_bits = [bit for bit in [department, str(action.get("action_type") or "").replace("_", " ").title() or ""] if bit]
-    subtext = " | ".join(subtext_bits)
-    chips_html = _build_status_chips(action)
+    line_1 = f"{employee_name} · {department}" if department else employee_name
+    line_2 = _follow_up_signal(action)
+    line_3 = _follow_up_context_line(action)
+    line_4 = _follow_up_timing_line(action, today=today)
 
     with st.container(border=True):
         st.markdown(
@@ -405,59 +445,30 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
             <div class="today-card-shell">
                 <div class="today-card-header">
                     <div>
-                        <div class="today-card-name">{_escape_html(employee_name)}</div>
-                        <div class="today-card-subtext">{_escape_html(subtext)}</div>
-                        <div class="today-chip-row">{chips_html}</div>
-                    </div>
-                    <div class="today-card-next">
-                        <div class="today-card-next-label">Primary action</div>
-                        <div class="today-card-next-value">{_escape_html(primary_cta)}</div>
+                        <div class="today-card-name">{_escape_html(line_1)}</div>
                     </div>
                 </div>
                 <div class="today-card-copy">
                     <div class="today-copy-block">
-                        <div class="today-copy-label">Reason</div>
-                        <div class="today-copy-value">{_escape_html(action.get('_short_reason'))}</div>
-                    </div>
-                    <div class="today-copy-block">
-                        <div class="today-copy-label">Why this is here</div>
-                        <div class="today-copy-value">{_escape_html(action.get('_why_this_is_here'))}</div>
-                    </div>
-                    <div class="today-copy-block">
-                        <div class="today-copy-label">Context target</div>
-                        <div class="today-copy-value">{_escape_html(action.get('_good_looks_like'))}</div>
+                        <div class="today-copy-value">{_escape_html(line_2)}</div>
                     </div>
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-
-        repeat_signals = list(action.get("_repeat_signals") or [])
-        recognition_signals = list(action.get("_recognition_signals") or [])
-        signal_text = repeat_signals or recognition_signals
-        if signal_text:
-            st.markdown(
-                f'<div class="today-card-signals"><strong>Signals:</strong> {_escape_html(" • ".join(signal_text[:3]))}</div>',
-                unsafe_allow_html=True,
-            )
-
-        due_date = parse_action_date(action.get("follow_up_due_at"))
-        if due_date:
-            day_delta = (due_date - today).days
-            if day_delta < 0:
-                st.caption(f"Follow-up date was {abs(day_delta)} day{'s' if abs(day_delta) != 1 else ''} ago.")
-            elif day_delta == 0:
-                st.caption("Follow-up date is today.")
-            else:
-                st.caption(f"Follow-up date is in {day_delta} day{'s' if day_delta != 1 else ''}.")
+        if line_3:
+            st.caption(line_3)
+        if line_4:
+            st.caption(line_4)
 
         if st.button(primary_cta, key=f"today_primary_cta_{action_id}", type="primary", use_container_width=True):
             st.session_state[form_key] = not bool(st.session_state.get(form_key, False))
             st.rerun()
 
         if st.session_state.get(form_key, False):
-            default_schedule = primary_cta not in {action_label("mark_for_review"), action_label("lower_urgency")}
+            primary_action_code = str(action.get("_primary_action_code") or "")
+            default_schedule = primary_action_code not in {"mark_for_review", "lower_urgency"}
             with st.form(key=f"today_action_form_{action_id}", clear_on_submit=False):
                 outcome_display = st.selectbox(
                     "Outcome",
@@ -505,7 +516,7 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
                     performed_by=performed_by,
                 )
                 if success:
-                    _set_flash_and_refresh(f"{employee_name}: {primary_cta.lower()} logged.", action_id)
+                    _set_flash_and_refresh(f"{employee_name}: update logged.", action_id)
                 st.error("Action could not be saved. Please try again.")
 
 
