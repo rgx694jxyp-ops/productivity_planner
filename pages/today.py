@@ -27,6 +27,7 @@ from services.signal_traceability_service import traceability_payload_from_card
 from ui.state_panels import (
     show_error_state,
     show_healthy_state,
+    show_loading_state,
     show_low_confidence_state,
     show_no_data_state,
     show_partial_data_state,
@@ -552,6 +553,52 @@ def _build_attention_explanation_lines(item: AttentionItem) -> list[str]:
     elif trend_state in {"improving", "up"}:
         lines.append("Performance has been higher than usual in recent shifts.")
 
+    # --- target-based secondary signal ---
+    # Reads goal_status + configured target from snapshot to annotate below-target
+    # employees. Never replaces the trend line — appended after it when both apply.
+    _goal_val = str(snapshot.get("goal_status") or "").strip().lower()
+    _raw_target = snapshot.get("expected_uph") or snapshot.get("Target UPH")
+    _raw_obs = snapshot.get("recent_average_uph") or snapshot.get("Average UPH")
+    try:
+        _target_uph = float(_raw_target or 0)
+    except (TypeError, ValueError):
+        _target_uph = 0.0
+    try:
+        _obs_uph = float(_raw_obs or 0)
+    except (TypeError, ValueError):
+        _obs_uph = 0.0
+    _targ_conf = str(snapshot.get("confidence_label") or "").strip().lower()
+    if (
+        _goal_val == "below_goal"
+        and _target_uph > 0
+        and _obs_uph > 0
+        and _targ_conf in {"high", "medium"}
+        and _obs_uph < _target_uph * 0.95
+    ):
+        has_trend_line = bool(lines)
+        if has_trend_line:
+            lines.append(f"Also below expected pace (~{_target_uph:.0f} UPH).")
+        else:
+            # Standalone: no trend context — show full target block
+            _snap_date_str = str(snapshot.get("snapshot_date") or "")[:10]
+            try:
+                _sd = date.fromisoformat(_snap_date_str) if _snap_date_str else None
+            except Exception:
+                _sd = None
+            _today_d = date.today()
+            if _sd is None:
+                _obs_label = "Recent"
+            elif (_today_d - _sd).days == 0:
+                _obs_label = "Today"
+            elif (_today_d - _sd).days == 1:
+                _obs_label = "Yesterday"
+            else:
+                _obs_label = _sd.strftime("%b ") + str(_sd.day)
+            lines.append("Below expected pace.")
+            lines.append(f"Observed: {_obs_label} ({_obs_uph:.1f})")
+            lines.append(f"Target: ~{_target_uph:.0f}")
+            lines.append(f"Confidence: {_targ_conf.title()}")
+
     repeat_count = int(snapshot.get("repeat_count") or 0)
     if repeat_count > 0:
         times = "time" if repeat_count == 1 else "times"
@@ -770,16 +817,27 @@ def page_today() -> None:
     with refresh_col:
         if st.button("Refresh signals", key="today_refresh_precomputed_signals", use_container_width=True):
             try:
-                from services.daily_signals_service import compute_daily_signals
+                from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
 
                 loading_slot = st.empty()
                 with loading_slot.container():
                     show_loading_state("Refreshing precomputed signals for Today…")
                 with st.spinner("Refreshing signals…"):
-                    compute_daily_signals(
-                        signal_date=today_value,
-                        tenant_id=str(st.session_state.get("tenant_id", "") or ""),
-                    )
+                    _tenant = str(st.session_state.get("tenant_id", "") or "")
+                    try:
+                        compute_daily_signals(
+                            signal_date=today_value,
+                            tenant_id=_tenant,
+                        )
+                    except Exception as _compute_err:
+                        _msg = str(_compute_err or "")
+                        if "daily_signals" in _msg or "PGRST205" in _msg:
+                            st.session_state["_today_precomputed_payload"] = build_transient_today_payload(
+                                signal_date=today_value,
+                                tenant_id=_tenant,
+                            )
+                        else:
+                            raise
                 loading_slot.empty()
                 get_today_signals.clear()
                 st.success("Signals refreshed.")

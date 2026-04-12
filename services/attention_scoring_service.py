@@ -65,6 +65,7 @@ _WEIGHTS: dict[str, int] = {
     "open_exception": 15,
     "variance_over_20pct": 15,
     "variance_10_to_20pct": 8,
+    "below_dept_target": 8,
     "confidence_high": 10,
     "confidence_low": -20,
     "completeness_complete": 5,
@@ -205,6 +206,21 @@ def _score_one(
             factors.append(AttentionFactor("variance_over_20pct", _WEIGHTS["variance_over_20pct"], f"Output is {variance_pct:.0%} from expected pace"))
         elif variance_pct >= 0.10:
             factors.append(AttentionFactor("variance_10_to_20pct", _WEIGHTS["variance_10_to_20pct"], f"Output is {variance_pct:.0%} from expected pace"))
+
+    # --- below configured target (secondary signal) ---
+    # Only fires when a dept/process/default target is set, confidence is at least
+    # medium, and the employee is meaningfully below it (≥5% gap). This is a
+    # secondary signal; trend signals remain primary and are not replaced.
+    _goal_status = str(snapshot.get("goal_status") or "").strip().lower()
+    _conf_early = str(snapshot.get("confidence_label") or "low").strip().lower()
+    if (
+        _goal_status == "below_goal"
+        and expected_uph > 0
+        and recent_uph > 0
+        and _conf_early in {"high", "medium"}
+        and recent_uph < expected_uph * 0.95
+    ):
+        factors.append(AttentionFactor("below_dept_target", _WEIGHTS["below_dept_target"], "Observed pace is below the configured target"))
 
     # --- confidence ---
     confidence_label = str(snapshot.get("confidence_label") or "low").strip().lower()
