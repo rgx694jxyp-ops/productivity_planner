@@ -1,7 +1,9 @@
 from datetime import date
 
 from domain.display_signal import DisplayConfidenceLevel, DisplaySignalState, SignalLabel
-from services.display_signal_factory import build_display_signal
+from services.attention_scoring_service import AttentionItem
+from services.display_signal_factory import build_display_signal, build_display_signal_from_attention_item
+from services.signal_formatting_service import SignalDisplayMode, format_confidence_line, get_signal_display_mode
 
 
 def _current_candidate_signal(*, usable_points: int = 2):
@@ -131,8 +133,8 @@ def test_build_display_signal_allows_partial_when_observed_has_no_comparison_val
     assert signal.comparison_value is None
 
 
-def test_current_state_generated_when_history_under_3_points():
-    signal = _current_candidate_signal(usable_points=2)
+def test_current_state_generated_with_one_usable_point():
+    signal = _current_candidate_signal(usable_points=1)
 
     assert signal.state == DisplaySignalState.CURRENT
     assert signal.primary_label == "Current pace"
@@ -237,3 +239,32 @@ def test_low_data_used_when_no_valid_current_or_comparison_signal_exists():
     assert signal.signal_label == SignalLabel.LOW_DATA
     assert signal.state == DisplaySignalState.LOW_DATA
     assert signal.is_low_data is True
+
+
+def test_attention_item_uses_prior_average_baseline_before_target_baseline():
+    item = AttentionItem(
+        employee_id="EMP1",
+        process_name="Picking",
+        attention_score=81,
+        attention_tier="high",
+        attention_reasons=["Declining pace"],
+        attention_summary="Recent pace dropped.",
+        factors_applied=[],
+        snapshot={
+            "snapshot_date": "2026-04-12",
+            "recent_average_uph": 52.0,
+            "prior_average_uph": 60.0,
+            "expected_uph": 40.0,
+            "Record Count": 5,
+            "confidence_label": "High",
+            "data_completeness_status": "partial",
+            "repeat_count": 0,
+            "trend_state": "declining",
+        },
+    )
+
+    signal = build_display_signal_from_attention_item(item=item, today=date(2026, 4, 12))
+
+    assert signal.comparison_value == 60.0
+    assert get_signal_display_mode(signal) == SignalDisplayMode.FULL
+    assert format_confidence_line(signal) == "Confidence: High"

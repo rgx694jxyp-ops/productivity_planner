@@ -22,7 +22,7 @@ from services.signal_formatting_service import (
     format_observed_line,
     format_signal_label,
     get_signal_display_mode,
-    is_signal_display_eligible,
+    is_display_signal_eligible,
 )
 
 
@@ -78,7 +78,7 @@ class _RankedCard:
     status_rank: int
     repeat_rank: int
     confidence_rank: int
-    severity_rank: int
+    attention_priority_rank: int
     recency_rank: int
     tie_breaker: tuple[str, str, str, str]
 
@@ -604,9 +604,14 @@ def _confidence_rank(signal: DisplaySignal) -> int:
     return mapping.get(_confidence_level_value(signal), 2)
 
 
-def _severity_rank(item: Any) -> int:
+def _attention_priority_rank(item: Any) -> int:
     score = int(getattr(item, "attention_score", 0) or 0)
     return -score
+
+
+def _severity_rank(item: Any) -> int:
+    """Backward-compatible alias for attention-priority ranking semantics."""
+    return _attention_priority_rank(item)
 
 
 def _recency_rank(signal: DisplaySignal) -> int:
@@ -630,7 +635,7 @@ def _sort_ranked_cards(rows: list[_RankedCard]) -> list[_RankedCard]:
             row.status_rank,
             row.repeat_rank,
             row.confidence_rank,
-            row.severity_rank,
+            row.attention_priority_rank,
             row.recency_rank,
             row.tie_breaker,
         ),
@@ -687,7 +692,7 @@ def _merge_ranked_cards(preferred: _RankedCard, incoming: _RankedCard) -> _Ranke
         status_rank=preferred.status_rank,
         repeat_rank=preferred.repeat_rank,
         confidence_rank=preferred.confidence_rank,
-        severity_rank=preferred.severity_rank,
+        attention_priority_rank=preferred.attention_priority_rank,
         recency_rank=preferred.recency_rank,
         tie_breaker=preferred.tie_breaker,
     )
@@ -943,12 +948,12 @@ def build_today_queue_view_model(
 
     for item in list(attention.ranked_items or []):
         signal = build_display_signal_from_attention_item(item=item, today=today)
-        eligible_primary = is_signal_display_eligible(
+        eligible_primary = is_display_signal_eligible(
             signal,
             allow_low_data_case=False,
             min_confidence_for_full_or_partial="low",
         )
-        eligible_low_data = is_signal_display_eligible(
+        eligible_low_data = is_display_signal_eligible(
             signal,
             allow_low_data_case=True,
             min_confidence_for_full_or_partial="low",
@@ -972,7 +977,7 @@ def build_today_queue_view_model(
             status_rank=_status_rank(signal),
             repeat_rank=_repeat_rank(item),
             confidence_rank=_confidence_rank(signal),
-            severity_rank=_severity_rank(item),
+            attention_priority_rank=_attention_priority_rank(item),
             recency_rank=_recency_rank(signal),
             tie_breaker=_tie_breaker(item, signal),
         )
@@ -985,7 +990,7 @@ def build_today_queue_view_model(
 
     for card in [c for c in list(suppressed_cards or []) if isinstance(c, InsightCardContract)]:
         signal = build_display_signal_from_insight_card(card=card, today=today)
-        if not is_signal_display_eligible(signal, allow_low_data_case=True):
+        if not is_display_signal_eligible(signal, allow_low_data_case=True):
             continue
         card_vm = _card_from_insight_card(card, signal)
         secondary_ranked.append(
@@ -995,7 +1000,7 @@ def build_today_queue_view_model(
                 status_rank=_status_rank(signal),
                 repeat_rank=0,
                 confidence_rank=_confidence_rank(signal),
-                severity_rank=0,
+                attention_priority_rank=0,
                 recency_rank=_recency_rank(signal),
                 tie_breaker=(
                     str(card.drill_down.entity_id or "").strip().lower(),

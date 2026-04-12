@@ -166,16 +166,20 @@ def _derive_state_with_inputs(
     }
     if label == SignalLabel.LOW_DATA or not has_observed:
         return DisplaySignalState.LOW_DATA
-    if label in metric_labels and usable_points is not None and usable_points < 3:
+    if label in metric_labels and usable_points is not None and usable_points <= 1:
         return DisplaySignalState.CURRENT
+    if label in metric_labels and usable_points is not None and usable_points == 2:
+        return DisplaySignalState.EARLY_TREND
     if label in metric_labels and not has_comparison:
         return DisplaySignalState.CURRENT
     if label in {SignalLabel.REPEATED_PATTERN, SignalLabel.UNRESOLVED_ISSUE, SignalLabel.FOLLOW_UP_OVERDUE, SignalLabel.FOLLOW_UP_DUE_TODAY}:
         return DisplaySignalState.PATTERN
     if label not in metric_labels and pattern_count is not None and int(pattern_count or 0) > 1:
         return DisplaySignalState.PATTERN
-    if usable_points is not None and usable_points < 3:
+    if usable_points is not None and usable_points <= 1:
         return DisplaySignalState.CURRENT
+    if usable_points is not None and usable_points == 2:
+        return DisplaySignalState.EARLY_TREND
     if not has_comparison:
         return DisplaySignalState.CURRENT
     if confidence == SignalConfidence.LOW:
@@ -505,6 +509,27 @@ def build_display_signal_from_attention_item(*, item: AttentionItem, today: date
     comparison_start = min(comp_dates) if comp_dates else (observed_date - timedelta(days=5))
     comparison_end = max(comp_dates) if comp_dates else (observed_date - timedelta(days=1))
 
+    comparison_value = None
+    for candidate in (
+        snapshot.get("prior_average_uph"),
+        snapshot.get("prior_avg_uph"),
+        snapshot.get("expected_uph"),
+        snapshot.get("Target UPH"),
+    ):
+        parsed = _safe_float(candidate)
+        if parsed is not None and parsed > 0:
+            comparison_value = parsed
+            break
+
+    usable_points = (
+        snapshot.get("sample_size")
+        or snapshot.get("included_rows")
+        or snapshot.get("included_day_count")
+        or snapshot.get("Record Count")
+        or snapshot.get("record_count")
+        or (len(comp_dates) + (1 if snapshot.get("recent_average_uph") is not None or snapshot.get("Average UPH") is not None else 0))
+    )
+
     return build_display_signal(
         employee_id=item.employee_id,
         employee_name=item.employee_id,
@@ -514,11 +539,11 @@ def build_display_signal_from_attention_item(*, item: AttentionItem, today: date
         observed_value=snapshot.get("recent_average_uph") if snapshot.get("recent_average_uph") is not None else snapshot.get("Average UPH"),
         comparison_start_date=comparison_start,
         comparison_end_date=comparison_end,
-        comparison_value=snapshot.get("expected_uph") if snapshot.get("expected_uph") is not None else snapshot.get("Target UPH"),
+        comparison_value=comparison_value,
         pattern_count=snapshot.get("repeat_count"),
         pattern_window_label=snapshot.get("pattern_window_label"),
         state=snapshot.get("signal_state"),
-        usable_points=snapshot.get("sample_size") or snapshot.get("included_rows") or (len(comp_dates) + (1 if snapshot.get("recent_average_uph") is not None or snapshot.get("Average UPH") is not None else 0)),
+        usable_points=usable_points,
         minimum_trend_points=snapshot.get("minimum_expected_points") or 3,
         confidence=snapshot.get("confidence_label") or "low",
         data_completeness=snapshot.get("data_completeness_status") or snapshot.get("completeness"),

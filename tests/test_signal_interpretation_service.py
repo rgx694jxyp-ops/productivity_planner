@@ -278,8 +278,8 @@ def test_below_expected_low_history_uses_current_snapshot_compact_output():
     compact = card.metadata.get("compact_lines") or {}
 
     assert compact.get("line_1") == "Riley · Dock"
-    assert compact.get("line_2") == "Current pace: 52.0 UPH"
-    assert compact.get("line_3") == "Apr 8"
-    assert compact.get("line_4") == "Low confidence"
-    assert compact.get("line_5") == ""
-    assert compact.get("expanded_line") == "No comparison available"
+    assert compact.get("line_2") == "Below expected pace"
+    assert compact.get("line_3") == "Observed: Apr 8 (52.0 UPH)"
+    assert compact.get("line_4") == "Compared to: Apr 3–Apr 7 avg (58.0 UPH)"
+    assert compact.get("line_5") == "Confidence: High"
+    assert compact.get("expanded_line") == ""

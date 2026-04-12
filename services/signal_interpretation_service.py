@@ -284,8 +284,10 @@ def _build_compact_signal_lines(
     metric_labels = {"below_expected_pace", "lower_than_recent_pace", "inconsistent_pace", "improving_pace"}
     if not has_observed:
         explicit_state = DisplaySignalState.LOW_DATA
-    elif mapped_label in metric_labels and sample_size < 3:
+    elif mapped_label in metric_labels and sample_size <= 1:
         explicit_state = DisplaySignalState.CURRENT
+    elif mapped_label in metric_labels and sample_size == 2:
+        explicit_state = DisplaySignalState.EARLY_TREND
     elif mapped_label in metric_labels and not has_valid_comparison:
         explicit_state = DisplaySignalState.CURRENT
     elif mapped_label == "repeated_pattern" and pattern_count > 1:
@@ -380,6 +382,56 @@ def _parse_iso_date(value: object) -> date | None:
 def _ref_ts(today: date) -> datetime:
     """Use deterministic reference timestamp derived from provided date."""
     return datetime.combine(today, time(hour=12, minute=0))
+
+
+def derive_confidence_from_coverage_policy(
+    *,
+    coverage_ratio: float,
+    included_count: int,
+    high_min_coverage: float = 0.7,
+    high_min_count: int = 7,
+    medium_min_coverage: float = 0.4,
+    medium_min_count: int = 4,
+    allow_high: bool = True,
+    high_basis: str = "Recent daily coverage is strong.",
+    medium_basis: str = "Partial recent daily coverage is available for comparison.",
+    low_basis: str = "Recent daily coverage is still limited, so treat this as an early signal.",
+) -> ConfidenceInfo:
+    """Canonical coverage-driven confidence policy.
+
+    Services can preserve local semantics by passing explicit thresholds or
+    an explicit high-confidence gate via allow_high.
+    """
+    ratio = max(0.0, min(1.0, float(coverage_ratio or 0.0)))
+    sample_size = max(0, int(included_count or 0))
+
+    if allow_high and ratio >= float(high_min_coverage) and sample_size >= int(high_min_count):
+        return ConfidenceInfo(
+            level="high",
+            score=0.9,
+            basis=str(high_basis or "Recent daily coverage is strong."),
+            sample_size=sample_size,
+            minimum_expected_points=int(high_min_count),
+        )
+
+    if ratio >= float(medium_min_coverage) and sample_size >= int(medium_min_count):
+        return ConfidenceInfo(
+            level="medium",
+            score=0.72,
+            basis=str(medium_basis or "Partial recent daily coverage is available for comparison."),
+            sample_size=sample_size,
+            minimum_expected_points=int(medium_min_count),
+            caveat="Signal confidence increases as more complete observations are added.",
+        )
+
+    return ConfidenceInfo(
+        level="low",
+        score=0.48,
+        basis=str(low_basis or "Recent daily coverage is still limited, so treat this as an early signal."),
+        sample_size=sample_size,
+        minimum_expected_points=int(medium_min_count),
+        caveat="Treat as an early signal until additional data is available.",
+    )
 
 
 def _confidence_from_inputs(

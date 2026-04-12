@@ -3,18 +3,18 @@ from datetime import date
 from services.today_home_service import (
     build_today_attention_summary,
     build_today_home_sections,
-    is_signal_display_eligible,
+    is_insight_card_display_eligible,
 )
 from services.signal_interpretation_service import interpret_suspicious_or_incomplete_data
 
 
-def test_is_signal_display_eligible_rejects_non_meaningful_warning_card():
+def test_is_insight_card_display_eligible_rejects_non_meaningful_warning_card():
     card = interpret_suspicious_or_incomplete_data(
         import_summary={"days": 1, "emp_count": 4, "below": 1, "risks": 1},
         today=date(2026, 4, 11),
     )
 
-    assert is_signal_display_eligible(card, today=date(2026, 4, 11)) is False
+    assert is_insight_card_display_eligible(card, today=date(2026, 4, 11)) is False
 
 
 def test_build_today_home_sections_keeps_main_signals_and_suppresses_noise():

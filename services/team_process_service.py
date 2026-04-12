@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from services.signal_interpretation_service import derive_confidence_from_coverage_policy
 from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
 from services.target_service import build_comparison_descriptions, normalize_process_name, resolve_target_context
 from services.trend_classification_service import normalize_trend_state
@@ -80,11 +81,17 @@ def _history_hours(row: dict) -> float:
 
 
 def _confidence_label(coverage_ratio: float, included_count: int, affected_people: int) -> str:
-    if coverage_ratio >= 0.7 and included_count >= 8 and affected_people >= 2:
-        return "High"
-    if coverage_ratio >= 0.4 and included_count >= 4:
-        return "Medium"
-    return "Low"
+    # Team/process context requires at least two affected people before High confidence is allowed.
+    confidence = derive_confidence_from_coverage_policy(
+        coverage_ratio=coverage_ratio,
+        included_count=included_count,
+        high_min_coverage=0.7,
+        high_min_count=8,
+        medium_min_coverage=0.4,
+        medium_min_count=4,
+        allow_high=affected_people >= 2,
+    )
+    return str(confidence.level or "low").title()
 
 
 def _completeness_label(coverage_ratio: float, included_count: int) -> str:

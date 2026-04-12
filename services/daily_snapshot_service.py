@@ -8,6 +8,7 @@ from typing import Any
 
 from repositories import daily_employee_snapshots_repo, get_employees
 from services.activity_records_service import get_recent_activity_records
+from services.signal_interpretation_service import derive_confidence_from_coverage_policy
 from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
 from services.target_service import normalize_process_name, resolve_target_context
 from services.trend_classification_service import classify_trend_state, normalize_trend_state
@@ -105,11 +106,20 @@ def _group_activity_records(records: list[dict]) -> tuple[dict[tuple[str, str], 
 
 
 def _confidence_label(coverage_ratio: float, included_count: int, expected_uph: float) -> tuple[str, float, str]:
-    if coverage_ratio >= 0.7 and included_count >= 7 and expected_uph > 0:
-        return "High", 0.9, "Recent daily coverage is strong and an expected pace is configured."
-    if coverage_ratio >= 0.4 and included_count >= 4:
-        return "Medium", 0.72, "Partial recent daily coverage is available for comparison."
-    return "Low", 0.48, "Recent daily coverage is still limited, so treat this as an early signal."
+    # Daily snapshots only allow High confidence when a target baseline is configured.
+    confidence = derive_confidence_from_coverage_policy(
+        coverage_ratio=coverage_ratio,
+        included_count=included_count,
+        high_min_coverage=0.7,
+        high_min_count=7,
+        medium_min_coverage=0.4,
+        medium_min_count=4,
+        allow_high=expected_uph > 0,
+        high_basis="Recent daily coverage is strong and an expected pace is configured.",
+        medium_basis="Partial recent daily coverage is available for comparison.",
+        low_basis="Recent daily coverage is still limited, so treat this as an early signal.",
+    )
+    return str(confidence.level or "low").title(), float(confidence.score or 0.48), str(confidence.basis or "")
 
 
 def _completeness_status(coverage_ratio: float, included_count: int, excluded_count: int) -> tuple[str, str]:

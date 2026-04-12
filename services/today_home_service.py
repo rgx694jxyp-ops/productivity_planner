@@ -116,8 +116,8 @@ def _is_recent_enough(signal: InsightCardContract, *, today: date, max_age_days:
     return age_days <= max_age_days
 
 
-def is_signal_display_eligible(signal: InsightCardContract, *, today: date) -> bool:
-    """Return True when a signal should appear in the main Today view."""
+def is_insight_card_display_eligible(signal: InsightCardContract, *, today: date) -> bool:
+    """Return True when an interpreted insight card should appear in Today."""
     kind = str(signal.insight_kind or "")
     confidence = str(signal.confidence.level or "low").lower()
     metadata = signal.metadata or {}
@@ -150,6 +150,14 @@ def is_signal_display_eligible(signal: InsightCardContract, *, today: date) -> b
     return True
 
 
+def is_signal_display_eligible(signal: InsightCardContract, *, today: date) -> bool:
+    """Backward-compatible alias for insight-card eligibility checks.
+
+    Preferred name: is_insight_card_display_eligible.
+    """
+    return is_insight_card_display_eligible(signal, today=today)
+
+
 def build_today_home_sections(
     *,
     queue_items: list[dict],
@@ -172,7 +180,7 @@ def build_today_home_sections(
     for key, items in sections.items():
         allowed: list[InsightCardContract] = []
         for item in items:
-            if is_signal_display_eligible(item, today=today):
+            if is_insight_card_display_eligible(item, today=today):
                 allowed.append(item)
             else:
                 suppressed.append(item)

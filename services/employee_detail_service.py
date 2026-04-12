@@ -6,7 +6,11 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
-from services.signal_interpretation_service import format_comparison_window, format_observed_label
+from services.signal_interpretation_service import (
+    derive_confidence_from_coverage_policy,
+    format_comparison_window,
+    format_observed_label,
+)
 from services.target_service import build_comparison_descriptions, resolve_target_context
 from services.trend_classification_service import classify_trend_state, normalize_trend_state
 
@@ -61,11 +65,16 @@ def _hours(row: dict) -> float:
 
 
 def _confidence_label(coverage_ratio: float, included_count: int) -> str:
-    if coverage_ratio >= 0.7 and included_count >= 7:
-        return "High"
-    if coverage_ratio >= 0.4 and included_count >= 4:
-        return "Medium"
-    return "Low"
+    confidence = derive_confidence_from_coverage_policy(
+        coverage_ratio=coverage_ratio,
+        included_count=included_count,
+        high_min_coverage=0.7,
+        high_min_count=7,
+        medium_min_coverage=0.4,
+        medium_min_count=4,
+        allow_high=True,
+    )
+    return str(confidence.level or "low").title()
 
 
 def _completeness_label(coverage_ratio: float, included_count: int) -> str:

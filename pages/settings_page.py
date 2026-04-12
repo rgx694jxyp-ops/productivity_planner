@@ -689,6 +689,101 @@ def page_settings():
 
         st.divider()
 
+        # ── Admin: operational reset (keep account/team) ─────────────────
+        st.subheader("🧨 Reset tenant data (keep account/team)")
+        st.caption(
+            "Admin-only reset for demo/testing. This clears operational records, "
+            "including imports, actions, derived snapshots/signals, and error logs, "
+            "while keeping your tenant/account/team/auth records intact."
+        )
+        try:
+            from database import get_my_role, reset_tenant_operational_data
+
+            _reset_tid = st.session_state.get("tenant_id", "")
+            _reset_role = get_my_role(_reset_tid)
+            _can_reset_tenant_data = can_manage_team(_reset_tid, _reset_role)
+
+            if _can_reset_tenant_data:
+                if "confirm_reset_tenant_operational" not in st.session_state:
+                    st.session_state.confirm_reset_tenant_operational = False
+
+                if not st.session_state.confirm_reset_tenant_operational:
+                    if st.button(
+                        "Reset tenant data but keep account/team",
+                        key="tenant_operational_reset_start",
+                        type="secondary",
+                    ):
+                        st.session_state.confirm_reset_tenant_operational = True
+                        st.rerun()
+                else:
+                    st.error(
+                        "⚠️ This permanently deletes operational tenant data (imports, actions, "
+                        "derived signals/snapshots, and diagnostics). Account/team/auth is preserved."
+                    )
+                    _reset_phrase = st.text_input(
+                        "Type RESET TENANT DATA to confirm",
+                        key="tenant_operational_reset_phrase",
+                        placeholder="RESET TENANT DATA",
+                    )
+                    rc1, rc2 = st.columns(2)
+                    if rc1.button(
+                        "Permanently reset operational data",
+                        key="tenant_operational_reset_go",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        if _reset_phrase == "RESET TENANT DATA":
+                            with st.spinner("Resetting tenant operational data…"):
+                                try:
+                                    _result = reset_tenant_operational_data(_reset_tid)
+                                    from cache import bust_cache as _bust_cache
+
+                                    _bust_cache()
+                                    st.session_state.confirm_reset_tenant_operational = False
+                                    if _result.get("errors"):
+                                        st.warning(
+                                            "Reset completed with some table errors. "
+                                            "Review error log details below."
+                                        )
+                                    else:
+                                        st.success(
+                                            "✓ Tenant operational data reset complete. "
+                                            "Account/team/auth records were preserved."
+                                        )
+                                    st.rerun()
+                                except Exception as _reset_err:
+                                    st.session_state.confirm_reset_tenant_operational = False
+                                    _show_user_error(
+                                        "Could not reset tenant operational data right now.",
+                                        next_steps="Please retry. If this continues, contact support.",
+                                        technical_detail=traceback.format_exc(),
+                                        category="cleanup",
+                                    )
+                                    _log_app_error(
+                                        "cleanup",
+                                        f"Tenant operational reset failed: {_reset_err}",
+                                        detail=traceback.format_exc(),
+                                    )
+                        else:
+                            st.warning("Type RESET TENANT DATA exactly to confirm.")
+
+                    if rc2.button(
+                        "Cancel",
+                        key="tenant_operational_reset_cancel",
+                        use_container_width=True,
+                    ):
+                        st.session_state.confirm_reset_tenant_operational = False
+                        st.rerun()
+            else:
+                st.info("Admin role required for tenant reset.")
+        except Exception as _reset_ui_err:
+            _log_app_error(
+                "cleanup",
+                f"Tenant reset controls unavailable: {_reset_ui_err}",
+                detail=traceback.format_exc(),
+                severity="warning",
+            )
+
         # ── Error log ─────────────────────────────────────────────────────
         st.subheader("Error Log")
         st.caption("Diagnostics and troubleshooting tools for admins.")

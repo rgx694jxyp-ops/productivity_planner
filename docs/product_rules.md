@@ -27,6 +27,10 @@ This product highlights and interprets operational data. It does not prescribe h
 7. Trust over false precision.
 8. Preserve current behavior unless trust/clarity/usability/scalability improves.
 
+Reference: source-of-truth contract for confidence policy, attention priority policy,
+signal maturity policy, minimum-data policy, and Today queue display policy:
+docs/attention_priority_confidence_contract.md
+
 ## Decision Test for Changes
 
 A change should only ship if it improves at least one of:

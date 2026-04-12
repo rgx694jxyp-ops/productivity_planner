@@ -133,7 +133,7 @@ def format_low_data_expanded_lines(signal: DisplaySignal, *, recent_record_count
     return _low_data_supporting_lines(signal, recent_record_count=recent_record_count)
 
 
-def is_signal_display_eligible(
+def is_display_signal_eligible(
     signal: DisplaySignal,
     *,
     allow_low_data_case: bool = True,
@@ -192,6 +192,23 @@ def is_signal_display_eligible(
     if signal_rank < min_rank:
         return False
     return True
+
+
+def is_signal_display_eligible(
+    signal: DisplaySignal,
+    *,
+    allow_low_data_case: bool = True,
+    min_confidence_for_full_or_partial: str = "medium",
+) -> bool:
+    """Backward-compatible alias for display-signal eligibility checks.
+
+    Preferred name: is_display_signal_eligible.
+    """
+    return is_display_signal_eligible(
+        signal,
+        allow_low_data_case=allow_low_data_case,
+        min_confidence_for_full_or_partial=min_confidence_for_full_or_partial,
+    )
 
 
 def get_signal_display_mode(signal: DisplaySignal) -> SignalDisplayMode:

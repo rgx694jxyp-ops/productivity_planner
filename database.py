@@ -1393,6 +1393,34 @@ _TENANT_TABLES = [
 ]
 
 
+# Operational-only reset list used for demo/testing "start fresh" workflows.
+# Keep account/team/auth and tenant-level config records intact.
+_TENANT_OPERATIONAL_RESET_TABLES = [
+    # Derived/precomputed tables first.
+    "daily_signals",
+    "daily_employee_snapshots",
+    "activity_records",
+    "operational_exceptions",
+    # Action workflow lifecycle.
+    "action_events",
+    "actions",
+    # Legacy workflow and import artifacts.
+    "coaching_followups",
+    "coaching_notes",
+    "uph_history",
+    "unit_submissions",
+    "order_assignments",
+    "orders",
+    "client_trends",
+    "clients",
+    "employees",
+    "shifts",
+    "uploaded_files",
+    # Tenant-scoped diagnostics.
+    "error_reports",
+]
+
+
 # ── Subscriptions (Stripe) ─────────────────────────────────────────────────────
 
 PLAN_LIMITS = {
@@ -2359,6 +2387,34 @@ def delete_all_tenant_data(tenant_id: str = ""):
         sb.table("tenants").delete().eq("id", tid).execute()
     except Exception:
         pass
+
+
+def reset_tenant_operational_data(tenant_id: str = "") -> dict:
+    """Delete tenant operational data while preserving account/team/auth records.
+
+    Preserved by design:
+      - tenants row
+      - user_profiles
+      - invite/team/auth records
+      - tenant_goals / tenant_settings / tenant_email_config / subscriptions
+    """
+    tid = str(tenant_id or get_tenant_id() or "").strip()
+    if not tid:
+        return {"tenant_id": "", "attempted_tables": [], "errors": []}
+
+    sb = get_client()
+    errors: list[dict] = []
+    for table in _TENANT_OPERATIONAL_RESET_TABLES:
+        try:
+            sb.table(table).delete().eq("tenant_id", tid).execute()
+        except Exception as exc:
+            errors.append({"table": table, "error": str(exc)})
+
+    return {
+        "tenant_id": tid,
+        "attempted_tables": list(_TENANT_OPERATIONAL_RESET_TABLES),
+        "errors": errors,
+    }
 
 
 # ── Error reporting ──────────────────────────────────────────────────────────

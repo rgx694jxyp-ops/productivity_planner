@@ -1,0 +1,13 @@
+Date,Department,EmployeeID,EmployeeName,Shift,UPH,Units,HoursWorked
+2026-04-19,Picking,EMP601,Jordan Kim,Day,50.40,403,8.00
+2026-04-19,Picking,EMP601,Jordan Kim,Day,50.40,403,8.00
+2026-04-19,Picking,emp601,Jordan  Kim,Day,49.90,399,8.00
+2026-04-19,Packing,EMP602,Riley Chen,Day,57.30,458,8.00
+2026-04-19,Packing,,Riley Chen,Day,57.30,458,8.00
+2026-04-19,Packing,EMP603,Jamie Carter,Day,,421,8.00
+2026-04-19,Receiving,EMP604,Casey Patel,Night,46.20,369,
+2026-04-19,Receiving,EMP605,Devon Tran,Night,not_a_number,351,8.00
+2026/04/19,Picking,EMP606,Marcus Webb,Day,51.20,409,8.00
+2026-04-20,Picking,EMP601,Jordan Kim,Day,49.70,398,8.00
+2026-04-20,Packing,EMP602,Riley Chen,Day,56.80,454,8.00
+2026-04-20,Receiving,EMP604,Casey Patel,Night,45.90,367,8.00
