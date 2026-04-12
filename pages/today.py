@@ -661,23 +661,19 @@ def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: 
 
 
 def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str) -> None:
-    low_data_state = bool(card.low_data_collapsed_lines)
-
     with st.container(border=True):
-        st.markdown(f'<div class="today-insight-title">{card.employee_name} · {card.process_name}</div>', unsafe_allow_html=True)
-        if low_data_state:
-            for idx, line in enumerate(card.low_data_collapsed_lines):
-                css_class = "today-insight-meta" if idx == len(card.low_data_collapsed_lines) - 1 else "today-insight-line"
-                st.markdown(f'<div class="{css_class}">{line}</div>', unsafe_allow_html=True)
-            if card.low_data_expanded_lines:
-                with st.expander("Signal explanation", expanded=False):
-                    for line in card.low_data_expanded_lines:
-                        st.write(line)
-        else:
-            st.markdown(f'<div class="today-insight-line">{card.primary_signal}</div>', unsafe_allow_html=True)
-            for line in card.context_lines:
-                st.markdown(f'<div class="today-insight-line">{line}</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="today-insight-meta">{card.confidence_line}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-insight-title">{card.line_1}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-insight-line">{card.line_2}</div>', unsafe_allow_html=True)
+        if str(card.line_3 or "").strip():
+            st.markdown(f'<div class="today-insight-line">{card.line_3}</div>', unsafe_allow_html=True)
+        if str(card.line_4 or "").strip():
+            st.markdown(f'<div class="today-insight-line">{card.line_4}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-insight-meta">{card.line_5}</div>', unsafe_allow_html=True)
+
+        if card.expanded_lines:
+            with st.expander("Signal explanation", expanded=False):
+                for line in card.expanded_lines[:3]:
+                    st.write(line)
 
         if st.button(
             "Open employee detail",
