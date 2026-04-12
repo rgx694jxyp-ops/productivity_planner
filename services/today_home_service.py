@@ -79,6 +79,22 @@ def get_employee_list(*, tenant_id: str, as_of_date: str) -> list[dict[str, Any]
     return [row for row in rows if str(row.get("tenant_id") or "") in {"", str(tenant_id)}]
 
 
+def clear_today_read_caches() -> None:
+    """Clear cached Today read helpers after import/recompute writes."""
+    try:
+        get_today_signals.cache_clear()
+    except Exception:
+        pass
+    try:
+        get_employee_snapshots.cache_clear()
+    except Exception:
+        pass
+    try:
+        get_employee_list.cache_clear()
+    except Exception:
+        pass
+
+
 def fetch_precomputed_today_payload(
     *,
     tenant_id: str,

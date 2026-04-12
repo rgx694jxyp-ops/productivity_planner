@@ -1184,7 +1184,7 @@ def _emp_coaching():
             _render_employee_activity_comparisons(
                 tenant_id=tenant_id,
                 emp_id=emp_id,
-                expected_uph=float((_emp_gs or {}).get("Target UPH") or 0),
+                expected_uph=_safe_float((_emp_gs or {}).get("Target UPH"), 0.0),
                 history_rows=history_rows,
             )
 

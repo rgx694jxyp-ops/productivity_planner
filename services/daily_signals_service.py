@@ -345,6 +345,12 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
 
     delete_daily_signals(tenant_id=tenant_id, signal_date=signal_date.isoformat())
     batch_upsert_daily_signals(rows)
+    try:
+        from services.today_home_service import clear_today_read_caches
+
+        clear_today_read_caches()
+    except Exception:
+        pass
     return {
         "signal_date": signal_date.isoformat(),
         "tenant_id": tenant_id,

@@ -65,6 +65,11 @@ def test_snapshot_adapters_produce_goal_status_and_history_rows(monkeypatch):
     assert goal_status[0]["Employee Name"] == "Alex"
     assert goal_status[0]["Average UPH"] == 90
     assert goal_status[0]["Target UPH"] == 95
+    assert goal_status[0]["recent_average_uph"] == 90
+    assert goal_status[0]["prior_average_uph"] == 82
+    assert goal_status[0]["expected_uph"] == 95
+    assert goal_status[0]["included_day_count"] == 3
+    assert goal_status[0]["data_completeness_status"] == "limited"
     assert history_rows[0]["work_date"] == "2026-04-03"
     assert history_rows[0]["uph"] == 94
 
