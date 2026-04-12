@@ -10,6 +10,7 @@ from typing import Any
 
 from domain.actions import (
     IssueType,
+    NO_IMPROVEMENT_OUTCOMES,
     OPEN_STATUSES,
     can_transition_status,
     determine_priority,

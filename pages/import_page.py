@@ -233,7 +233,7 @@ def _render_issue_group_handling(
                 "Handling choice",
                 ISSUE_HANDLING_CHOICES,
                 index=ISSUE_HANDLING_CHOICES.index(selected_choice),
-                format_func=lambda value: _ISSUE_HANDLING_LABELS.get(value, value),
+                format_func=lambda value: ISSUE_HANDLING_LABELS.get(value, value),
                 key=f"{state_key}_{group_key}_choice",
             )
             handling_state[group_key] = selected_choice
@@ -262,7 +262,7 @@ def _render_issue_group_handling(
             choices.append(
                 {
                     "Issue Group": key.replace("_", " ").title(),
-                    "Handling": _ISSUE_HANDLING_LABELS.get(str(value), str(value)),
+                    "Handling": ISSUE_HANDLING_LABELS.get(str(value), str(value)),
                     "Note": str(handling_state.get(f"{key}_note") or ""),
                 }
             )
