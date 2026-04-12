@@ -58,7 +58,7 @@ def test_edge_missing_comparison_value_uses_partial_fallback():
 
     assert get_signal_display_mode(signal) == SignalDisplayMode.PARTIAL
     assert format_signal_label(signal) == signal_wording("not_enough_history_yet")
-    assert format_observed_line(signal) == "Observed: 2026-04-11"
+    assert format_observed_line(signal) == "Observed: Apr 11"
     assert format_confidence_line(signal) == "Confidence: Low"
     assert format_comparison_line(signal) == ""
     _assert_clean_text(format_signal_label(signal), format_observed_line(signal), format_confidence_line(signal))

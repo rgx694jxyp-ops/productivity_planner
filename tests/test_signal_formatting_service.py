@@ -35,8 +35,8 @@ def test_signal_formatting_full_signal_lines():
     signal = _sample_signal()
 
     assert format_signal_label(signal) == "Below expected pace"
-    assert format_observed_line(signal) == "Observed: 2026-04-11 (38.1 UPH)"
-    assert format_comparison_line(signal) == "Compared to: 2026-04-06-2026-04-10 avg (45.0 UPH)"
+    assert format_observed_line(signal) == "Observed: Apr 11 (38.1 UPH)"
+    assert format_comparison_line(signal) == "Compared to: Apr 6–Apr 10 avg (45.0 UPH)"
     assert format_confidence_line(signal) == "Confidence: High"
 
 
@@ -82,7 +82,7 @@ def test_signal_display_mode_partial_when_no_comparison():
     )
     assert get_signal_display_mode(signal) == SignalDisplayMode.PARTIAL
     assert format_signal_label(signal) == signal_wording("not_enough_history_yet")
-    assert format_observed_line(signal) == "Observed: 2026-04-11"
+    assert format_observed_line(signal) == "Observed: Apr 11"
     assert format_confidence_line(signal) == "Confidence: Low"
 
 

@@ -42,11 +42,7 @@ from services.signal_traceability_service import traceability_payload_from_card
 from services.plain_language_service import signal_wording
 from ui.state_panels import (
     show_error_state,
-    show_healthy_state,
     show_loading_state,
-    show_low_confidence_state,
-    show_no_data_state,
-    show_partial_data_state,
     show_success_state,
 )
 from ui.traceability_panel import render_traceability_panel
@@ -173,6 +169,26 @@ def _apply_today_styles() -> None:
             color: #5d7693;
             font-size: 0.92rem;
         }
+        .today-secondary-label {
+            margin-top: 10px;
+            margin-bottom: 2px;
+            color: #5d7693;
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+        }
+        .today-secondary-subcaption {
+            margin-top: 0;
+            margin-bottom: 6px;
+            color: #6c8198;
+            font-size: 0.84rem;
+        }
+        .today-secondary-note {
+            color: #6c8198;
+            font-size: 0.82rem;
+            margin-bottom: 8px;
+        }
         .today-summary-title {
             font-size: 0.88rem;
             font-weight: 700;
@@ -240,6 +256,14 @@ def _compute_data_state_flags(goal_status: list[dict], import_summary: dict, hom
         "low_confidence": bool(low_conf_cards),
         "healthy": has_goal_data and below_goal_count == 0,
     }
+
+
+def _today_status_line(*, state_flags: dict[str, bool], has_queue_items: bool) -> str:
+    if not has_queue_items and bool(state_flags.get("healthy")):
+        return "Status: No important changes surfaced today."
+    if bool(state_flags.get("no_data")) or bool(state_flags.get("partial_data")) or bool(state_flags.get("low_confidence")):
+        return "Status: Limited data today. Queue items are shown with confidence labels."
+    return ""
 
 
 def _queue_counts(queue_items: list[dict]) -> dict[str, int]:
@@ -660,41 +684,43 @@ def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: 
     return unique_lines
 
 
-def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str) -> None:
+def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, compact: bool = False, show_action: bool = True) -> None:
     with st.container(border=True):
         st.markdown(f'<div class="today-insight-title">{card.line_1}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="today-insight-line">{card.line_2}</div>', unsafe_allow_html=True)
-        if str(card.line_3 or "").strip():
+        if not compact and str(card.line_3 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_3}</div>', unsafe_allow_html=True)
-        if str(card.line_4 or "").strip():
+        if not compact and str(card.line_4 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_4}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="today-insight-meta">{card.line_5}</div>', unsafe_allow_html=True)
 
-        if card.expanded_lines:
+        if not compact and card.expanded_lines:
             with st.expander("Signal explanation", expanded=False):
                 for line in card.expanded_lines[:3]:
                     st.write(line)
 
-        if st.button(
-            "Open employee detail",
-            key=f"{key_prefix}_{card.employee_id}_{card.process_id}",
-            use_container_width=True,
-        ):
-            st.session_state["goto_page"] = "team"
-            st.session_state["emp_view"] = "Performance Journal"
-            st.session_state["cn_selected_emp"] = card.employee_id
-            st.rerun()
+        if show_action:
+            if st.button(
+                "Open employee detail",
+                key=f"{key_prefix}_{card.employee_id}_{card.process_id}",
+                use_container_width=False,
+                type="secondary",
+            ):
+                st.session_state["goto_page"] = "team"
+                st.session_state["emp_view"] = "Performance Journal"
+                st.session_state["cn_selected_emp"] = card.employee_id
+                st.rerun()
 
 
 def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_cards: list[InsightCardContract] | None = None) -> None:
     st.markdown('<div class="today-section-label">What needs attention today</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="today-supporting-note">Start here. This is the prioritized list for today.</div>',
+        '<div class="today-supporting-note">Start here. Items are surfaced by urgency signals from recent activity and follow-ups.</div>',
         unsafe_allow_html=True,
     )
 
     queue_vm = build_today_queue_view_model(
-        attention,
+        attention=attention,
         suppressed_cards=suppressed_cards,
         today=date.today(),
     )
@@ -709,11 +735,16 @@ def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_c
             )
 
     if queue_vm.secondary_cards:
-        with st.expander(f"Other items (low confidence or limited data) ({len(queue_vm.secondary_cards)})", expanded=False):
+        st.markdown('<div class="today-secondary-label">Optional context</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-secondary-subcaption">Low-confidence or limited-history signals.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-secondary-note">{len(queue_vm.secondary_cards)} item(s) available.</div>', unsafe_allow_html=True)
+        with st.expander("Other items (review if time)", expanded=False):
             for idx, card in enumerate(queue_vm.secondary_cards[:20]):
                 _render_attention_card(
                     card=card,
                     key_prefix=f"today_attention_other_{idx}",
+                    compact=True,
+                    show_action=False,
                 )
 
     if queue_vm.suppressed:
@@ -856,7 +887,7 @@ def page_today() -> None:
     <div class="today-hero">
         <div class="today-hero-kicker">Today Queue</div>
         <div class="today-hero-title">What needs attention today</div>
-        <div class="today-hero-copy">Review the queue and act on the highest-priority items first.</div>
+        <div class="today-hero-copy">Review today\'s items and record follow-through.</div>
     </div>
     """,
         unsafe_allow_html=True,
@@ -907,7 +938,7 @@ def page_today() -> None:
                 as_of_date=today_value.isoformat(),
             )
             if not precomputed:
-                st.info("Signals are being prepared. Refresh shortly.")
+                st.info("Updating today's items.")
                 return
 
             queue_items = list(precomputed.get("queue_items") or [])
@@ -920,7 +951,7 @@ def page_today() -> None:
                 attention_summary = AttentionSummary(
                 ranked_items=[],
                 is_healthy=True,
-                healthy_message="No strong signals are recently surfaced right now.",
+                healthy_message="No important changes surfaced today.",
                 suppressed_count=0,
                 total_evaluated=0,
                 )
@@ -949,20 +980,9 @@ def page_today() -> None:
             return
 
         state_flags = _compute_data_state_flags(goal_status, import_summary, home_sections)
-        if state_flags["no_data"]:
-            show_no_data_state()
-        if state_flags["partial_data"]:
-            missing_days = int(import_summary.get("days") or 0)
-            partial_note = (
-                f"Current history window is {missing_days} day(s). More days improve trend reliability."
-                if missing_days > 0
-                else "Some trend rows are incomplete and will become more reliable as data coverage grows."
-            )
-            show_partial_data_state(partial_note)
-        if state_flags["low_confidence"]:
-            show_low_confidence_state("Low-confidence signals are shown with clear caveats and may update as new data arrives.")
-        if state_flags["healthy"] and counts.get("all", 0) == 0:
-            show_healthy_state()
+        status_line = _today_status_line(state_flags=state_flags, has_queue_items=counts.get("all", 0) > 0)
+        if status_line:
+            st.caption(status_line)
 
         _render_unified_attention_queue(
             attention_summary,

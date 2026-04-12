@@ -1,4 +1,5 @@
 from datetime import date
+import re
 
 from domain.display_signal import DisplaySignal, SignalConfidence, SignalLabel
 from services.attention_scoring_service import AttentionItem, AttentionSummary
@@ -79,7 +80,7 @@ def test_today_card_pattern_follow_up_signal(monkeypatch):
     assert card.line_1 == "Taylor · Receiving"
     assert card.line_2 == "Follow-up not completed"
     assert card.line_3 == "Due: Overdue"
-    assert card.line_4 != ""
+    assert card.line_4 == ""
     assert card.line_5 == "Confidence: Medium"
 
 
@@ -105,7 +106,7 @@ def test_today_card_pattern_low_data_signal(monkeypatch):
 
     assert card.line_1 == "Jordan · Receiving"
     assert card.line_2 == "Not enough history yet"
-    assert card.line_3 == "Confidence: Low"
+    assert card.line_3 == "Observed: Apr 11"
     assert card.line_4 == ""
     assert card.line_5 == "Confidence: Low"
 
@@ -142,3 +143,34 @@ def test_today_card_expanded_lines_max_3_and_not_repeated(monkeypatch):
 
     assert len(card.expanded_lines) <= 3
     assert all(line.strip().lower() != card.line_2.strip().lower() for line in card.expanded_lines)
+
+
+def test_today_card_expanded_lines_humanize_iso_dates(monkeypatch):
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=31.2,
+        comparison_start_date=date(2026, 4, 6),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=40.0,
+        confidence=SignalConfidence.HIGH,
+        data_completeness=None,
+        flags={},
+    )
+
+    monkeypatch.setattr("services.today_view_model_service.build_display_signal_from_attention_item", lambda item, today: signal)
+    monkeypatch.setattr(
+        "services.today_view_model_service._attention_context_lines",
+        lambda item, signal, max_lines=2: [
+            "Observed: 2026-04-11 (31.2 UPH)",
+            "Compared to: 2026-04-06-2026-04-10 avg (40.0 UPH)",
+        ],
+    )
+
+    vm = build_today_queue_view_model(attention=_summary(_item()), suppressed_cards=[], today=date(2026, 4, 11))
+    card = vm.primary_cards[0]
+
+    iso_pattern = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+    assert all(not iso_pattern.search(line) for line in card.expanded_lines)

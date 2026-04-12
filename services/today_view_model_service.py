@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import re
 from typing import Any
 
 from domain.display_signal import DisplaySignal, SignalLabel
@@ -151,8 +152,36 @@ def _comparison_range_text(signal: DisplaySignal) -> str:
     if start is not None and end is not None:
         if start == end:
             return format_friendly_date(start)
-        return f"{format_friendly_date(start)}-{format_friendly_date(end)}"
+        return f"{format_friendly_date(start)}–{format_friendly_date(end)}"
     return "Recent range"
+
+
+def _humanize_dates_in_text(text: str) -> str:
+    value = str(text or "")
+
+    def _replace_range(match: re.Match[str]) -> str:
+        start_text = str(match.group(1) or "")
+        end_text = str(match.group(2) or "")
+        try:
+            start_date = date.fromisoformat(start_text)
+            end_date = date.fromisoformat(end_text)
+        except Exception:
+            return match.group(0)
+        if start_date == end_date:
+            return format_friendly_date(start_date)
+        return f"{format_friendly_date(start_date)}–{format_friendly_date(end_date)}"
+
+    def _replace_single(match: re.Match[str]) -> str:
+        date_text = str(match.group(1) or "")
+        try:
+            parsed = date.fromisoformat(date_text)
+        except Exception:
+            return match.group(0)
+        return format_friendly_date(parsed)
+
+    value = re.sub(r"(\d{4}-\d{2}-\d{2})\s*[-–]\s*(\d{4}-\d{2}-\d{2})", _replace_range, value)
+    value = re.sub(r"\b(\d{4}-\d{2}-\d{2})\b", _replace_single, value)
+    return value
 
 
 def _follow_up_due_line(item: Any, signal: DisplaySignal) -> str:
@@ -182,15 +211,7 @@ def _short_follow_up_context(item: Any, signal: DisplaySignal) -> str:
     if repeat_count >= 2:
         return f"Seen {repeat_count} times this week"
 
-    context_candidates = _attention_context_lines(item, signal, max_lines=3)
-    for line in context_candidates:
-        text = str(line or "").strip()
-        if not text:
-            continue
-        if text.lower() == signal_wording("follow_up_not_completed").lower():
-            continue
-        return text
-    return "Awaiting follow-up completion"
+    return ""
 
 
 def _bucket_rank(item: Any, signal: DisplaySignal) -> int:
@@ -271,6 +292,7 @@ def _dedupe_expanded(*, primary: str, lines: list[str], max_lines: int = 3) -> l
     banned_parts = {"score", "rank", "factor", "n/a"}
     for line in lines:
         text = " ".join(str(line or "").strip().split())
+        text = _humanize_dates_in_text(text)
         if not text:
             continue
         key = text.lower()
@@ -296,7 +318,7 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
     if low_data_state:
         collapsed = format_low_data_collapsed_lines(signal)
         line_2 = collapsed[0] if collapsed else signal_wording("not_enough_history_yet")
-        line_3 = "Confidence: Low"
+        line_3 = f"Observed: {format_friendly_date(signal.observed_date)}"
         line_4 = ""
         expanded = format_low_data_expanded_lines(signal)
         return TodayQueueCardViewModel(
@@ -362,7 +384,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             process_id=process_name,
             line_1=line_1,
             line_2=line_2,
-            line_3="Confidence: Low",
+            line_3=f"Observed: {format_friendly_date(signal.observed_date)}",
             line_4="",
             line_5=line_5,
             expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, max_lines=3),

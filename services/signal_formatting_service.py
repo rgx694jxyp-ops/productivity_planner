@@ -197,9 +197,10 @@ def format_observed_line(signal: DisplaySignal) -> str:
     mode = get_signal_display_mode(signal)
     if mode == SignalDisplayMode.LOW_DATA:
         return ""
+    observed_text = format_friendly_date(signal.observed_date)
     if mode == SignalDisplayMode.PARTIAL:
-        return f"Observed: {signal.observed_date.isoformat()}"
-    return f"Observed: {signal.observed_date.isoformat()} ({signal.observed_value:.1f} UPH)"
+        return f"Observed: {observed_text}"
+    return f"Observed: {observed_text} ({signal.observed_value:.1f} UPH)"
 
 
 def format_comparison_line(signal: DisplaySignal) -> str:
@@ -209,8 +210,11 @@ def format_comparison_line(signal: DisplaySignal) -> str:
     if signal.comparison_value is None:
         return ""
     if signal.comparison_start_date is not None and signal.comparison_end_date is not None:
+        start_text = format_friendly_date(signal.comparison_start_date)
+        end_text = format_friendly_date(signal.comparison_end_date)
+        range_text = start_text if start_text == end_text else f"{start_text}–{end_text}"
         return (
-            f"Compared to: {signal.comparison_start_date.isoformat()}-{signal.comparison_end_date.isoformat()} "
+            f"Compared to: {range_text} "
             f"avg ({signal.comparison_value:.1f} UPH)"
         )
     return f"Compared to: baseline ({signal.comparison_value:.1f} UPH)"
