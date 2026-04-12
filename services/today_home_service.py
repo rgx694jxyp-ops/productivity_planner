@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from datetime import date
+from functools import lru_cache
 from typing import Any
-
-import streamlit as st
 
 from domain.insight_card_contract import InsightCardContract
 from repositories.daily_employee_snapshots_repo import list_daily_employee_snapshots
@@ -32,7 +31,7 @@ _UNRESOLVED_OR_REPEATED_KINDS = {
 
 # Safe to cache: read-only payload retrieval from precomputed/session-backed data.
 # TTL is short (45s) so reruns avoid repeated lookups while keeping Today fresh.
-@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+@lru_cache(maxsize=32)
 def get_today_signals(*, tenant_id: str, as_of_date: str) -> dict[str, Any] | None:
     safe_date = str(as_of_date or "")[:10]
     try:
@@ -57,7 +56,7 @@ def get_today_signals(*, tenant_id: str, as_of_date: str) -> dict[str, Any] | No
 
 # Safe to cache: read-only snapshot rows from the daily snapshots table.
 # TTL is 45s to reduce duplicate DB hits during Streamlit reruns.
-@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+@lru_cache(maxsize=64)
 def get_employee_snapshots(*, tenant_id: str, as_of_date: str) -> list[dict[str, Any]]:
     safe_date = str(as_of_date or "")[:10]
     if not safe_date:
@@ -71,7 +70,7 @@ def get_employee_snapshots(*, tenant_id: str, as_of_date: str) -> list[dict[str,
 
 # Safe to cache: read-only employee roster lookup.
 # Includes date in the cache key to align invalidation shape with Today payload reads.
-@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+@lru_cache(maxsize=32)
 def get_employee_list(*, tenant_id: str, as_of_date: str) -> list[dict[str, Any]]:
     _ = str(as_of_date or "")[:10]
     rows = get_employees() or []
@@ -91,14 +90,7 @@ def fetch_precomputed_today_payload(
     Read-only view helper: this function does not compute signals, trends, or
     scoring. It only returns payloads prepared by a background/import workflow.
     """
-    state = session_state
-    if state is None:
-        try:
-            from core.runtime import st
-
-            state = st.session_state
-        except Exception:
-            state = {}
+    state = session_state or {}
 
     payload = state.get(_TODAY_PRECOMPUTED_SESSION_KEY)
     if not isinstance(payload, dict):

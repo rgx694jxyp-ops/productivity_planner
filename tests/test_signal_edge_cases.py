@@ -12,6 +12,7 @@ from services.signal_formatting_service import (
     get_signal_display_mode,
     is_signal_display_eligible,
 )
+from services.plain_language_service import signal_wording
 
 
 def _assert_clean_text(*values: str) -> None:
@@ -56,7 +57,7 @@ def test_edge_missing_comparison_value_uses_partial_fallback():
     )
 
     assert get_signal_display_mode(signal) == SignalDisplayMode.PARTIAL
-    assert format_signal_label(signal) == "Limited data available"
+    assert format_signal_label(signal) == signal_wording("not_enough_history_yet")
     assert format_observed_line(signal) == "Observed: 2026-04-11"
     assert format_confidence_line(signal) == "Confidence: Low"
     assert format_comparison_line(signal) == ""

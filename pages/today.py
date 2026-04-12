@@ -28,6 +28,8 @@ from services.follow_through_service import FOLLOW_THROUGH_STATUSES, log_follow_
 from services.signal_formatting_service import (
     format_comparison_line,
     format_confidence_line,
+    format_low_data_collapsed_lines,
+    format_low_data_expanded_lines,
     format_observed_line,
     format_signal_label,
     get_signal_display_mode,
@@ -35,7 +37,9 @@ from services.signal_formatting_service import (
     SignalDisplayMode,
 )
 from services.today_home_service import get_today_signals
+from services.today_view_model_service import TodayQueueCardViewModel, build_today_queue_view_model
 from services.signal_traceability_service import traceability_payload_from_card
+from services.plain_language_service import signal_wording
 from ui.state_panels import (
     show_error_state,
     show_healthy_state,
@@ -585,10 +589,6 @@ def _go_to_drill_down(item: InsightCardContract) -> None:
     st.rerun()
 
 
-def _format_short_date(value: date) -> str:
-    return f"{value.strftime('%b')} {value.day}"
-
-
 def _estimate_recent_record_count(item: InsightCardContract) -> int:
     candidates: list[Any] = [
         item.confidence.sample_size,
@@ -612,7 +612,7 @@ def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: 
     mode = get_signal_display_mode(signal)
 
     if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}:
-        lines.append("Not enough history yet")
+        lines.append(signal_wording("not_enough_history_yet"))
         lines.append(format_confidence_line(signal))
     else:
         lines.append(format_signal_label(signal) + ".")
@@ -660,165 +660,76 @@ def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: 
     return unique_lines
 
 
-def _attention_employee_and_process(item: Any, signal: DisplaySignal) -> tuple[str, str]:
-    snapshot = dict(getattr(item, "snapshot", {}) or {})
-    employee_name = (
-        str(snapshot.get("Employee") or snapshot.get("Employee Name") or snapshot.get("employee_name") or "").strip()
-        or str(signal.employee_name or "").strip()
-        or str(getattr(item, "employee_id", "") or "").strip()
-    )
-    process_name = (
-        str(snapshot.get("process_name") or snapshot.get("Department") or "").strip()
-        or str(signal.process or "").strip()
-        or str(getattr(item, "process_name", "") or "").strip()
-        or "Unassigned"
-    )
-    return employee_name, process_name
-
-
-def _attention_primary_signal(item: Any, signal: DisplaySignal) -> str:
-    factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
-    if factor_keys.intersection({"overdue_followup", "due_today_followup", "open_exception"}):
-        return "Follow-up not completed"
-    if factor_keys.intersection({"repeat_1", "repeat_2", "repeat_3_or_more"}):
-        return "Seen multiple times"
-    if factor_keys.intersection({"trend_declining", "trend_below_expected", "trend_inconsistent"}):
-        return "Lower than recent pace"
-
-    label = format_signal_label(signal)
-    label_lower = str(label or "").strip().lower()
-    if label_lower == "repeated pattern":
-        return "Seen multiple times"
-    if str(label).strip().lower() in {"follow-up overdue", "follow-up due today", "unresolved issue"}:
-        return "Follow-up not completed"
-    return str(label or "Needs review")
-
-
-def _attention_context_lines(item: Any, signal: DisplaySignal, max_lines: int = 2) -> list[str]:
-    lines: list[str] = []
-    observed = format_observed_line(signal)
-    if observed:
-        lines.append(observed)
-
-    factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
-    if factor_keys.intersection({"overdue_followup", "due_today_followup", "open_exception"}):
-        lines.append("Follow-up not completed")
-    if factor_keys.intersection({"repeat_1", "repeat_2", "repeat_3_or_more"}):
-        lines.append("Seen multiple times")
-
-    if not lines:
-        reasons = [str(reason or "").strip() for reason in list(getattr(item, "attention_reasons", []) or [])]
-        reasons = [reason for reason in reasons if reason]
-        if reasons:
-            lines.append(reasons[0])
-
-    unique: list[str] = []
-    seen: set[str] = set()
-    for line in lines:
-        key = str(line).strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        unique.append(str(line).strip())
-        if len(unique) >= max_lines:
-            break
-    return unique
-
-
-def _render_attention_card(*, item: Any, display_signal: DisplaySignal, key_prefix: str) -> None:
-    employee_name, process_name = _attention_employee_and_process(item, display_signal)
-    primary_signal = _attention_primary_signal(item, display_signal)
-    context_lines = _attention_context_lines(item, display_signal, max_lines=2)
+def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str) -> None:
+    low_data_state = bool(card.low_data_collapsed_lines)
 
     with st.container(border=True):
-        st.markdown(f'<div class="today-insight-title">{employee_name} · {process_name}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="today-insight-line">{primary_signal}</div>', unsafe_allow_html=True)
-        for line in context_lines:
-            st.markdown(f'<div class="today-insight-line">{line}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="today-insight-meta">{format_confidence_line(display_signal)}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-insight-title">{card.employee_name} · {card.process_name}</div>', unsafe_allow_html=True)
+        if low_data_state:
+            for idx, line in enumerate(card.low_data_collapsed_lines):
+                css_class = "today-insight-meta" if idx == len(card.low_data_collapsed_lines) - 1 else "today-insight-line"
+                st.markdown(f'<div class="{css_class}">{line}</div>', unsafe_allow_html=True)
+            if card.low_data_expanded_lines:
+                with st.expander("Signal explanation", expanded=False):
+                    for line in card.low_data_expanded_lines:
+                        st.write(line)
+        else:
+            st.markdown(f'<div class="today-insight-line">{card.primary_signal}</div>', unsafe_allow_html=True)
+            for line in card.context_lines:
+                st.markdown(f'<div class="today-insight-line">{line}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="today-insight-meta">{card.confidence_line}</div>', unsafe_allow_html=True)
 
         if st.button(
             "Open employee detail",
-            key=f"{key_prefix}_{getattr(item, 'employee_id', '')}_{getattr(item, 'process_name', '')}",
+            key=f"{key_prefix}_{card.employee_id}_{card.process_id}",
             use_container_width=True,
         ):
             st.session_state["goto_page"] = "team"
             st.session_state["emp_view"] = "Performance Journal"
-            st.session_state["cn_selected_emp"] = getattr(item, "employee_id", "")
+            st.session_state["cn_selected_emp"] = card.employee_id
             st.rerun()
 
 
 def _render_unified_attention_queue(attention: AttentionSummary, *, suppressed_cards: list[InsightCardContract] | None = None) -> None:
-    st.markdown('<div class="today-section-label">Attention Queue</div>', unsafe_allow_html=True)
+    st.markdown('<div class="today-section-label">What needs attention today</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="today-supporting-note">What needs attention right now, and why.</div>',
+        '<div class="today-supporting-note">Start here. This is the prioritized list for today.</div>',
         unsafe_allow_html=True,
     )
 
-    primary_items: list[Any] = []
-    other_items: list[Any] = []
-    suppressed_debug: list[dict[str, str]] = []
+    queue_vm = build_today_queue_view_model(
+        attention,
+        suppressed_cards=suppressed_cards,
+        today=date.today(),
+    )
 
-    for item in list(attention.ranked_items or []):
-        display_signal = build_display_signal_from_attention_item(item=item, today=date.today())
-        if not is_signal_display_eligible(display_signal, allow_low_data_case=False):
-            suppressed_debug.append(
-                {
-                    "source": "attention",
-                    "employee": str(display_signal.employee_name),
-                    "process": str(display_signal.process),
-                    "label": str(format_signal_label(display_signal)),
-                }
-            )
-            continue
-
-        if display_signal.confidence.value == "low" or str(getattr(item, "attention_tier", "")) == "low":
-            other_items.append((item, display_signal))
-        else:
-            primary_items.append((item, display_signal))
-
-    if not primary_items:
+    if not queue_vm.primary_cards:
         st.markdown('<div class="today-placeholder">No items need immediate attention right now.</div>', unsafe_allow_html=True)
     else:
-        for idx, (item, display_signal) in enumerate(primary_items):
+        for idx, card in enumerate(queue_vm.primary_cards):
             _render_attention_card(
-                item=item,
-                display_signal=display_signal,
+                card=card,
                 key_prefix=f"today_attention_primary_{idx}",
             )
 
-    suppressed_cards = [card for card in list(suppressed_cards or []) if isinstance(card, InsightCardContract)]
-    if suppressed_cards:
-        for card in suppressed_cards:
-            signal = build_display_signal_from_insight_card(card=card, today=date.today())
-            if not is_signal_display_eligible(signal, allow_low_data_case=True):
-                continue
-            other_items.append((card, signal))
+    if queue_vm.secondary_cards:
+        with st.expander(f"Other items (low confidence or limited data) ({len(queue_vm.secondary_cards)})", expanded=False):
+            for idx, card in enumerate(queue_vm.secondary_cards[:20]):
+                _render_attention_card(
+                    card=card,
+                    key_prefix=f"today_attention_other_{idx}",
+                )
 
-    if other_items:
-        with st.expander(f"Other items ({len(other_items)})", expanded=False):
-            for idx, item_pair in enumerate(other_items[:20]):
-                item, signal = item_pair
-                if isinstance(item, InsightCardContract):
-                    employee_name = str(signal.employee_name)
-                    process_name = str(signal.process)
-                    primary_signal = _attention_primary_signal(item, signal)
-                    context_lines = _attention_context_lines(item, signal, max_lines=1)
-                    with st.container(border=True):
-                        st.markdown(f'<div class="today-insight-title">{employee_name} · {process_name}</div>', unsafe_allow_html=True)
-                        st.markdown(f'<div class="today-insight-line">{primary_signal}</div>', unsafe_allow_html=True)
-                        for line in context_lines:
-                            st.markdown(f'<div class="today-insight-line">{line}</div>', unsafe_allow_html=True)
-                        st.markdown(f'<div class="today-insight-meta">{format_confidence_line(signal)}</div>', unsafe_allow_html=True)
-                else:
-                    _render_attention_card(
-                        item=item,
-                        display_signal=signal,
-                        key_prefix=f"today_attention_other_{idx}",
-                    )
-
-    if suppressed_debug:
-        st.session_state["_today_suppressed_signals_debug"] = suppressed_debug
+    if queue_vm.suppressed:
+        st.session_state["_today_suppressed_signals_debug"] = [
+            {
+                "source": row.source,
+                "employee": row.employee,
+                "process": row.process,
+                "label": row.label,
+            }
+            for row in queue_vm.suppressed
+        ]
 
 
 def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
@@ -838,17 +749,19 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
     mode = get_signal_display_mode(display_signal)
     with st.container(border=True):
         low_data_state = mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}
+        collapsed_lines = format_low_data_collapsed_lines(display_signal) if low_data_state else []
         if low_data_state:
             line_1 = ""
-            line_2 = "Not enough history yet"
+            line_2 = collapsed_lines[0] if len(collapsed_lines) > 0 else signal_wording("not_enough_history_yet")
             line_3 = ""
             line_4 = ""
+            line_5 = collapsed_lines[1] if len(collapsed_lines) > 1 else "Confidence: Low"
         else:
             line_1 = f"{display_signal.employee_name} · {display_signal.process}"
             line_2 = format_signal_label(display_signal)
             line_3 = format_observed_line(display_signal)
             line_4 = format_comparison_line(display_signal)
-        line_5 = format_confidence_line(display_signal)
+            line_5 = format_confidence_line(display_signal)
 
         for idx, text in enumerate((line_1, line_2, line_3, line_4, line_5), start=1):
             line_text = str(text or "").strip()
@@ -872,8 +785,8 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
                 with st.expander("Signal explanation", expanded=False):
                     if low_data_state:
                         recent_count = _estimate_recent_record_count(item)
-                        st.write(f"Only {recent_count} recent record(s) available")
-                        st.write(f"Observed: {_format_short_date(display_signal.observed_date)}")
+                        for line in format_low_data_expanded_lines(display_signal, recent_record_count=recent_count):
+                            st.write(line)
                     else:
                         if why_line:
                             st.write(f"Why: {why_line}")
@@ -946,8 +859,8 @@ def page_today() -> None:
         """
     <div class="today-hero">
         <div class="today-hero-kicker">Today Queue</div>
-        <div class="today-hero-title">What recently surfaced today?</div>
-        <div class="today-hero-copy">In under a minute, see what recently surfaced, understand context, and record outcomes.</div>
+        <div class="today-hero-title">What needs attention today</div>
+        <div class="today-hero-copy">Review the queue and act on the highest-priority items first.</div>
     </div>
     """,
         unsafe_allow_html=True,
@@ -980,7 +893,10 @@ def page_today() -> None:
                             else:
                                 raise
                     loading_slot.empty()
-                    get_today_signals.clear()
+                    if hasattr(get_today_signals, "cache_clear"):
+                        get_today_signals.cache_clear()
+                    elif hasattr(get_today_signals, "clear"):
+                        get_today_signals.clear()
                     st.success("Signals refreshed.")
                     st.rerun()
                 except Exception as _refresh_err:
@@ -1056,52 +972,5 @@ def page_today() -> None:
             attention_summary,
             suppressed_cards=home_sections.get("suppressed_signals", []),
         )
-        st.write("")
-
-        st.markdown('<div class="today-section-label">Queue Summary</div>', unsafe_allow_html=True)
-        _render_summary_strip(counts, st.session_state.today_queue_filter)
-        st.write("")
-
-        _render_open_exceptions(tenant_id=st.session_state.tenant_id)
-
-        filtered_queue = _filter_queue(queue_items, st.session_state.today_queue_filter)
-        recent_outcomes = _cached_recent_action_outcomes(
-            lookback_days=1,
-            tenant_id=str(st.session_state.tenant_id or ""),
-        )
-
-        st.markdown('<div class="today-section-label">Action Queue Details</div>', unsafe_allow_html=True)
-        st.markdown('<div class="today-supporting-note">Expanded evidence and logging controls for open queue items.</div>', unsafe_allow_html=True)
-        if filtered_queue:
-            st.caption(f"Showing {len(filtered_queue)} actionable item{'s' if len(filtered_queue) != 1 else ''}.")
-            render_action_queue(
-                queue_items=filtered_queue,
-                tenant_id=st.session_state.tenant_id,
-                performed_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
-                today=today_value,
-            )
-        elif counts["all"]:
-            _render_filtered_empty_state()
-        else:
-            # Check if this is first-time user (just completed import)
-            is_first_time = st.session_state.get("_first_import_just_completed", False)
-            if is_first_time:
-                st.session_state["_first_import_just_completed"] = False  # Show first-time state only once
-                _render_first_time_empty_state()
-            else:
-                _render_empty_state()
-
-        st.write("")
-        st.markdown('<div class="today-section-label">Since Yesterday</div>', unsafe_allow_html=True)
-        _render_since_yesterday(queue_items, recent_outcomes)
-
-        st.write("")
-        manager_stats = _cached_manager_outcome_stats(
-            tenant_id=str(st.session_state.tenant_id or ""),
-            lookback_days=7,
-            today_iso=today_value.isoformat(),
-        )
-        st.markdown('<div class="today-section-label">Supporting Context</div>', unsafe_allow_html=True)
-        _render_bottom_charts(queue_items, manager_stats)
     finally:
         st.session_state["_ui_render_guard_active"] = False

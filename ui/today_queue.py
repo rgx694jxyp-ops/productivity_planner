@@ -14,17 +14,23 @@ from services.action_lifecycle_service import (
     mark_action_escalated,
     save_action_touchpoint,
 )
-from services.action_recommendation_service import get_action_recommendation
 from services.plain_language_service import (
-    action_code_from_recommendation,
     action_label,
     outcome_code,
     outcome_label,
+    signal_wording,
+)
+from services.today_queue_service import (
+    build_action_queue as build_action_queue_service,
+    partition_action_queue_items,
 )
 
 MAX_VISIBLE_QUEUE_ITEMS = 7
 OUTCOME_CODES = ["improved", "no_change", "worse", "blocked", "not_applicable"]
 OUTCOME_OPTIONS = [outcome_label(code) for code in OUTCOME_CODES]
+ACTION_CODES = ["log_check_in", "log_follow_up", "log_recognition", "mark_for_review", "lower_urgency"]
+ACTION_OPTIONS = [action_label(code) for code in ACTION_CODES]
+_AMBIGUOUS_FACTOR_PHRASES = {"", "unknown", "status", "needs review", "worth review", "limited data available"}
 
 
 def _escape_html(value: object) -> str:
@@ -182,10 +188,6 @@ def _good_looks_like(action: dict) -> str:
     return "Follow-up context is available in this item's timeline."
 
 
-def _primary_cta_label(recommendation: str) -> str:
-    return action_label(action_code_from_recommendation(recommendation))
-
-
 def _build_repeat_lookup(repeat_offenders: list[dict]) -> dict[str, dict]:
     return {str(item.get("employee_id") or ""): item for item in repeat_offenders}
 
@@ -194,7 +196,7 @@ def _build_recognition_lookup(recognition_opportunities: list[dict]) -> dict[str
     return {str(item.get("action_id") or ""): item for item in recognition_opportunities}
 
 
-def _why_this_is_here(action: dict, recommendation: dict, queue_status: str) -> str:
+def _why_this_is_here(action: dict, queue_status: str) -> str:
     if queue_status == "overdue":
         return "This follow-up date already passed, so it stays at the top until someone closes the loop."
     if queue_status == "due_today":
@@ -203,31 +205,73 @@ def _why_this_is_here(action: dict, recommendation: dict, queue_status: str) -> 
         return "This employee has a repeated open pattern, so it stays visible for closer follow-through."
     if action.get("_is_recognition_opportunity"):
         return "This person is doing well and no recognition touchpoint has been logged yet."
-
-    reason = str(recommendation.get("reason") or "").strip()
-    if reason:
-        return reason[0].upper() + reason[1:] + "."
     return "This item is still open and needs a supervisor decision to keep work moving."
+
+
+def _surfaced_factors(action: dict) -> list[str]:
+    factors: list[str] = []
+    queue_status = str(action.get("_queue_status") or "pending")
+    if queue_status in {"overdue", "due_today"}:
+        factors.append("Follow-up overdue")
+    if bool(action.get("_is_repeat_issue")):
+        factors.append("Seen multiple times")
+
+    issue_type = str(action.get("issue_type") or "").strip().lower()
+    trigger_summary = str(action.get("trigger_summary") or "").strip().lower()
+    if issue_type in {"low_performance", "low_performance_unaddressed", "repeated_low_performance"}:
+        factors.append("Lower than recent pace")
+    elif "below" in trigger_summary or "lower" in trigger_summary or "declin" in trigger_summary:
+        factors.append("Lower than recent pace")
+
+    if not factors:
+        factors.append("Lower than recent pace")
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for factor in factors:
+        key = factor.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(factor)
+    return unique
+
+
+def _is_queue_item_display_eligible(action: dict) -> bool:
+    if bool(action.get("_system_artifact")):
+        return False
+    factors = [str(f or "").strip() for f in list(action.get("_surfaced_factors") or [])]
+    factors = [f for f in factors if f]
+    if not factors:
+        return False
+    for factor in factors:
+        lowered = factor.lower()
+        if lowered in _AMBIGUOUS_FACTOR_PHRASES:
+            return False
+        if "system" in lowered or "artifact" in lowered:
+            return False
+    return True
+
+
+def _display_bucket(action: dict) -> str:
+    if not _is_queue_item_display_eligible(action):
+        return "suppressed"
+    confidence = str(action.get("confidence") or action.get("confidence_label") or "").strip().lower()
+    if confidence == "low":
+        return "secondary"
+    return "primary"
 
 
 def _sort_key(action: dict) -> tuple:
     queue_status = str(action.get("_queue_status") or "pending")
     status_rank = {"overdue": 0, "due_today": 1, "pending": 2}.get(queue_status, 3)
-    recommendation = str(action.get("_recommendation") or "follow up")
-    recommendation_rank = {
-        "escalate": 0,
-        "follow up now": 1,
-        "coach today": 2,
-        "follow up": 3,
-        "recognize": 4,
-        "deprioritize": 5,
-        "continue": 6,
-    }.get(recommendation, 7)
     priority_rank = {"high": 0, "medium": 1, "low": 2}.get(str(action.get("priority") or "medium"), 1)
     repeat_rank = 0 if action.get("_is_repeat_issue") else 1
+    follow_up_rank = 0 if queue_status in {"overdue", "due_today"} else 1
+    pace_rank = 0 if "Lower than recent pace" in list(action.get("_surfaced_factors") or []) else 1
     recognition_rank = 1 if action.get("_is_recognition_opportunity") else 0
     due_date = parse_action_date(action.get("follow_up_due_at")) or date.max
-    return (status_rank, repeat_rank, recommendation_rank, priority_rank, recognition_rank, due_date, str(action.get("employee_name") or ""))
+    return (status_rank, follow_up_rank, repeat_rank, pace_rank, priority_rank, recognition_rank, due_date, str(action.get("employee_name") or ""))
 
 
 def build_action_queue(
@@ -238,34 +282,13 @@ def build_action_queue(
     tenant_id: str,
     today: date,
 ) -> list[dict]:
-    repeat_lookup = _build_repeat_lookup(repeat_offenders)
-    recognition_lookup = _build_recognition_lookup(recognition_opportunities)
-    queue_items: list[dict] = []
-
-    for action in open_actions:
-        enriched = dict(action)
-        action_id = str(action.get("id") or "")
-        employee_id = str(action.get("employee_id") or "")
-        recommendation = get_action_recommendation(action=action, tenant_id=tenant_id, today=today)
-        queue_status = _queue_status(action, today)
-        repeat_item = repeat_lookup.get(employee_id)
-        recognition_item = recognition_lookup.get(action_id)
-
-        enriched["_queue_status"] = queue_status
-        enriched["_recommendation"] = str(recommendation.get("recommendation") or "follow up")
-        enriched["_primary_action_code"] = action_code_from_recommendation(enriched["_recommendation"])
-        enriched["_primary_cta"] = _primary_cta_label(enriched["_recommendation"])
-        enriched["_short_reason"] = _short_reason(action)
-        enriched["_good_looks_like"] = _good_looks_like(action)
-        enriched["_is_repeat_issue"] = bool(repeat_item)
-        enriched["_is_recognition_opportunity"] = bool(recognition_item)
-        enriched["_why_this_is_here"] = _why_this_is_here(enriched, recommendation, queue_status)
-        enriched["_repeat_signals"] = list((repeat_item or {}).get("signals") or [])
-        enriched["_recognition_signals"] = list((recognition_item or {}).get("signals") or [])
-        queue_items.append(enriched)
-
-    queue_items.sort(key=_sort_key)
-    return queue_items
+    return build_action_queue_service(
+        open_actions=open_actions,
+        repeat_offenders=repeat_offenders,
+        recognition_opportunities=recognition_opportunities,
+        tenant_id=tenant_id,
+        today=today,
+    )
 
 
 def _render_action_context(action: dict) -> None:
@@ -307,12 +330,12 @@ def _build_status_chips(action: dict) -> str:
     return "".join(chips)
 
 
-def _default_outcome_index(primary_cta: str) -> int:
-    if primary_cta == action_label("log_recognition"):
-        return OUTCOME_CODES.index("not_applicable")
-    if primary_cta in {action_label("mark_for_review"), action_label("lower_urgency")}:
-        return OUTCOME_CODES.index("no_change")
-    return OUTCOME_CODES.index("improved")
+def _action_code_from_label(label: str) -> str:
+    normalized = str(label or "").strip().lower()
+    for code in ACTION_CODES:
+        if action_label(code).lower() == normalized:
+            return code
+    return ""
 
 
 def _action_form_key(action_id: str) -> str:
@@ -326,15 +349,10 @@ def _set_flash_and_refresh(message: str, action_id: str) -> None:
 
 
 def _follow_up_signal(action: dict) -> str:
-    queue_status = str(action.get("_queue_status") or "pending")
-    if queue_status in {"overdue", "due_today"}:
-        return "Follow-up not completed"
-    if bool(action.get("_is_repeat_issue")):
-        return "Seen again after coaching"
-    issue_type = str(action.get("issue_type") or "").strip().lower()
-    if issue_type in {"low_performance_unaddressed", "low_performance"}:
-        return "Follow-ups not improving"
-    return "Follow-up needs review"
+    factors = list(action.get("_surfaced_factors") or [])
+    if factors:
+        return factors[0]
+    return signal_wording("lower_than_recent_pace")
 
 
 def _follow_up_context_line(action: dict) -> str:
@@ -361,10 +379,20 @@ def _follow_up_timing_line(action: dict, *, today: date) -> str:
     return ""
 
 
-def _submit_primary_action(action: dict, outcome: str, note: str, next_follow_up_at: str, tenant_id: str, performed_by: str) -> bool:
+def _submit_primary_action(
+    action: dict,
+    selected_action_code: str,
+    outcome: str,
+    note: str,
+    next_follow_up_at: str,
+    tenant_id: str,
+    performed_by: str,
+) -> bool:
     action_id = str(action.get("id") or "")
     employee_id = str(action.get("employee_id") or "")
-    primary_action_code = str(action.get("_primary_action_code") or "log_follow_up")
+    primary_action_code = str(selected_action_code or "").strip().lower()
+    if primary_action_code not in ACTION_CODES:
+        return False
     note_text = str(note or "").strip()
     submitted = False
 
@@ -431,7 +459,7 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
     _render_queue_styles()
     action_id = str(action.get("id") or "")
     employee_name = str(action.get("employee_name") or action.get("employee_id") or "Unknown")
-    primary_cta = "Log update"
+    primary_cta = "Choose action"
     form_key = _action_form_key(action_id)
     department = str(action.get("department") or "").strip()
     line_1 = f"{employee_name} · {department}" if department else employee_name
@@ -467,13 +495,17 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
             st.rerun()
 
         if st.session_state.get(form_key, False):
-            primary_action_code = str(action.get("_primary_action_code") or "")
-            default_schedule = primary_action_code not in {"mark_for_review", "lower_urgency"}
             with st.form(key=f"today_action_form_{action_id}", clear_on_submit=False):
+                selected_action_label = st.selectbox(
+                    "Action",
+                    options=["Select action"] + ACTION_OPTIONS,
+                    index=0,
+                    key=f"today_action_choice_{action_id}",
+                )
                 outcome_display = st.selectbox(
                     "Outcome",
                     options=OUTCOME_OPTIONS,
-                    index=_default_outcome_index(primary_cta),
+                    index=0,
                     key=f"today_outcome_{action_id}",
                 )
                 outcome = outcome_code(outcome_display)
@@ -486,7 +518,7 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
                 )
                 schedule_next = st.checkbox(
                     "Set next follow-up date",
-                    value=default_schedule,
+                    value=False,
                     key=f"today_schedule_toggle_{action_id}",
                 )
                 next_follow_up_at = ""
@@ -507,8 +539,13 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
                 st.rerun()
 
             if submit:
+                selected_action_code = _action_code_from_label(selected_action_label)
+                if not selected_action_code:
+                    st.error("Choose an action before saving.")
+                    return
                 success = _submit_primary_action(
                     action=action,
+                    selected_action_code=selected_action_code,
                     outcome=outcome,
                     note=note,
                     next_follow_up_at=next_follow_up_at,
@@ -521,8 +558,10 @@ def render_action_card(action: dict, *, tenant_id: str, performed_by: str, today
 
 
 def render_action_queue(queue_items: list[dict], *, tenant_id: str, performed_by: str, today: date) -> None:
-    visible_items = queue_items[:MAX_VISIBLE_QUEUE_ITEMS]
-    overflow_items = queue_items[MAX_VISIBLE_QUEUE_ITEMS:]
+    primary_items, secondary_items = partition_action_queue_items(queue_items)
+
+    visible_items = primary_items[:MAX_VISIBLE_QUEUE_ITEMS]
+    overflow_items = primary_items[MAX_VISIBLE_QUEUE_ITEMS:]
 
     for action in visible_items:
         render_action_card(action, tenant_id=tenant_id, performed_by=performed_by, today=today)
@@ -530,4 +569,9 @@ def render_action_queue(queue_items: list[dict], *, tenant_id: str, performed_by
     if overflow_items:
         with st.expander(f"Show {len(overflow_items)} more queue item{'s' if len(overflow_items) != 1 else ''}"):
             for action in overflow_items:
+                render_action_card(action, tenant_id=tenant_id, performed_by=performed_by, today=today)
+
+    if secondary_items:
+        with st.expander(f"Other items (low confidence) ({len(secondary_items)})", expanded=False):
+            for action in secondary_items[:MAX_VISIBLE_QUEUE_ITEMS]:
                 render_action_card(action, tenant_id=tenant_id, performed_by=performed_by, today=today)

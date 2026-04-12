@@ -1,6 +1,6 @@
-"""Action recommendation service.
+"""Action signal service.
 
-Responsible for next-best-action recommendations and recommendation-side cohorts.
+Surfaces neutral factors for open action review without prescribing decisions.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def get_repeat_offenders(
     min_coached_cycles: int = 2,
     stale_days_threshold: int = 14,
 ) -> list[dict]:
-    """Identify employees with repeated management patterns that suggest a different approach.
+    """Identify employees with repeated management patterns that need closer review.
 
     Scans open actions (or accepts pre-loaded list) and loads lifecycle events to detect:
       - Coached 2+ times without sustained improvement
@@ -30,9 +30,7 @@ def get_repeat_offenders(
 
     Returns one dict per qualifying employee, sorted by severity descending.
     Each dict keys: employee_id, employee_name, department, open_action_count,
-    coached_cycle_count, no_improvement_count, max_days_open, recommendation,
-    signals, actions.
-    Recommendation values: "escalate" | "deprioritize" | "change_approach"
+    coached_cycle_count, no_improvement_count, max_days_open, signals, actions.
     """
     today = today or date.today()
     try:
@@ -111,14 +109,6 @@ def get_repeat_offenders(
             if max_days_open >= stale_days_threshold:
                 signals.append(f"unresolved {max_days_open} days")
 
-            # Recommendation
-            if (coached_total >= 3 and no_improvement_total >= 2) or max_days_open >= 21:
-                recommendation = "escalate"
-            elif no_improvement_total >= 2 or coached_total >= 3:
-                recommendation = "deprioritize"
-            else:
-                recommendation = "change_approach"
-
             emp_name = str(emp_actions[0].get("employee_name") or emp_id)
             dept = str(emp_actions[0].get("department") or "")
             severity = (
@@ -136,7 +126,6 @@ def get_repeat_offenders(
                 "coached_cycle_count": coached_total,
                 "no_improvement_count": no_improvement_total,
                 "max_days_open": max_days_open,
-                "recommendation": recommendation,
                 "signals": signals,
                 "actions": emp_actions,
                 "_severity_score": severity,
@@ -246,24 +235,14 @@ def get_ignored_high_performers(
 
 
 
-def get_action_recommendation(
+def get_action_factors(
     action: dict,
     tenant_id: str = "",
     today: date | None = None,
 ) -> dict:
-    """Return a single recommended next action based on action state and history.
+    """Return neutral surfaced factors for an open action.
 
-    Rules (in priority order):
-      1. Overdue → "follow up now"
-      2. Due today → "follow up now"
-      3. Recognition type with no recognized event → "recognize"
-      4. Coached 2+ times with 2+ no-improvement outcomes → "escalate"
-      5. 2+ no-improvement outcomes → "deprioritize"
-      6. New action (≤1 day old) → "coach today"
-      7. In progress but never coached → "coach today"
-      8. Default → "follow up"
-
-    Returns dict with: recommendation, reason, urgency.
+    Returns dict with: factors (list[str]), reason, urgency.
     """
     today = today or date.today()
     try:
@@ -272,16 +251,14 @@ def get_action_recommendation(
         status = str(action.get("status") or "new")
         created_at = action.get("created_at") or action.get("last_event_at")
 
-        # Rule 1 & 2: Runtime status — overdue or due today
+        factors: list[str] = []
+
+        # Runtime status: overdue or due today
         runtime_status = action.get("_runtime_status") or ""
         if runtime_status in {"overdue", "due_today"}:
-            return {
-                "recommendation": "follow up now",
-                "reason": "Follow-up is " + ("overdue" if runtime_status == "overdue" else "due today"),
-                "urgency": "high",
-            }
+            factors.append("Follow-up overdue")
 
-        # Rule 3: Recognition issue awaiting logged recognition
+        # Recognition issue awaiting logged recognition
         if issue_type in {"recognition", "high_performer_ignored"}:
             if action_id:
                 events = action_events_repo.list_action_events(action_id, tenant_id)
@@ -290,11 +267,7 @@ def get_action_recommendation(
                     for e in (events or [])
                 )
                 if not has_recognized:
-                    return {
-                        "recommendation": "recognize",
-                        "reason": "High performer awaiting recognition",
-                        "urgency": "medium",
-                    }
+                    factors.append("Seen multiple times")
 
         # Load events for cycle analysis
         coached_count = 0
@@ -310,21 +283,13 @@ def get_action_recommendation(
                 if str(e.get("outcome") or "") in NO_IMPROVEMENT_OUTCOMES
             )
 
-        # Rule 4: Multiple coaching cycles with no improvement
+        # Multiple coaching cycles with no improvement
         if coached_count >= 2 and no_improvement_count >= 2:
-            return {
-                "recommendation": "escalate",
-                "reason": f"Coached {coached_count}× with no improvement",
-                "urgency": "high",
-            }
+            factors.append("Seen multiple times")
 
-        # Rule 5: Multiple no-improvement outcomes
+        # Multiple no-improvement outcomes
         if no_improvement_count >= 2:
-            return {
-                "recommendation": "deprioritize",
-                "reason": f"{no_improvement_count} outcomes show no improvement",
-                "urgency": "medium",
-            }
+            factors.append("Lower than recent pace")
 
         # Rule 6: New action (created recently)
         days_since_created = 0
@@ -335,33 +300,44 @@ def get_action_recommendation(
             except Exception:
                 pass
 
-        if status == "new" and days_since_created <= 1:
-            return {
-                "recommendation": "coach today",
-                "reason": "New action, ready to engage",
-                "urgency": "medium",
-            }
+        if status in {"new", "in_progress"} and days_since_created <= 1:
+            factors.append("Lower than recent pace")
 
-        # Rule 7: In progress but never coached
-        if status == "in_progress" and coached_count == 0:
-            return {
-                "recommendation": "coach today",
-                "reason": "Ready for initial coaching",
-                "urgency": "medium",
-            }
+        if not factors:
+            factors.append("Lower than recent pace")
 
-        # Default: continue tracking
+        unique_factors: list[str] = []
+        seen: set[str] = set()
+        for factor in factors:
+            key = str(factor).strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_factors.append(str(factor).strip())
+
         return {
-            "recommendation": "follow up",
-            "reason": "Continue tracking progress",
-            "urgency": "low",
+            "factors": unique_factors,
+            "reason": "Signals are surfaced for supervisor review.",
+            "urgency": "high" if "Follow-up overdue" in unique_factors else "medium",
         }
     except Exception as e:
-        print(f"[Error] get_action_recommendation failed: {e}")
+        print(f"[Error] get_action_factors failed: {e}")
         return {
-            "recommendation": "continue",
+            "factors": ["Lower than recent pace"],
             "reason": "See action card for details",
             "urgency": "low",
         }
+
+
+def get_action_recommendation(
+    action: dict,
+    tenant_id: str = "",
+    today: date | None = None,
+) -> dict:
+    """Backward-compatible alias that now returns neutral factors.
+
+    This function no longer returns recommendation fields.
+    """
+    return get_action_factors(action=action, tenant_id=tenant_id, today=today)
 
 

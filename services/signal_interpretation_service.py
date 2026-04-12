@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from domain.insight_card_contract import (
     ConfidenceInfo,
@@ -38,6 +38,26 @@ from services.signal_pattern_memory_service import (
     detect_pattern_memory_from_action,
     detect_pattern_memory_from_goal_row,
 )
+
+
+@dataclass(frozen=True)
+class CompactSignalLines:
+    line_1: str = ""
+    line_2: str = ""
+    line_3: str = ""
+    line_4: str = ""
+    line_5: str = ""
+    expanded_line: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "line_1": self.line_1,
+            "line_2": self.line_2,
+            "line_3": self.line_3,
+            "line_4": self.line_4,
+            "line_5": self.line_5,
+            "expanded_line": self.expanded_line,
+        }
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -175,15 +195,15 @@ def _low_data_note(sample_size: int) -> str:
     return f"Only {sample_size} recent {suffix} available"
 
 
-def _build_low_data_compact_lines(sample_size: int) -> dict[str, str]:
-    return {
-        "line_1": "",
-        "line_2": "Not enough history yet",
-        "line_3": "",
-        "line_4": "",
-        "line_5": "Confidence: Low",
-        "expanded_line": "No recent performance data" if sample_size <= 0 else _low_data_note(sample_size),
-    }
+def _build_low_data_compact_lines(sample_size: int) -> CompactSignalLines:
+    return CompactSignalLines(
+        line_1="",
+        line_2="Not enough history yet",
+        line_3="",
+        line_4="",
+        line_5="Confidence: Low",
+        expanded_line="No recent performance data" if sample_size <= 0 else _low_data_note(sample_size),
+    )
 
 
 def _build_compact_signal_lines(
@@ -194,7 +214,7 @@ def _build_compact_signal_lines(
     workload_context: VolumeWorkloadContext,
     time_context: TimeContext,
     metadata: dict,
-) -> dict[str, str]:
+) -> CompactSignalLines:
     sample_size = _safe_int(confidence.sample_size, 0)
     if _is_low_data_state(confidence=confidence, data_completeness=data_completeness, metadata=metadata):
         return _build_low_data_compact_lines(sample_size)
@@ -269,32 +289,32 @@ def _build_compact_signal_lines(
 
     mode = get_signal_display_mode(display_signal)
     if mode == SignalDisplayMode.LOW_DATA:
-        return {
-            "line_1": "",
-            "line_2": format_signal_label(display_signal),
-            "line_3": "",
-            "line_4": "",
-            "line_5": format_confidence_line(display_signal),
-            "expanded_line": "No recent performance data",
-        }
+        return CompactSignalLines(
+            line_1="",
+            line_2=format_signal_label(display_signal),
+            line_3="",
+            line_4="",
+            line_5=format_confidence_line(display_signal),
+            expanded_line="No recent performance data",
+        )
 
     if mode == SignalDisplayMode.PARTIAL:
-        return {
-            "line_1": f"{display_signal.employee_name} · {display_signal.process}",
-            "line_2": format_signal_label(display_signal),
-            "line_3": format_observed_line(display_signal),
-            "line_4": "",
-            "line_5": format_confidence_line(display_signal),
-            "expanded_line": "No comparison available",
-        }
+        return CompactSignalLines(
+            line_1=f"{display_signal.employee_name} · {display_signal.process}",
+            line_2=format_signal_label(display_signal),
+            line_3=format_observed_line(display_signal),
+            line_4="",
+            line_5=format_confidence_line(display_signal),
+            expanded_line="No comparison available",
+        )
 
-    return {
-        "line_1": f"{display_signal.employee_name} · {display_signal.process}",
-        "line_2": format_signal_label(display_signal),
-        "line_3": format_observed_line(display_signal),
-        "line_4": format_comparison_line(display_signal),
-        "line_5": format_confidence_line(display_signal),
-    }
+    return CompactSignalLines(
+        line_1=f"{display_signal.employee_name} · {display_signal.process}",
+        line_2=format_signal_label(display_signal),
+        line_3=format_observed_line(display_signal),
+        line_4=format_comparison_line(display_signal),
+        line_5=format_confidence_line(display_signal),
+    )
 
 
 def _infer_observed_date(default_today: date, *candidates: object) -> date:
@@ -460,7 +480,7 @@ def _card(
                 workload_context=workload_context,
                 time_context=time_context,
                 metadata=merged_metadata,
-            )
+            ).to_dict()
         }
     )
     trace_ctx = traceability or infer_traceability_context(

@@ -3,14 +3,40 @@
 from __future__ import annotations
 
 
+SIGNAL_WORDING_MAP: dict[str, str] = {
+    "lower_than_recent_pace": "Lower than recent pace",
+    "below_expected_pace": "Below expected pace",
+    "inconsistent_performance": "Inconsistent performance",
+    "follow_up_not_completed": "Follow-up not completed",
+    "not_enough_history_yet": "Not enough history yet",
+}
+
+
+def signal_wording(key: str) -> str:
+    normalized = str(key or "").strip().lower()
+    return SIGNAL_WORDING_MAP.get(normalized, SIGNAL_WORDING_MAP["not_enough_history_yet"])
+
+
+def signal_wording_from_trend(trend: str) -> str:
+    normalized = str(trend or "").strip().lower()
+    trend_map = {
+        "below_expected": "below_expected_pace",
+        "declining": "lower_than_recent_pace",
+        "down": "lower_than_recent_pace",
+        "inconsistent": "inconsistent_performance",
+        "insufficient_data": "not_enough_history_yet",
+    }
+    return signal_wording(trend_map.get(normalized, "not_enough_history_yet"))
+
+
 TREND_LABELS: dict[str, str] = {
     "stable": "Worth review",
-    "below_expected": "Below expected pace",
-    "declining": "Lower than recent pace",
+    "below_expected": signal_wording("below_expected_pace"),
+    "declining": signal_wording("lower_than_recent_pace"),
     "improving": "Higher than recent pace",
-    "inconsistent": "Inconsistent performance",
-    "insufficient_data": "Not enough history yet",
-    "down": "Lower than recent pace",
+    "inconsistent": signal_wording("inconsistent_performance"),
+    "insufficient_data": signal_wording("not_enough_history_yet"),
+    "down": signal_wording("lower_than_recent_pace"),
     "up": "Higher than recent pace",
     "flat": "Worth review",
     "unknown": "Worth review",

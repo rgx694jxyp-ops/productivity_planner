@@ -27,7 +27,7 @@ from services.attention_scoring_service import AttentionFactor, AttentionItem, A
 from services.daily_snapshot_service import get_latest_snapshot_goal_status
 from services.exception_tracking_service import list_open_operational_exceptions
 from services.today_home_service import build_today_attention_summary, build_today_home_sections
-from ui.today_queue import build_action_queue
+from services.today_queue_service import build_action_queue
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

@@ -29,6 +29,8 @@ from services.display_signal_factory import build_display_signal, build_display_
 from services.signal_formatting_service import (
     format_comparison_line,
     format_confidence_line,
+    format_low_data_collapsed_lines,
+    format_low_data_expanded_lines,
     format_observed_line,
     format_signal_label,
     get_signal_display_mode,
@@ -72,6 +74,7 @@ from ui.state_panels import (
 )
 from ui.traceability_panel import render_traceability_panel
 from services.trend_classification_service import normalize_trend_state
+from services.plain_language_service import signal_wording
 try:
     from pages.common import _build_coaching_recommendations
 except Exception:
@@ -410,11 +413,20 @@ def _render_employee_signal_summary(*, detail_context: dict, employee_name: str,
     st.subheader("Signal Summary")
     with st.container(border=True):
         mode = get_signal_display_mode(signal)
-        line_1 = f"{signal.employee_name} · {signal.process}"
-        line_2 = format_signal_label(signal)
-        line_3 = format_observed_line(signal) if mode != SignalDisplayMode.LOW_DATA else ""
-        line_4 = format_comparison_line(signal) if mode == SignalDisplayMode.FULL else ""
-        line_5 = format_confidence_line(signal)
+        low_data_state = mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}
+        if low_data_state:
+            collapsed_lines = format_low_data_collapsed_lines(signal)
+            line_1 = ""
+            line_2 = collapsed_lines[0] if len(collapsed_lines) > 0 else signal_wording("not_enough_history_yet")
+            line_3 = ""
+            line_4 = ""
+            line_5 = collapsed_lines[1] if len(collapsed_lines) > 1 else "Confidence: Low"
+        else:
+            line_1 = f"{signal.employee_name} · {signal.process}"
+            line_2 = format_signal_label(signal)
+            line_3 = format_observed_line(signal)
+            line_4 = format_comparison_line(signal) if mode == SignalDisplayMode.FULL else ""
+            line_5 = format_confidence_line(signal)
 
         for idx, line in enumerate((line_1, line_2, line_3, line_4, line_5), start=1):
             text = str(line or "").strip()
@@ -446,11 +458,25 @@ def _render_employee_signal_explainer(*, detail_context: dict, employee_name: st
         or ""
     ).strip()
 
-    if mode == SignalDisplayMode.LOW_DATA:
-        one_line_note = str((detail_context.get("signal_summary") or {}).get("low_data_note") or detail_context.get("low_data_note") or "Only limited recent records available").strip()
-        if one_line_note:
-            with st.expander("Signal explanation", expanded=False):
-                st.caption(one_line_note)
+    if mode in {SignalDisplayMode.LOW_DATA, SignalDisplayMode.PARTIAL}:
+        sample_candidates = [
+            (detail_context.get("signal_summary") or {}).get("sample_size"),
+            (detail_context.get("signal_summary") or {}).get("included_rows"),
+            detail_context.get("sample_size"),
+            detail_context.get("included_rows"),
+        ]
+        recent_count = 1
+        for candidate in sample_candidates:
+            try:
+                parsed = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                recent_count = parsed
+                break
+        with st.expander("Signal explanation", expanded=False):
+            for line in format_low_data_expanded_lines(signal, recent_record_count=recent_count):
+                st.write(line)
         return
 
     has_additional_value = bool(why_line or basis_line or data_note)
@@ -901,7 +927,7 @@ def _emp_coaching():
         if trend == "declining":
             reasons.append(f"Performance slipping ({change_pct:+.1f}%)")
         elif trend == "inconsistent":
-            reasons.append("Recent pace is inconsistent")
+            reasons.append(signal_wording("inconsistent_performance"))
         if goal_st == "below_goal":
             reasons.append(f"Below target (UPH {avg_uph:.1f} vs target {target})")
 

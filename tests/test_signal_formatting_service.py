@@ -4,12 +4,15 @@ from domain.display_signal import DisplaySignal, SignalConfidence, SignalLabel
 from services.signal_formatting_service import (
     format_comparison_line,
     format_confidence_line,
+    format_low_data_collapsed_lines,
+    format_low_data_expanded_lines,
     format_observed_line,
     format_signal_label,
     get_signal_display_mode,
     is_signal_display_eligible,
     SignalDisplayMode,
 )
+from services.plain_language_service import signal_wording
 
 
 def _sample_signal() -> DisplaySignal:
@@ -78,7 +81,7 @@ def test_signal_display_mode_partial_when_no_comparison():
         flags={},
     )
     assert get_signal_display_mode(signal) == SignalDisplayMode.PARTIAL
-    assert format_signal_label(signal) == "Limited data available"
+    assert format_signal_label(signal) == signal_wording("not_enough_history_yet")
     assert format_observed_line(signal) == "Observed: 2026-04-11"
     assert format_confidence_line(signal) == "Confidence: Low"
 
@@ -101,6 +104,42 @@ def test_signal_display_mode_low_data_when_observed_missing():
     assert format_signal_label(signal) == "Not enough history yet"
     assert format_observed_line(signal) == ""
     assert format_confidence_line(signal) == "Confidence: Low"
+
+
+def test_signal_formatting_uses_canonical_wording_for_core_signals():
+    observed_date = date(2026, 4, 11)
+    full_kwargs = {
+        "employee_name": "Alex",
+        "process": "Receiving",
+        "observed_date": observed_date,
+        "observed_value": 30.0,
+        "comparison_start_date": date(2026, 4, 6),
+        "comparison_end_date": date(2026, 4, 10),
+        "comparison_value": 40.0,
+        "confidence": SignalConfidence.HIGH,
+        "data_completeness": None,
+        "flags": {},
+    }
+
+    assert format_signal_label(DisplaySignal(signal_label=SignalLabel.LOWER_THAN_RECENT_PACE, **full_kwargs)) == signal_wording("lower_than_recent_pace")
+    assert format_signal_label(DisplaySignal(signal_label=SignalLabel.BELOW_EXPECTED_PACE, **full_kwargs)) == signal_wording("below_expected_pace")
+    assert format_signal_label(DisplaySignal(signal_label=SignalLabel.INCONSISTENT_PACE, **full_kwargs)) == signal_wording("inconsistent_performance")
+    assert format_signal_label(DisplaySignal(signal_label=SignalLabel.FOLLOW_UP_OVERDUE, **full_kwargs)) == signal_wording("follow_up_not_completed")
+
+    low_data = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOW_DATA,
+        observed_date=observed_date,
+        observed_value=None,
+        comparison_start_date=None,
+        comparison_end_date=None,
+        comparison_value=None,
+        confidence=SignalConfidence.LOW,
+        data_completeness=None,
+        flags={},
+    )
+    assert format_signal_label(low_data) == signal_wording("not_enough_history_yet")
 
 
 def test_signal_display_eligible_full_signal_passes():
@@ -175,3 +214,85 @@ def test_signal_display_eligible_system_artifact_flag_fails():
         flags={"system_artifact": True},
     )
     assert is_signal_display_eligible(flagged) is False
+
+
+def test_low_data_collapsed_format_is_strict_and_clean():
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOW_DATA,
+        observed_date=date(2026, 4, 11),
+        observed_value=None,
+        comparison_start_date=None,
+        comparison_end_date=None,
+        comparison_value=None,
+        confidence=SignalConfidence.LOW,
+        data_completeness=None,
+        flags={},
+    )
+
+    lines = format_low_data_collapsed_lines(signal)
+    assert lines == ["Not enough history yet", "Confidence: Low"]
+
+
+def test_low_data_expanded_format_is_strict_and_friendly():
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOW_DATA,
+        observed_date=date(2026, 4, 11),
+        observed_value=None,
+        comparison_start_date=None,
+        comparison_end_date=None,
+        comparison_value=None,
+        confidence=SignalConfidence.LOW,
+        data_completeness=None,
+        flags={},
+    )
+
+    lines = format_low_data_expanded_lines(signal, recent_record_count=2)
+    assert lines == ["Only 2 recent record(s) available", "Observed: Apr 11"]
+
+
+def test_low_data_lines_max_count_is_enforced():
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOW_DATA,
+        observed_date=date(2026, 4, 11),
+        observed_value=None,
+        comparison_start_date=None,
+        comparison_end_date=None,
+        comparison_value=None,
+        confidence=SignalConfidence.LOW,
+        data_completeness=None,
+        flags={},
+    )
+
+    collapsed = format_low_data_collapsed_lines(signal)
+    expanded = format_low_data_expanded_lines(signal, recent_record_count=3)
+    assert len(collapsed) <= 3
+    assert len(expanded) <= 3
+
+
+def test_low_data_lines_exclude_system_phrases():
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOW_DATA,
+        observed_date=date(2026, 4, 11),
+        observed_value=None,
+        comparison_start_date=None,
+        comparison_end_date=None,
+        comparison_value=None,
+        confidence=SignalConfidence.LOW,
+        data_completeness=None,
+        flags={},
+    )
+
+    lines = format_low_data_collapsed_lines(signal) + format_low_data_expanded_lines(signal, recent_record_count=1)
+    banned = ("system", "artifact", "missing baseline")
+    for line in lines:
+        text = line.lower()
+        for phrase in banned:
+            assert phrase not in text
