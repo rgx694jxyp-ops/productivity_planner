@@ -224,15 +224,15 @@ def _render_issue_group_handling(
     for group in groups:
         group_key = str(group.key or "")
         selected_choice = str(handling_state.get(group_key) or group.default_choice or "review_details")
-        if selected_choice not in _ISSUE_HANDLING_CHOICES:
+        if selected_choice not in ISSUE_HANDLING_CHOICES:
             selected_choice = "review_details"
         with st.container(border=True):
             st.markdown(f"**{group.label}** · {int(group.count or 0):,}")
             st.caption(str(group.effect or ""))
             selected_choice = st.selectbox(
                 "Handling choice",
-                _ISSUE_HANDLING_CHOICES,
-                index=_ISSUE_HANDLING_CHOICES.index(selected_choice),
+                ISSUE_HANDLING_CHOICES,
+                index=ISSUE_HANDLING_CHOICES.index(selected_choice),
                 format_func=lambda value: _ISSUE_HANDLING_LABELS.get(value, value),
                 key=f"{state_key}_{group_key}_choice",
             )
