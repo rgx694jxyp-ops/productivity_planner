@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
+from services.signal_interpretation_service import format_comparison_window, format_observed_label
 from services.target_service import build_comparison_descriptions, resolve_target_context
 from services.trend_classification_service import classify_trend_state, normalize_trend_state
 
@@ -83,6 +84,22 @@ def _source_value(raw: dict, *keys: str) -> str:
     return ""
 
 
+def _name_from_goal_row(goal_row: dict, fallback: str) -> str:
+    for key in ("Employee", "Employee Name", "employee_name", "name"):
+        value = str(goal_row.get(key) or "").strip()
+        if value:
+            return value
+    return fallback
+
+
+def _build_reference_today(trend_rows: list[dict]) -> date:
+    if trend_rows:
+        latest = max((row.get("date") for row in trend_rows if isinstance(row.get("date"), date)), default=None)
+        if latest is not None:
+            return latest + timedelta(days=1)
+    return date.today()
+
+
 def _build_source_references(*, included_rows: list[dict], excluded_rows: list[dict]) -> list[dict]:
     references: list[dict] = []
     seen_keys: set[tuple[str, str, str, str, str]] = set()
@@ -153,9 +170,11 @@ def build_employee_detail_context(
 
     goal_status = str(goal_row.get("goal_status") or "").strip().lower()
     trend = str(goal_row.get("trend") or "").strip().lower()
+    employee_name = _name_from_goal_row(goal_row, str(emp_id or "Employee"))
+    process_name = str(goal_row.get("Resolved Process") or goal_row.get("Department") or goal_row.get("department") or "Team")
     target_context = resolve_target_context(
         employee_id=emp_id,
-        process_name=goal_row.get("Resolved Process") or goal_row.get("Department") or goal_row.get("department") or "",
+        process_name=process_name,
         explicit_target=_safe_float(goal_row.get("Target UPH")),
     )
     target_uph = _safe_float(target_context.get("target_uph"))
@@ -278,15 +297,30 @@ def build_employee_detail_context(
     else:
         baseline_used = "No configured target or complete prior baseline is currently available."
 
+    has_minimum_context = bool(len(trend_rows) > 0)
+
     has_notable_signal = bool(
         (target_uph > 0 and current_uph > 0 and current_uph < target_uph)
         or delta >= 1.0
         or bool(trend_result.get("is_notable"))
         or pattern_history["has_pattern"]
     )
-    healthy_state_message = "" if has_notable_signal else "No major changes in recent performance."
+    if not has_minimum_context:
+        healthy_state_message = "Waiting for enough recent comparable records to classify this employee confidently."
+    else:
+        healthy_state_message = "" if has_notable_signal else "No major changes in recent performance."
+
+    observed_date = trailing_rows[-1]["date"] if trailing_rows else (trend_rows[-1]["date"] if trend_rows else None)
+    comparison_dates = [row["date"] for row in prior_rows] or [row["date"] for row in trailing_rows]
+    comparison_count = len(prior_rows) if prior_rows else len(comparison_dates)
+    today_ref = _build_reference_today(trend_rows)
 
     summary_block = {
+        "line_1": f"{employee_name} · {process_name}",
+        "line_2": str(trend_result.get("label") or "Worth review").strip(),
+        "line_3": f"Observed: {format_observed_label(observed_date, today=today_ref)} ({trailing_avg:.1f})",
+        "line_4": f"Compared to: {format_comparison_window(comparison_dates, comparison_count or None)} avg ({prior_avg:.1f})",
+        "line_5": f"Confidence: {confidence_label}",
         "current_state": current_state,
         "trend_state": str(trend_result.get("state") or normalize_trend_state(goal_row.get("trend") or "")),
         "trend_explanation": str(trend_result.get("plain_explanation") or ""),
@@ -295,6 +329,20 @@ def build_employee_detail_context(
         "data_completeness_note": completeness_note,
         "data_completeness_label": completeness_label,
     }
+
+    low_data_state = bool(str(confidence_label).strip().lower() == "low")
+    if low_data_state:
+        summary_block.update(
+            {
+                "line_1": "",
+                "line_2": "Not enough history yet",
+                "line_3": "",
+                "line_4": "",
+                "line_5": "Confidence: Low",
+                "low_data_state": True,
+                "low_data_note": f"Only {len(trend_rows)} recent {'record' if len(trend_rows) == 1 else 'records'} available" if trend_rows else "Only limited recent records available",
+            }
+        )
 
     why_this_is_showing = {
         "trigger": trigger_reason,
@@ -360,6 +408,7 @@ def build_employee_detail_context(
         },
         "pattern_history": pattern_history,
         "healthy_state_message": healthy_state_message,
+        "has_minimum_context": has_minimum_context,
         "has_notable_signal": has_notable_signal,
         "trend_points": trend_points,
         "contributing_periods": {
@@ -369,4 +418,6 @@ def build_employee_detail_context(
         "included_records": included_records,
         "excluded_records": excluded_records,
         "source_references": source_references,
+        "low_data_state": bool(summary_block.get("low_data_state")),
+        "low_data_note": str(summary_block.get("low_data_note") or ""),
     }

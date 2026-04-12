@@ -16,8 +16,9 @@ def test_describe_change_pct_uses_manager_friendly_phrasing():
 
 
 def test_trend_and_status_labels_are_plain_language():
-    assert describe_trend("down") == "below expected pace"
-    assert describe_trend("insufficient_data") == "not enough history yet"
+    # "down" is a legacy alias for DECLINING.
+    assert describe_trend("down") == "Lower than recent pace"
+    assert describe_trend("insufficient_data") == "Not enough history yet"
     assert describe_goal_status("below_goal") == "below expected pace"
 
 

@@ -4,29 +4,29 @@ from __future__ import annotations
 
 
 TREND_LABELS: dict[str, str] = {
-    "stable": "holding steady",
-    "below_expected": "below expected pace",
-    "declining": "slipping from recent pace",
-    "improving": "moving up from recent pace",
-    "inconsistent": "moving around from day to day",
-    "insufficient_data": "not enough recent history yet",
-    "down": "slipping from recent pace",
-    "up": "moving up from recent pace",
-    "flat": "holding steady",
-    "unknown": "trend not available",
+    "stable": "Worth review",
+    "below_expected": "Below expected pace",
+    "declining": "Lower than recent pace",
+    "improving": "Higher than recent pace",
+    "inconsistent": "Inconsistent performance",
+    "insufficient_data": "Not enough history yet",
+    "down": "Lower than recent pace",
+    "up": "Higher than recent pace",
+    "flat": "Worth review",
+    "unknown": "Worth review",
 }
 
 TREND_EXPLANATIONS: dict[str, str] = {
-    "stable": "Recent performance looks similar to the recent average.",
-    "below_expected": "Recent performance is under the expected pace, but not changing enough to call it improving or declining.",
-    "declining": "Recent performance is lower than the prior comparable window.",
-    "improving": "Recent performance is higher than the prior comparable window.",
-    "inconsistent": "Recent performance moves around enough that the pattern is not steady yet.",
-    "insufficient_data": "There are not enough comparable days yet to classify the pattern confidently.",
-    "down": "Recent performance is lower than the prior comparable window.",
-    "up": "Recent performance is higher than the prior comparable window.",
-    "flat": "Recent performance looks similar to the recent average.",
-    "unknown": "Trend details are not available.",
+    "stable": "Recently surfaced with no large change.",
+    "below_expected": "Recently surfaced below expected pace.",
+    "declining": "Recently surfaced lower than the prior window.",
+    "improving": "Recently surfaced higher than the prior window.",
+    "inconsistent": "Recently surfaced with uneven day-to-day results.",
+    "insufficient_data": "Not enough recent history yet.",
+    "down": "Recently surfaced lower than the prior window.",
+    "up": "Recently surfaced higher than the prior window.",
+    "flat": "Recently surfaced with no large change.",
+    "unknown": "Recently surfaced.",
 }
 
 GOAL_STATUS_LABELS: dict[str, str] = {
@@ -114,9 +114,9 @@ def action_label(action_code: str) -> str:
 def describe_attention_level(risk_level: str) -> str:
     level = str(risk_level or "")
     if "🔴" in level or "High" in level:
-        return "Needs attention soon"
+        return "Worth review"
     if "🟡" in level or "Medium" in level:
-        return "Watch closely"
+        return "Recently surfaced"
     if "🟢" in level or "Low" in level:
-        return "Looks steady"
-    return "Needs attention"
+        return "Worth review"
+    return "Recently surfaced"

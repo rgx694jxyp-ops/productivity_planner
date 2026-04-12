@@ -1,6 +1,8 @@
 from datetime import date
 
 from services.signal_interpretation_service import (
+    format_comparison_window,
+    format_observed_label,
     interpret_below_expected_performance,
     interpret_changed_from_normal,
     interpret_employee_detail_view_signals,
@@ -9,6 +11,18 @@ from services.signal_interpretation_service import (
     interpret_import_data_trust_view_signals,
     interpret_today_view_signals,
 )
+
+
+def test_format_observed_label_uses_yesterday_and_date_rules():
+    today = date(2026, 4, 11)
+    assert format_observed_label(date(2026, 4, 10), today=today) == "Yesterday"
+    assert format_observed_label(date(2026, 4, 10), today=today, is_shift_level=True) == "Previous shift"
+    assert format_observed_label(date(2026, 4, 4), today=today) == "Apr 4"
+
+
+def test_format_comparison_window_supports_filtered_days_label():
+    dates = [date(2026, 4, 2), date(2026, 4, 4), date(2026, 4, 6)]
+    assert format_comparison_window(dates, 3) == "3 similar days between Apr 2–Apr 6"
 
 
 def test_interpret_below_expected_performance_is_deterministic():
@@ -205,3 +219,25 @@ def test_changed_from_normal_marks_workload_fields_missing_when_unavailable():
 
     assert "workload volume fields are incomplete" in card.compared_to_what.lower()
     assert "workload-volume context is best effort" in card.data_completeness.summary.lower()
+
+
+def test_low_data_signal_compact_output_is_minimal():
+    row = {
+        "EmployeeID": "E12",
+        "Employee": "Riley",
+        "Department": "Dock",
+        "Average UPH": 0,
+        "Target UPH": 0,
+        "trend": "insufficient_data",
+        "change_pct": 0,
+    }
+
+    card = interpret_changed_from_normal(row=row, today=date(2026, 4, 9))
+    compact = card.metadata.get("compact_lines") or {}
+
+    assert compact.get("line_2") == "Not enough history yet"
+    assert compact.get("line_5") == "Confidence: Low"
+    assert compact.get("line_1") == ""
+    assert compact.get("line_3") == ""
+    assert compact.get("line_4") == ""
+    assert "Only" in str(compact.get("expanded_line") or "")

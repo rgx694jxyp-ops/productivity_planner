@@ -548,11 +548,11 @@ def _go_to_drill_down(item: InsightCardContract) -> None:
 
 def _render_attention_priority_section(attention: AttentionSummary) -> None:
     """Render the ranked priority attention list at the top of the Today screen."""
-    st.markdown('<div class="today-section-label">Priority Attention</div>', unsafe_allow_html=True)
+    st.markdown('<div class="today-section-label">Recently Surfaced</div>', unsafe_allow_html=True)
 
     if attention.is_healthy:
         st.markdown(
-            '<div class="today-supporting-note">No strong signals need attention right now. '
+            '<div class="today-supporting-note">No strong signals are recently surfaced right now. '
             "The queue is clear based on current data.</div>",
             unsafe_allow_html=True,
         )
@@ -626,44 +626,44 @@ def _render_attention_priority_section(attention: AttentionSummary) -> None:
 
 def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
     with st.container(border=True):
-        st.markdown(f'<div class="today-insight-title">{item.title}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="today-insight-line"><strong>What happened:</strong> {item.what_happened}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="today-insight-line"><strong>Compared to what:</strong> {item.compared_to_what}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="today-insight-line"><strong>Why shown:</strong> {item.why_flagged}</div>', unsafe_allow_html=True)
+        compact_lines = item.metadata.get("compact_lines") or {}
+        line_1 = str(compact_lines.get("line_1") or item.title)
+        line_2 = str(compact_lines.get("line_2") or item.what_happened)
+        line_3 = str(compact_lines.get("line_3") or "Observed: n/a (n/a)")
+        line_4 = str(compact_lines.get("line_4") or "Compared to: n/a avg (n/a)")
+        line_5 = str(compact_lines.get("line_5") or f"Confidence: {item.confidence.level.title()}")
 
-        confidence_basis = item.confidence.basis or "evidence basis available"
-        confidence_note = f"Confidence: {item.confidence.level.title()} ({confidence_basis})"
-        if item.confidence.caveat:
-            confidence_note = f"{confidence_note}. {item.confidence.caveat}"
-        st.markdown(f'<div class="today-insight-meta">{confidence_note}</div>', unsafe_allow_html=True)
+        for idx, text in enumerate((line_1, line_2, line_3, line_4, line_5), start=1):
+            line_text = str(text or "").strip()
+            if not line_text:
+                continue
+            if idx == 1:
+                st.markdown(f'<div class="today-insight-title">{line_text}</div>', unsafe_allow_html=True)
+            elif idx == 5:
+                st.markdown(f'<div class="today-insight-meta">{line_text}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="today-insight-line">{line_text}</div>', unsafe_allow_html=True)
 
-        workload_note = item.workload_context.volume_note or "Volume/workload context not available for this signal."
-        st.markdown(f'<div class="today-insight-meta">Workload: {workload_note}</div>', unsafe_allow_html=True)
+        low_data_state = bool(compact_lines.get("expanded_line"))
+
+        why_line = "Recently surfaced"
+        basis_line = str(compact_lines.get("line_4") or "").strip()
+        data_note = str(item.data_completeness.summary or "").strip()
+        has_extra = bool(low_data_state or why_line or basis_line or (data_note and item.data_completeness.status != "complete"))
 
         c1, c2 = st.columns([3, 2])
         with c1:
-            with st.expander("Context and source details", expanded=False):
-                st.write(f"Time window: {item.time_context.observed_window_label}")
-                if item.time_context.compared_window_label:
-                    st.write(f"Compared with: {item.time_context.compared_window_label}")
-                st.write(f"Data completeness: {item.data_completeness.summary}")
-                if item.traceability.date_range_used:
-                    st.write(f"Date range used: {item.traceability.date_range_used}")
-                if item.traceability.baseline_or_target_used:
-                    st.write(f"Baseline/target used: {item.traceability.baseline_or_target_used}")
-                if item.traceability.linked_entity_label or item.traceability.linked_entity_id:
-                    st.write(
-                        "Linked context: "
-                        f"{item.traceability.linked_entity_label or item.traceability.linked_entity_id}"
-                    )
-                review_areas = list(item.metadata.get("optional_review_areas") or [])
-                if review_areas:
-                    st.write(f"Areas to review: {', '.join(review_areas)}")
-                if item.source_references:
-                    st.markdown("**Sources**")
-                    for source in item.source_references:
-                        st.caption(f"{source.source_name}")
-                st.caption("Detailed source evidence is available in drill-down.")
+            if has_extra:
+                with st.expander("Signal explanation", expanded=False):
+                    if low_data_state:
+                        st.caption(str(compact_lines.get("expanded_line") or "Only limited recent records available"))
+                    else:
+                        if why_line:
+                            st.write(f"Why: {why_line}")
+                        if basis_line:
+                            st.write(f"Based on: {basis_line.replace('Compared to: ', '')}")
+                        if data_note and item.data_completeness.status != "complete":
+                            st.caption(f"Data note: {data_note}")
 
         with c2:
             if st.button(item.drill_down.label, key=f"{key_prefix}_{item.insight_id}", use_container_width=True):
@@ -724,8 +724,8 @@ def page_today() -> None:
         """
     <div class="today-hero">
         <div class="today-hero-kicker">Today Queue</div>
-        <div class="today-hero-title">Who needs your attention today?</div>
-        <div class="today-hero-copy">In under a minute, see who needs attention, understand why, log the next move, and keep the floor moving.</div>
+        <div class="today-hero-title">What recently surfaced today?</div>
+        <div class="today-hero-copy">In under a minute, see what recently surfaced, understand context, and record outcomes.</div>
     </div>
     """,
         unsafe_allow_html=True,
@@ -770,11 +770,18 @@ def page_today() -> None:
             import_summary=import_summary,
             today=today_value,
         )
+        eligible_employee_ids = {
+            str(item.drill_down.entity_id or "").strip()
+            for section_key in ("needs_attention", "changed_from_normal", "unresolved_items")
+            for item in (home_sections.get(section_key) or [])
+            if str(item.drill_down.entity_id or "").strip()
+        }
         open_exception_rows = list_open_operational_exceptions(tenant_id=st.session_state.tenant_id, limit=200)
         attention_summary = build_today_attention_summary(
             goal_status=goal_status,
             queue_items=queue_items,
             open_exception_rows=open_exception_rows,
+            eligible_employee_ids=eligible_employee_ids,
         )
     except Exception as exc:
         show_error_state(f"Today screen data could not load cleanly: {exc}")
@@ -804,11 +811,11 @@ def page_today() -> None:
     st.write("")
 
     _render_home_section(
-        section_title="Needs Attention",
-        section_description="Open items that are currently active in the follow-through queue.",
+        section_title="Recently Surfaced",
+        section_description="Open items currently visible in recent queue context.",
         items=home_sections.get("needs_attention", []),
         key_prefix="today_needs_attention",
-        placeholder_message="No active attention items right now.",
+        placeholder_message="No recently surfaced items right now.",
         placeholder_todo="TODO: Keep this section linked to real-time queue trigger refresh cadence.",
     )
 
@@ -838,6 +845,25 @@ def page_today() -> None:
         placeholder_message="No active data warnings from current session context.",
         placeholder_todo="TODO: Wire structured import diagnostics for row-level completeness breakdown.",
     )
+
+    main_signal_count = sum(
+        len(home_sections.get(section_key) or [])
+        for section_key in ("needs_attention", "changed_from_normal", "unresolved_items")
+    )
+    if main_signal_count == 0:
+        st.markdown('<div class="today-supporting-note"><strong>Nothing important changed today</strong></div>', unsafe_allow_html=True)
+
+    suppressed_signals = list(home_sections.get("suppressed_signals") or [])
+    if suppressed_signals:
+        with st.expander(f"Suppressed signals ({len(suppressed_signals)})", expanded=False):
+            st.caption("Hidden from main view by display eligibility rules.")
+            for item in suppressed_signals[:20]:
+                compact = item.metadata.get("compact_lines") or {}
+                title = str(compact.get("line_1") or item.title)
+                label = str(compact.get("line_2") or "")
+                st.write(f"{title}")
+                if label:
+                    st.caption(label)
 
     _render_open_exceptions(tenant_id=st.session_state.tenant_id)
 

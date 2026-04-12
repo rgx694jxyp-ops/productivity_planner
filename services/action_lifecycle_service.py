@@ -799,11 +799,25 @@ def run_all_triggers(
     summary = {}
     try:
         if history is None:
-            import data_loader
-            history = data_loader.load_performance_history() or []
+            history = []
+            try:
+                import data_loader
+
+                _load_history = getattr(data_loader, "load_performance_history", None)
+                if callable(_load_history):
+                    history = _load_history() or []
+            except Exception:
+                history = []
         if baseline_mapping is None:
-            import data_loader
-            baseline_mapping = data_loader.load_baseline_performance() or {}
+            baseline_mapping = {}
+            try:
+                import data_loader
+
+                _load_baseline = getattr(data_loader, "load_baseline_performance", None)
+                if callable(_load_baseline):
+                    baseline_mapping = _load_baseline() or {}
+            except Exception:
+                baseline_mapping = {}
         
         summary["trigger_1_low_performance"] = trigger_repeated_low_performance(
             history=history,

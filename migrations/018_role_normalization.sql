@@ -28,6 +28,11 @@ BEGIN
 END $$;
 
 -- 3. Patch the join-tenant RPC so new members land as "manager" by default.
+--    Existing migration 003 created this function returning uuid, so we must
+--    drop it before recreating with a jsonb return type.
+DROP FUNCTION IF EXISTS join_tenant_by_invite(uuid, text, text);
+DROP FUNCTION IF EXISTS join_tenant_by_invite(uuid, text);
+
 CREATE OR REPLACE FUNCTION join_tenant_by_invite(
   p_user_id   uuid,
   p_invite_code text,

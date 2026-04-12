@@ -21,7 +21,7 @@ def test_build_employee_detail_context_includes_summary_basis_and_before_after()
 
     ctx = build_employee_detail_context(emp_id="E1", goal_row=goal_row, history_rows=history_rows, lookback_days=10, comparison_days=3)
 
-    assert ctx["current_state"] == "moving up from recent pace"
+    assert ctx["current_state"] == "Higher than recent pace"
     assert ctx["signal_summary"]["current_state"] == ctx["current_state"]
     assert ctx["why_this_is_showing"]["trigger"]
     assert "Configured target baseline" in ctx["what_this_is_based_on"]["baseline_used"]

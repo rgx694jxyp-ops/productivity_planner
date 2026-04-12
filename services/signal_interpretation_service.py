@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from dataclasses import replace
 
 from domain.insight_card_contract import (
@@ -42,6 +42,185 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except Exception:
+        try:
+            return date.fromisoformat(text[:10])
+        except Exception:
+            return None
+
+
+def _format_short_date(value: date | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value.strftime('%b')} {value.day}"
+
+
+def format_observed_label(observed_date: date | None, *, today: date | None = None, is_shift_level: bool = False) -> str:
+    if observed_date is None:
+        return "n/a"
+    if today is None:
+        today = date.today()
+    if observed_date == today:
+        return "Today"
+    if observed_date == (today - timedelta(days=1)):
+        return "Previous shift" if is_shift_level else "Yesterday"
+    return _format_short_date(observed_date)
+
+
+def format_comparison_window(dates: list[date], count: int | None = None) -> str:
+    valid_dates = sorted({d for d in dates if isinstance(d, date)})
+    if not valid_dates:
+        return "n/a"
+    start = _format_short_date(valid_dates[0])
+    end = _format_short_date(valid_dates[-1])
+    window = start if start == end else f"{start}\u2013{end}"
+    span_days = (valid_dates[-1] - valid_dates[0]).days + 1
+    if count is not None and count > 0 and (count < len(valid_dates) or count < span_days):
+        return f"{count} similar days between {window}"
+    return window
+
+
+def _format_metric(value: float | None, unit: str = "") -> str:
+    if value is None:
+        return "n/a"
+    unit_suffix = f" {unit.strip()}" if str(unit or "").strip() else ""
+    return f"{float(value):.1f}{unit_suffix}"
+
+
+def _derive_signal_label(title: str) -> str:
+    text = str(title or "").strip()
+    if not text:
+        return "No clear change yet"
+    if ":" in text:
+        return text.split(":", 1)[0].strip()
+    return text
+
+
+def _standard_signal_label(trend_state: str) -> str:
+    normalized = normalize_trend_state(trend_state)
+    if normalized == "below_expected":
+        return "Below expected pace"
+    if normalized == "declining":
+        return "Lower than recent pace"
+    if normalized == "improving":
+        return "Higher than recent pace"
+    if normalized == "inconsistent":
+        return "Inconsistent performance"
+    return "Not enough history yet"
+
+
+def _derive_employee_name(title: str, fallback: str = "") -> str:
+    text = str(title or "").strip()
+    if ":" in text:
+        after = text.split(":", 1)[1].strip()
+        if after:
+            return after
+    return str(fallback or "Team").strip() or "Team"
+
+
+def _is_low_data_state(
+    *,
+    confidence: ConfidenceInfo,
+    data_completeness: DataCompletenessNote,
+    metadata: dict,
+) -> bool:
+    if bool(metadata.get("force_low_data_state")):
+        return True
+    if str(confidence.level or "").lower() != "low":
+        return False
+    sample_size = _safe_int(confidence.sample_size, 0)
+    completeness_status = str(data_completeness.status or "").lower()
+    missing_ratio = float(data_completeness.missing_ratio or 0.0)
+    return sample_size <= 2 or completeness_status in {"partial", "incomplete", "unknown"} or missing_ratio > 0.0
+
+
+def _low_data_note(sample_size: int) -> str:
+    if sample_size <= 0:
+        return "Only limited recent records available"
+    suffix = "record" if sample_size == 1 else "records"
+    return f"Only {sample_size} recent {suffix} available"
+
+
+def _build_low_data_compact_lines(sample_size: int) -> dict[str, str]:
+    return {
+        "line_1": "",
+        "line_2": "Not enough history yet",
+        "line_3": "",
+        "line_4": "",
+        "line_5": "Confidence: Low",
+        "expanded_line": _low_data_note(sample_size),
+    }
+
+
+def _build_compact_signal_lines(
+    *,
+    title: str,
+    confidence: ConfidenceInfo,
+    data_completeness: DataCompletenessNote,
+    workload_context: VolumeWorkloadContext,
+    time_context: TimeContext,
+    metadata: dict,
+) -> dict[str, str]:
+    sample_size = _safe_int(confidence.sample_size, 0)
+    if _is_low_data_state(confidence=confidence, data_completeness=data_completeness, metadata=metadata):
+        return _build_low_data_compact_lines(sample_size)
+
+    employee_name = str(metadata.get("employee_name") or _derive_employee_name(title, "Team"))
+    process_name = str(metadata.get("process_name") or workload_context.impacted_group_label or "General")
+    signal_label = str(metadata.get("signal_label") or _derive_signal_label(title))
+
+    observed_value = workload_context.observed_volume
+    observed_unit = workload_context.observed_volume_unit
+    baseline_value = workload_context.baseline_volume
+    baseline_unit = workload_context.baseline_volume_unit
+
+    today_ref = _coerce_date(metadata.get("today_date")) or (time_context.window_end.date() if time_context.window_end else date.today())
+    observed_date = (
+        _coerce_date(metadata.get("observed_date"))
+        or (time_context.window_end.date() if time_context.window_end else None)
+    )
+    is_shift_level = bool(metadata.get("is_shift_level") or False)
+    observed_window = format_observed_label(observed_date, today=today_ref, is_shift_level=is_shift_level)
+
+    comparison_dates = [_coerce_date(v) for v in list(metadata.get("comparison_dates") or [])]
+    comparison_dates = [d for d in comparison_dates if d is not None]
+    if not comparison_dates:
+        if time_context.compared_window_start:
+            comparison_dates.append(time_context.compared_window_start.date())
+        if time_context.compared_window_end:
+            comparison_dates.append(time_context.compared_window_end.date())
+    compared_window = format_comparison_window(comparison_dates, count=_safe_int(metadata.get("comparison_count"), 0) or None)
+
+    return {
+        "line_1": f"{employee_name} · {process_name}",
+        "line_2": signal_label,
+        "line_3": f"Observed: {observed_window} ({_format_metric(observed_value, observed_unit)})",
+        "line_4": f"Compared to: {compared_window} avg ({_format_metric(baseline_value, baseline_unit)})",
+        "line_5": f"Confidence: {str(confidence.level or 'low').title()}",
+    }
+
+
+def _infer_observed_date(default_today: date, *candidates: object) -> date:
+    for value in candidates:
+        parsed = _coerce_date(value)
+        if parsed is not None:
+            return parsed
+    return default_today - timedelta(days=1)
+
+
+def _infer_comparison_dates(observed_date: date, count: int) -> list[date]:
+    safe_count = max(1, int(count or 1))
+    return [observed_date - timedelta(days=offset) for offset in range(safe_count, 0, -1)]
 
 
 def _parse_iso_date(value: object) -> date | None:
@@ -185,6 +364,18 @@ def _card(
 ) -> InsightCardContract:
     merged_metadata = dict(metadata or {})
     merged_metadata["optional_review_areas"] = list(optional_review_areas or [])
+    merged_metadata.update(
+        {
+            "compact_lines": _build_compact_signal_lines(
+                title=title,
+                confidence=confidence,
+                data_completeness=data_completeness,
+                workload_context=workload_context,
+                time_context=time_context,
+                metadata=merged_metadata,
+            )
+        }
+    )
     trace_ctx = traceability or infer_traceability_context(
         compared_to_what=compared_to_what,
         time_context=time_context,
@@ -260,6 +451,8 @@ def interpret_below_expected_performance(*, row: dict, today: date) -> InsightCa
         missing_ratio=(len(missing_fields) / 2.0),
         has_core_pair=avg_uph > 0 and target_uph > 0,
     )
+    observed_date = _infer_observed_date(today, row.get("snapshot_date"), row.get("work_date"), row.get("Date"), row.get("last_observed_date"))
+    comparison_count = _safe_int(row.get("comparison_days"), 0) or 5
 
     return _card(
         insight_id=f"below_expected:{emp_id or name}",
@@ -304,6 +497,13 @@ def interpret_below_expected_performance(*, row: dict, today: date) -> InsightCa
         ],
         optional_review_areas=["Recent shift context", "Workload distribution"],
         metadata={
+            "employee_name": name,
+            "process_name": dept,
+            "signal_label": "Below expected pace",
+            "today_date": today.isoformat(),
+            "observed_date": observed_date.isoformat(),
+            "comparison_dates": [d.isoformat() for d in _infer_comparison_dates(observed_date, comparison_count)],
+            "comparison_count": comparison_count,
             "department": dept,
             "trend": trend,
             "trend_explanation": trend_explanation,
@@ -355,6 +555,8 @@ def interpret_changed_from_normal(*, row: dict, today: date) -> InsightCardContr
         missing_ratio=0.0 if avg_uph > 0 else 0.5,
         has_core_pair=avg_uph > 0,
     )
+    observed_date = _infer_observed_date(today, row.get("snapshot_date"), row.get("work_date"), row.get("Date"), row.get("last_observed_date"))
+    comparison_count = _safe_int(row.get("comparison_days"), 0) or 5
 
     return _card(
         insight_id=f"changed_normal:{emp_id or name}",
@@ -399,6 +601,13 @@ def interpret_changed_from_normal(*, row: dict, today: date) -> InsightCardContr
         ],
         optional_review_areas=["Recent schedule change", "Volume mix"],
         metadata={
+            "employee_name": name,
+            "process_name": dept,
+            "signal_label": _standard_signal_label(trend),
+            "today_date": today.isoformat(),
+            "observed_date": observed_date.isoformat(),
+            "comparison_dates": [d.isoformat() for d in _infer_comparison_dates(observed_date, comparison_count)],
+            "comparison_count": comparison_count,
             "department": dept,
             "change_pct": change_pct,
             "pattern_detected": pattern_memory.pattern_detected,
@@ -427,6 +636,7 @@ def interpret_repeated_decline(*, action: dict, today: date) -> InsightCardContr
         has_core_pair=baseline > 0 and latest > 0,
     )
 
+    observed_date = _infer_observed_date(today, action.get("last_event_at"), action.get("created_at"), action.get("follow_up_due_at"))
     return _card(
         insight_id=f"repeated_decline:{action_id or emp_id}",
         insight_kind="repeated_pattern",
@@ -478,6 +688,13 @@ def interpret_repeated_decline(*, action: dict, today: date) -> InsightCardContr
         ],
         optional_review_areas=["Recent coaching notes", "Follow-up timing"],
         metadata={
+            "employee_name": name,
+            "process_name": dept,
+            "signal_label": "Repeated pattern",
+            "today_date": today.isoformat(),
+            "observed_date": observed_date.isoformat(),
+            "comparison_dates": [today.isoformat()],
+            "comparison_count": 1,
             "pattern_detected": pattern_memory.pattern_detected,
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
@@ -496,6 +713,7 @@ def interpret_unresolved_issue(*, action: dict, today: date) -> InsightCardContr
     days_open = (today - created_on).days if created_on else 0
     due_text = str(action.get("follow_up_due_at") or "unspecified")
     pattern_memory = detect_pattern_memory_from_action(action=action, today=today)
+    observed_date = created_on or (today - timedelta(days=1))
 
     happened_text = f"This item remains open for {days_open} day(s)."
     if pattern_memory.pattern_detected:
@@ -550,6 +768,13 @@ def interpret_unresolved_issue(*, action: dict, today: date) -> InsightCardContr
         ],
         optional_review_areas=["Open duration", "Issue history"],
         metadata={
+            "employee_name": name,
+            "process_name": dept,
+            "signal_label": "Worth review",
+            "today_date": today.isoformat(),
+            "observed_date": observed_date.isoformat(),
+            "comparison_dates": [today.isoformat()],
+            "comparison_count": 1,
             "days_open": days_open,
             "pattern_detected": pattern_memory.pattern_detected,
             "pattern_kind": pattern_memory.pattern_kind,
@@ -587,6 +812,7 @@ def interpret_follow_up_due(*, action: dict, today: date) -> InsightCardContract
     if pattern_memory.pattern_detected:
         happened = f"{happened} {pattern_memory.summary}"
 
+    observed_date = due_date or (today - timedelta(days=1))
     return _card(
         insight_id=f"follow_up_due:{action_id or emp_id}",
         insight_kind="follow_up_due",
@@ -635,6 +861,13 @@ def interpret_follow_up_due(*, action: dict, today: date) -> InsightCardContract
         ],
         optional_review_areas=["Schedule consistency", "Recent updates"],
         metadata={
+            "employee_name": name,
+            "process_name": dept,
+            "signal_label": "Recently surfaced",
+            "today_date": today.isoformat(),
+            "observed_date": observed_date.isoformat(),
+            "comparison_dates": [today.isoformat()],
+            "comparison_count": 1,
             "pattern_detected": pattern_memory.pattern_detected,
             "pattern_kind": pattern_memory.pattern_kind,
             "repeat_count": pattern_memory.repeat_count,
@@ -701,7 +934,21 @@ def interpret_suspicious_or_incomplete_data(*, import_summary: dict, today: date
             )
         ],
         optional_review_areas=["Date coverage", "Missing-field diagnostics"],
-        metadata={"days": days, "emp_count": emp_count},
+        metadata={
+            "employee_name": "Imported data",
+            "process_name": "Data trust",
+            "signal_label": "Not enough history yet",
+            "today_date": today.isoformat(),
+            "observed_date": (today - timedelta(days=1)).isoformat(),
+            "comparison_dates": [
+                (today - timedelta(days=3)).isoformat(),
+                (today - timedelta(days=2)).isoformat(),
+                (today - timedelta(days=1)).isoformat(),
+            ],
+            "comparison_count": 3,
+            "days": days,
+            "emp_count": emp_count,
+        },
     )
 
 
@@ -722,6 +969,14 @@ def interpret_outcome_after_logged_activity(*, action: dict, today: date) -> Ins
         happened = f"Output is down by {abs(delta):.1f} UPH after prior logged activity."
     else:
         happened = "Outcome window exists, but before/after performance pair is incomplete."
+
+    observed_date = _infer_observed_date(today, action.get("last_event_at"), action.get("follow_up_due_at"), action.get("created_at"))
+    signal_label = "Recently surfaced"
+    if baseline > 0 and latest > 0:
+        if delta >= 1.0:
+            signal_label = "Higher than recent pace"
+        elif delta <= -1.0:
+            signal_label = "Lower than recent pace"
 
     return _card(
         insight_id=f"post_activity:{action_id or emp_id}",
@@ -778,7 +1033,19 @@ def interpret_outcome_after_logged_activity(*, action: dict, today: date) -> Ins
             )
         ],
         optional_review_areas=["Recent notes", "Shift context changes"],
-        metadata={"delta_uph": delta},
+        metadata={
+            "employee_name": name,
+            "process_name": dept,
+            "signal_label": signal_label,
+            "today_date": today.isoformat(),
+            "observed_date": observed_date.isoformat(),
+            "comparison_dates": [
+                (observed_date - timedelta(days=5)).isoformat(),
+                (observed_date - timedelta(days=1)).isoformat(),
+            ],
+            "comparison_count": 2,
+            "delta_uph": delta,
+        },
     )
 
 
