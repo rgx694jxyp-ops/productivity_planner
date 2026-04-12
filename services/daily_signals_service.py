@@ -273,6 +273,68 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
     }
 
 
+def build_transient_today_payload(*, signal_date: date, tenant_id: str) -> dict[str, Any]:
+    """Build a non-persistent Today payload.
+
+    Compatibility fallback when the ``daily_signals`` table is unavailable.
+    This computes the same read model but does not write to the database.
+    """
+    open_actions = get_open_actions(tenant_id=tenant_id, today=signal_date)
+    repeat_offenders = get_repeat_offenders(tenant_id=tenant_id, today=signal_date, open_actions=open_actions)
+    recognition_opportunities = get_ignored_high_performers(tenant_id=tenant_id, today=signal_date, open_actions=open_actions)
+    queue_items = build_action_queue(
+        open_actions=open_actions,
+        repeat_offenders=repeat_offenders,
+        recognition_opportunities=recognition_opportunities,
+        tenant_id=tenant_id,
+        today=signal_date,
+    )
+
+    goal_status, _history_rows, _snapshot_date = get_latest_snapshot_goal_status(
+        tenant_id=tenant_id,
+        days=30,
+        rebuild_if_missing=False,
+    )
+    goal_status = goal_status or []
+
+    import_summary = {
+        "days": 0,
+        "emp_count": len({str(row.get("EmployeeID") or "").strip() for row in goal_status if str(row.get("EmployeeID") or "").strip()}),
+        "below": sum(1 for row in goal_status if str(row.get("goal_status") or "") == "below_goal"),
+        "risks": 0,
+    }
+
+    home_sections = build_today_home_sections(
+        queue_items=queue_items,
+        goal_status=goal_status,
+        import_summary=import_summary,
+        today=signal_date,
+    )
+    eligible_employee_ids = {
+        str(item.drill_down.entity_id or "").strip()
+        for section_key in ("needs_attention", "changed_from_normal", "unresolved_items")
+        for item in (home_sections.get(section_key) or [])
+        if str(item.drill_down.entity_id or "").strip()
+    }
+    open_exception_rows = list_open_operational_exceptions(tenant_id=tenant_id, limit=200)
+    attention_summary = build_today_attention_summary(
+        goal_status=goal_status,
+        queue_items=queue_items,
+        open_exception_rows=open_exception_rows,
+        eligible_employee_ids=eligible_employee_ids,
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "as_of_date": signal_date.isoformat(),
+        "queue_items": queue_items,
+        "goal_status": goal_status,
+        "import_summary": import_summary,
+        "home_sections": home_sections,
+        "attention_summary": attention_summary,
+    }
+
+
 def read_precomputed_today_signals(*, tenant_id: str, signal_date: date) -> dict[str, Any] | None:
     rows = list_daily_signals(
         tenant_id=tenant_id,

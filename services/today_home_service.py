@@ -41,7 +41,20 @@ def get_today_signals(*, tenant_id: str, as_of_date: str) -> dict[str, Any] | No
         return None
     from services.daily_signals_service import read_precomputed_today_signals
 
-    return read_precomputed_today_signals(tenant_id=str(tenant_id or ""), signal_date=today_value)
+    try:
+        return read_precomputed_today_signals(tenant_id=str(tenant_id or ""), signal_date=today_value)
+    except Exception as exc:
+        # Backward-compatible fallback for environments where the
+        # daily_signals migration is not applied yet.
+        message = str(exc or "")
+        if "daily_signals" in message or "PGRST205" in message:
+            fallback_payload = fetch_precomputed_today_payload(tenant_id=str(tenant_id or ""), today=today_value)
+            if fallback_payload:
+                return fallback_payload
+            from services.daily_signals_service import build_transient_today_payload
+
+            return build_transient_today_payload(tenant_id=str(tenant_id or ""), signal_date=today_value)
+        raise
 
 
 # Safe to cache: read-only snapshot rows from the daily snapshots table.
