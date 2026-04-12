@@ -15,6 +15,16 @@ from domain.insight_card_contract import (
     TraceabilityContext,
     VolumeWorkloadContext,
 )
+from domain.display_signal import SignalLabel
+from services.display_signal_factory import build_display_signal
+from services.signal_formatting_service import (
+    format_comparison_line,
+    format_confidence_line,
+    format_observed_line,
+    format_signal_label,
+    get_signal_display_mode,
+    SignalDisplayMode,
+)
 from services.plain_language_service import (
     describe_change_pct,
     describe_goal_status,
@@ -221,35 +231,69 @@ def _build_compact_signal_lines(
 
     observed_metric = _format_metric(observed_value, observed_unit)
     baseline_metric = _format_metric(baseline_value, baseline_unit)
-    has_observed = bool(observed_window and not _is_placeholder_text(observed_metric))
-    has_comparison = bool(compared_window and not _is_placeholder_text(baseline_metric))
 
-    if not has_observed:
+    label_text = signal_label.lower()
+    if "below expected" in label_text:
+        mapped_label = "below_expected_pace"
+    elif "inconsistent" in label_text:
+        mapped_label = "inconsistent_pace"
+    elif "improving" in label_text:
+        mapped_label = "improving_pace"
+    elif "follow-up" in label_text and "overdue" in label_text:
+        mapped_label = "follow_up_overdue"
+    elif "follow-up" in label_text and "today" in label_text:
+        mapped_label = "follow_up_due_today"
+    elif "repeated" in label_text:
+        mapped_label = "repeated_pattern"
+    elif "unresolved" in label_text:
+        mapped_label = "unresolved_issue"
+    else:
+        mapped_label = "lower_than_recent_pace"
+
+    comparison_start = min(comparison_dates) if comparison_dates else None
+    comparison_end = max(comparison_dates) if comparison_dates else None
+    display_signal = build_display_signal(
+        employee_name=employee_name,
+        process=process_name,
+        signal_label=mapped_label,
+        observed_date=observed_date,
+        observed_value=observed_value,
+        comparison_start_date=comparison_start,
+        comparison_end_date=comparison_end,
+        comparison_value=baseline_value,
+        confidence=str(confidence.level or "low"),
+        data_completeness=str(data_completeness.status or "unknown"),
+        flags={"repeat": int(metadata.get("repeat_count") or 0) > 0},
+        today=today_ref,
+    )
+
+    mode = get_signal_display_mode(display_signal)
+    if mode == SignalDisplayMode.LOW_DATA:
         return {
             "line_1": "",
-            "line_2": "Not enough history yet",
+            "line_2": format_signal_label(display_signal),
             "line_3": "",
             "line_4": "",
-            "line_5": "Confidence: Low",
+            "line_5": format_confidence_line(display_signal),
             "expanded_line": "No recent performance data",
         }
 
-    if not has_comparison:
+    if mode == SignalDisplayMode.PARTIAL:
         return {
-            "line_1": f"{employee_name} · {process_name}",
-            "line_2": "Limited data available",
-            "line_3": f"Observed: {observed_window}",
+            "line_1": f"{display_signal.employee_name} · {display_signal.process}",
+            "line_2": format_signal_label(display_signal),
+            "line_3": format_observed_line(display_signal),
             "line_4": "",
-            "line_5": "Confidence: Low",
+            "line_5": format_confidence_line(display_signal),
             "expanded_line": "No comparison available",
         }
 
     return {
-        "line_1": f"{employee_name} · {process_name}",
-        "line_2": signal_label,
-        "line_3": f"Observed: {observed_window} ({observed_metric})",
-        "line_4": f"Compared to: {compared_window} avg ({baseline_metric})",
-        "line_5": f"Confidence: {str(confidence.level or 'low').title()}",
+        "line_1": f"{display_signal.employee_name} · {display_signal.process}",
+        "line_2": format_signal_label(display_signal),
+        "line_3": format_observed_line(display_signal),
+        "line_4": format_comparison_line(display_signal),
+        "line_5": format_confidence_line(display_signal),
     }
 
 

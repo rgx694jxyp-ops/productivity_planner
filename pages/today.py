@@ -6,11 +6,13 @@ Queue-first supervisor workflow focused on daily follow-through.
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from core.dependencies import _cached_employees
+from core.dependencies import _cached_employees, _log_app_error
+from domain.display_signal import DisplaySignal, SignalLabel
 from domain.insight_card_contract import InsightCardContract
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
 from services.action_metrics_service import _recent_action_outcomes, get_manager_outcome_stats
@@ -20,8 +22,18 @@ from services.exception_tracking_service import (
     resolve_operational_exception,
     summarize_open_operational_exceptions,
 )
-from services.attention_scoring_service import AttentionItem, AttentionSummary
+from services.attention_scoring_service import AttentionSummary
+from services.display_signal_factory import build_display_signal_from_attention_item, build_display_signal_from_insight_card
 from services.follow_through_service import FOLLOW_THROUGH_STATUSES, log_follow_through_event
+from services.signal_formatting_service import (
+    format_comparison_line,
+    format_confidence_line,
+    format_observed_line,
+    format_signal_label,
+    get_signal_display_mode,
+    is_signal_display_eligible,
+    SignalDisplayMode,
+)
 from services.today_home_service import get_today_signals
 from services.signal_traceability_service import traceability_payload_from_card
 from ui.state_panels import (
@@ -35,6 +47,38 @@ from ui.state_panels import (
 )
 from ui.traceability_panel import render_traceability_panel
 from ui.today_queue import render_action_queue
+
+
+_READ_CACHE_TTL_SECONDS = 45
+
+
+def _log_heavy_render_compute(name: str) -> None:
+    if not bool(st.session_state.get("_ui_render_guard_active")):
+        return
+    try:
+        _log_app_error(
+            "ui_render_guard",
+            f"Heavy compute executed during render cache miss: {name}",
+            severity="warning",
+        )
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_recent_action_outcomes(*, tenant_id: str, lookback_days: int) -> list[dict[str, Any]]:
+    _log_heavy_render_compute("_recent_action_outcomes")
+    return list(_recent_action_outcomes(lookback_days=lookback_days, tenant_id=tenant_id) or [])
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_manager_outcome_stats(*, tenant_id: str, lookback_days: int, today_iso: str) -> dict[str, Any]:
+    _log_heavy_render_compute("get_manager_outcome_stats")
+    try:
+        today_value = date.fromisoformat(str(today_iso or "")[:10])
+    except Exception:
+        today_value = date.today()
+    return dict(get_manager_outcome_stats(tenant_id=tenant_id, lookback_days=lookback_days, today=today_value) or {})
 
 
 def _apply_today_styles() -> None:
@@ -541,84 +585,47 @@ def _go_to_drill_down(item: InsightCardContract) -> None:
     st.rerun()
 
 
-def _build_attention_explanation_lines(item: AttentionItem) -> list[str]:
-    snapshot = item.snapshot or {}
+def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: str = "") -> list[str]:
     lines: list[str] = []
+    mode = get_signal_display_mode(signal)
 
-    trend_state = str(snapshot.get("trend_state") or snapshot.get("trend") or "").strip().lower()
-    if trend_state in {"declining", "below_expected", "down"}:
+    if mode == SignalDisplayMode.LOW_DATA:
+        lines.append(format_signal_label(signal) + ".")
+        lines.append(format_confidence_line(signal))
+    else:
+        lines.append(format_signal_label(signal) + ".")
+        observed_line = format_observed_line(signal)
+        if observed_line:
+            lines.append(observed_line)
+        comparison_line = format_comparison_line(signal)
+        if comparison_line:
+            lines.append(comparison_line)
+        lines.append(format_confidence_line(signal))
+
+    if signal.signal_label in {SignalLabel.LOWER_THAN_RECENT_PACE, SignalLabel.BELOW_EXPECTED_PACE}:
         lines.append("Performance has been lower than usual over recent shifts.")
-    elif trend_state in {"inconsistent"}:
+    elif signal.signal_label == SignalLabel.INCONSISTENT_PACE:
         lines.append("Performance has been inconsistent across recent shifts.")
-    elif trend_state in {"improving", "up"}:
+    elif signal.signal_label == SignalLabel.IMPROVING_PACE:
         lines.append("Performance has been higher than usual in recent shifts.")
 
-    # --- target-based secondary signal ---
-    # Reads goal_status + configured target from snapshot to annotate below-target
-    # employees. Never replaces the trend line — appended after it when both apply.
-    _goal_val = str(snapshot.get("goal_status") or "").strip().lower()
-    _raw_target = snapshot.get("expected_uph") or snapshot.get("Target UPH")
-    _raw_obs = snapshot.get("recent_average_uph") or snapshot.get("Average UPH")
-    try:
-        _target_uph = float(_raw_target or 0)
-    except (TypeError, ValueError):
-        _target_uph = 0.0
-    try:
-        _obs_uph = float(_raw_obs or 0)
-    except (TypeError, ValueError):
-        _obs_uph = 0.0
-    _targ_conf = str(snapshot.get("confidence_label") or "").strip().lower()
-    if (
-        _goal_val == "below_goal"
-        and _target_uph > 0
-        and _obs_uph > 0
-        and _targ_conf in {"high", "medium"}
-        and _obs_uph < _target_uph * 0.95
-    ):
-        has_trend_line = bool(lines)
-        if has_trend_line:
-            lines.append(f"Also below expected pace (~{_target_uph:.0f} UPH).")
-        else:
-            # Standalone: no trend context — show full target block
-            _snap_date_str = str(snapshot.get("snapshot_date") or "")[:10]
-            try:
-                _sd = date.fromisoformat(_snap_date_str) if _snap_date_str else None
-            except Exception:
-                _sd = None
-            _today_d = date.today()
-            if _sd is None:
-                _obs_label = "Recent"
-            elif (_today_d - _sd).days == 0:
-                _obs_label = "Today"
-            elif (_today_d - _sd).days == 1:
-                _obs_label = "Yesterday"
-            else:
-                _obs_label = _sd.strftime("%b ") + str(_sd.day)
-            lines.append("Below expected pace.")
-            lines.append(f"Observed: {_obs_label} ({_obs_uph:.1f})")
-            lines.append(f"Target: ~{_target_uph:.0f}")
-            lines.append(f"Confidence: {_targ_conf.title()}")
+    if bool((signal.flags or {}).get("repeat")):
+        lines.append("This pattern has appeared repeatedly in recent shifts.")
 
-    repeat_count = int(snapshot.get("repeat_count") or 0)
-    if repeat_count > 0:
-        times = "time" if repeat_count == 1 else "times"
-        lines.append(f"This pattern has appeared {repeat_count} {times} recently.")
-
-    queue_status = str(snapshot.get("_queue_status") or "").strip().lower()
-    if queue_status == "overdue":
+    if bool((signal.flags or {}).get("overdue")):
         lines.append("A follow-up was logged and is now overdue.")
-    elif queue_status == "due_today":
+    elif bool((signal.flags or {}).get("due_today")):
         lines.append("A follow-up is due today.")
 
-    confidence = str(snapshot.get("confidence_label") or "").strip().lower()
-    completeness = str(snapshot.get("data_completeness_status") or snapshot.get("completeness") or "").strip().lower()
+    confidence = signal.confidence.value
+    completeness = signal.data_completeness.value if signal.data_completeness is not None else "unknown"
     if confidence == "low":
         lines.append("Limited data available, so confidence is lower.")
     elif completeness in {"partial", "limited", "incomplete", "unknown"}:
         lines.append("Some data is missing, which reduces confidence.")
 
     if not lines:
-        fallback = str(item.attention_summary or "").strip().replace("—", "-")
+        fallback = str(fallback_summary or "").strip().replace("—", "-")
         if fallback:
             lines.append(fallback.split(".", 1)[0].strip() + ".")
 
@@ -671,7 +678,19 @@ def _render_attention_priority_section(attention: AttentionSummary) -> None:
         unsafe_allow_html=True,
     )
 
+    suppressed_debug: list[dict[str, str]] = []
     for item in attention.ranked_items:
+        display_signal = build_display_signal_from_attention_item(item=item, today=date.today())
+        if not is_signal_display_eligible(display_signal, allow_low_data_case=True):
+            suppressed_debug.append(
+                {
+                    "source": "attention",
+                    "employee": str(display_signal.employee_name),
+                    "process": str(display_signal.process),
+                    "label": str(format_signal_label(display_signal)),
+                }
+            )
+            continue
         tier = item.attention_tier
         tier_css = f"attention-item-{tier}"
         badge_css = f"attention-score-{tier}"
@@ -681,12 +700,12 @@ def _render_attention_priority_section(attention: AttentionSummary) -> None:
             st.markdown(
                 f'<div class="{tier_css}">'
                 f'<span class="attention-score-badge {badge_css}">{tier_label}</span>'
-                f"<strong>{item.employee_id}</strong>"
-                + (f" <span style='color:#5d7693;font-size:0.88rem;'>({item.process_name})</span>" if item.process_name and item.process_name.lower() != "unassigned" else "")
+                f"<strong>{display_signal.employee_name}</strong>"
+                + (f" <span style='color:#5d7693;font-size:0.88rem;'>({display_signal.process})</span>" if display_signal.process and display_signal.process.lower() != "unassigned" else "")
                 + "</div>",
                 unsafe_allow_html=True,
             )
-            explanation_lines = _build_attention_explanation_lines(item)
+            explanation_lines = _build_attention_explanation_lines(display_signal, fallback_summary=item.attention_summary)
             st.markdown(
                 f'<div class="today-insight-line">{(explanation_lines[0] if explanation_lines else item.attention_summary)}</div>',
                 unsafe_allow_html=True,
@@ -707,15 +726,37 @@ def _render_attention_priority_section(attention: AttentionSummary) -> None:
                     st.session_state["cn_selected_emp"] = item.employee_id
                     st.rerun()
 
+    if suppressed_debug:
+        st.session_state["_today_suppressed_signals_debug"] = suppressed_debug
+
 
 def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
+    display_signal = build_display_signal_from_insight_card(card=item, today=date.today())
+    if not is_signal_display_eligible(display_signal, allow_low_data_case=True):
+        suppressed = list(st.session_state.get("_today_suppressed_signals_debug") or [])
+        suppressed.append(
+            {
+                "source": "home_section",
+                "employee": str(display_signal.employee_name),
+                "process": str(display_signal.process),
+                "label": str(format_signal_label(display_signal)),
+            }
+        )
+        st.session_state["_today_suppressed_signals_debug"] = suppressed
+        return
+    mode = get_signal_display_mode(display_signal)
     with st.container(border=True):
-        compact_lines = item.metadata.get("compact_lines") or {}
-        line_1 = str(compact_lines.get("line_1") or item.title)
-        line_2 = str(compact_lines.get("line_2") or "Worth review")
-        line_3 = str(compact_lines.get("line_3") or "")
-        line_4 = str(compact_lines.get("line_4") or "")
-        line_5 = str(compact_lines.get("line_5") or f"Confidence: {item.confidence.level.title()}")
+        if mode == SignalDisplayMode.LOW_DATA:
+            line_1 = ""
+            line_2 = format_signal_label(display_signal)
+            line_3 = ""
+            line_4 = ""
+        else:
+            line_1 = f"{display_signal.employee_name} · {display_signal.process}"
+            line_2 = format_signal_label(display_signal)
+            line_3 = format_observed_line(display_signal)
+            line_4 = format_comparison_line(display_signal)
+        line_5 = format_confidence_line(display_signal)
 
         for idx, text in enumerate((line_1, line_2, line_3, line_4, line_5), start=1):
             line_text = str(text or "").strip()
@@ -728,10 +769,10 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
             else:
                 st.markdown(f'<div class="today-insight-line">{line_text}</div>', unsafe_allow_html=True)
 
-        low_data_state = bool(compact_lines.get("expanded_line"))
+        low_data_state = mode == SignalDisplayMode.LOW_DATA
 
         why_line = str(item.metadata.get("secondary_status") or "").strip()
-        basis_line = str(compact_lines.get("line_4") or "").strip()
+        basis_line = line_4
         data_note = str(item.data_completeness.summary or "").strip()
         has_extra = bool(low_data_state or why_line or basis_line or (data_note and item.data_completeness.status != "complete"))
 
@@ -740,7 +781,7 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
             if has_extra:
                 with st.expander("Signal explanation", expanded=False):
                     if low_data_state:
-                        st.caption(str(compact_lines.get("expanded_line") or "Only limited recent records available"))
+                        st.caption("Only limited recent records available")
                     else:
                         if why_line:
                             st.write(f"Why: {why_line}")
@@ -787,21 +828,23 @@ def _render_home_section(
 
 
 def page_today() -> None:
-    if "tenant_id" not in st.session_state:
-        st.session_state.tenant_id = ""
+    st.session_state["_ui_render_guard_active"] = True
+    try:
+        if "tenant_id" not in st.session_state:
+            st.session_state.tenant_id = ""
 
-    if "today_queue_filter" not in st.session_state:
-        st.session_state.today_queue_filter = "all"
+        if "today_queue_filter" not in st.session_state:
+            st.session_state.today_queue_filter = "all"
 
-    today_value = date.today()
+        today_value = date.today()
 
-    _apply_today_styles()
+        _apply_today_styles()
 
-    _trace_ctx = st.session_state.get("_drill_traceability_context") or {}
-    if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"today", ""}:
-        render_traceability_panel(_trace_ctx, heading="Signal source context")
+        _trace_ctx = st.session_state.get("_drill_traceability_context") or {}
+        if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"today", ""}:
+            render_traceability_panel(_trace_ctx, heading="Signal source context")
 
-    st.markdown(
+        st.markdown(
         """
     <div class="today-hero">
         <div class="today-hero-kicker">Today Queue</div>
@@ -811,11 +854,11 @@ def page_today() -> None:
     """,
         unsafe_allow_html=True,
     )
-    _show_flash_message()
+        _show_flash_message()
 
-    refresh_col, _ = st.columns([1, 4])
-    with refresh_col:
-        if st.button("Refresh signals", key="today_refresh_precomputed_signals", use_container_width=True):
+        refresh_col, _ = st.columns([1, 4])
+        with refresh_col:
+            if st.button("Refresh signals", key="today_refresh_precomputed_signals", use_container_width=True):
             try:
                 from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
 
@@ -846,7 +889,7 @@ def page_today() -> None:
                 show_error_state(f"Signal refresh failed: {_refresh_err}")
                 return
 
-    try:
+        try:
         # Today page is read-only: it renders precomputed signals and summaries
         # and does not run trigger pipelines, trend computation, or scoring.
         precomputed = get_today_signals(
@@ -902,14 +945,14 @@ def page_today() -> None:
 
         if not goal_status:
             goal_status = []
-    except Exception as exc:
-        show_error_state(f"Today screen data could not load cleanly: {exc}")
-        return
+        except Exception as exc:
+            show_error_state(f"Today screen data could not load cleanly: {exc}")
+            return
 
-    state_flags = _compute_data_state_flags(goal_status, import_summary, home_sections)
-    if state_flags["no_data"]:
-        show_no_data_state()
-    if state_flags["partial_data"]:
+        state_flags = _compute_data_state_flags(goal_status, import_summary, home_sections)
+        if state_flags["no_data"]:
+            show_no_data_state()
+        if state_flags["partial_data"]:
         missing_days = int(import_summary.get("days") or 0)
         partial_note = (
             f"Current history window is {missing_days} day(s). More days improve trend reliability."
@@ -917,19 +960,19 @@ def page_today() -> None:
             else "Some trend rows are incomplete and will become more reliable as data coverage grows."
         )
         show_partial_data_state(partial_note)
-    if state_flags["low_confidence"]:
-        show_low_confidence_state("Low-confidence signals are shown with clear caveats and may update as new data arrives.")
-    if state_flags["healthy"] and counts.get("all", 0) == 0:
-        show_healthy_state()
+        if state_flags["low_confidence"]:
+            show_low_confidence_state("Low-confidence signals are shown with clear caveats and may update as new data arrives.")
+        if state_flags["healthy"] and counts.get("all", 0) == 0:
+            show_healthy_state()
 
-    _render_attention_priority_section(attention_summary)
-    st.write("")
+        _render_attention_priority_section(attention_summary)
+        st.write("")
 
-    st.markdown('<div class="today-section-label">Queue Summary</div>', unsafe_allow_html=True)
-    _render_summary_strip(counts, st.session_state.today_queue_filter)
-    st.write("")
+        st.markdown('<div class="today-section-label">Queue Summary</div>', unsafe_allow_html=True)
+        _render_summary_strip(counts, st.session_state.today_queue_filter)
+        st.write("")
 
-    _render_home_section(
+        _render_home_section(
         section_title="Recently Surfaced",
         section_description="Open items currently visible in recent queue context.",
         items=home_sections.get("needs_attention", []),
@@ -938,7 +981,7 @@ def page_today() -> None:
         placeholder_todo="TODO: Keep this section linked to real-time queue trigger refresh cadence.",
     )
 
-    _render_home_section(
+        _render_home_section(
         section_title="Changed from Normal",
         section_description="Visible shifts in trend compared with each person's recent baseline context.",
         items=home_sections.get("changed_from_normal", []),
@@ -947,7 +990,7 @@ def page_today() -> None:
         placeholder_todo="TODO: Expand trend confidence when enough consecutive observations are present.",
     )
 
-    _render_home_section(
+        _render_home_section(
         section_title="Unresolved Items",
         section_description="Items that remain open past expected follow-up timing or appear repeatedly.",
         items=home_sections.get("unresolved_items", []),
@@ -956,7 +999,7 @@ def page_today() -> None:
         placeholder_todo="TODO: Add issue-type specific unresolved-age benchmarks once service defaults are finalized.",
     )
 
-    _render_home_section(
+        _render_home_section(
         section_title="Data Warnings",
         section_description="Data quality and completeness context that may affect signal confidence.",
         items=home_sections.get("data_warnings", []),
@@ -965,33 +1008,38 @@ def page_today() -> None:
         placeholder_todo="TODO: Wire structured import diagnostics for row-level completeness breakdown.",
     )
 
-    main_signal_count = sum(
+        main_signal_count = sum(
         len(home_sections.get(section_key) or [])
         for section_key in ("needs_attention", "changed_from_normal", "unresolved_items")
     )
-    if main_signal_count == 0:
-        st.markdown('<div class="today-supporting-note"><strong>Nothing important changed today</strong></div>', unsafe_allow_html=True)
+        if main_signal_count == 0:
+            st.markdown('<div class="today-supporting-note"><strong>Nothing important changed today</strong></div>', unsafe_allow_html=True)
 
-    suppressed_signals = list(home_sections.get("suppressed_signals") or [])
-    if suppressed_signals:
+        suppressed_signals = list(home_sections.get("suppressed_signals") or [])
+        if suppressed_signals:
         with st.expander(f"Suppressed signals ({len(suppressed_signals)})", expanded=False):
             st.caption("Hidden from main view by display eligibility rules.")
             for item in suppressed_signals[:20]:
-                compact = item.metadata.get("compact_lines") or {}
-                title = str(compact.get("line_1") or item.title)
-                label = str(compact.get("line_2") or "")
+                signal = build_display_signal_from_insight_card(card=item, today=today_value)
+                if not is_signal_display_eligible(signal, allow_low_data_case=True):
+                    continue
+                title = f"{signal.employee_name} · {signal.process}"
+                label = format_signal_label(signal)
                 st.write(f"{title}")
                 if label:
                     st.caption(label)
 
-    _render_open_exceptions(tenant_id=st.session_state.tenant_id)
+        _render_open_exceptions(tenant_id=st.session_state.tenant_id)
 
-    filtered_queue = _filter_queue(queue_items, st.session_state.today_queue_filter)
-    recent_outcomes = _recent_action_outcomes(lookback_days=1, tenant_id=st.session_state.tenant_id)
+        filtered_queue = _filter_queue(queue_items, st.session_state.today_queue_filter)
+        recent_outcomes = _cached_recent_action_outcomes(
+        lookback_days=1,
+        tenant_id=str(st.session_state.tenant_id or ""),
+    )
 
-    st.markdown('<div class="today-section-label">Action Queue Details</div>', unsafe_allow_html=True)
-    st.markdown('<div class="today-supporting-note">Expanded evidence and logging controls for open queue items.</div>', unsafe_allow_html=True)
-    if filtered_queue:
+        st.markdown('<div class="today-section-label">Action Queue Details</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-supporting-note">Expanded evidence and logging controls for open queue items.</div>', unsafe_allow_html=True)
+        if filtered_queue:
         st.caption(f"Showing {len(filtered_queue)} actionable item{'s' if len(filtered_queue) != 1 else ''}.")
         render_action_queue(
             queue_items=filtered_queue,
@@ -999,9 +1047,9 @@ def page_today() -> None:
             performed_by=str(st.session_state.get("user_email", "supervisor") or "supervisor"),
             today=today_value,
         )
-    elif counts["all"]:
-        _render_filtered_empty_state()
-    else:
+        elif counts["all"]:
+            _render_filtered_empty_state()
+        else:
         # Check if this is first-time user (just completed import)
         is_first_time = st.session_state.get("_first_import_just_completed", False)
         if is_first_time:
@@ -1010,15 +1058,17 @@ def page_today() -> None:
         else:
             _render_empty_state()
 
-    st.write("")
-    st.markdown('<div class="today-section-label">Since Yesterday</div>', unsafe_allow_html=True)
-    _render_since_yesterday(queue_items, recent_outcomes)
+        st.write("")
+        st.markdown('<div class="today-section-label">Since Yesterday</div>', unsafe_allow_html=True)
+        _render_since_yesterday(queue_items, recent_outcomes)
 
-    st.write("")
-    manager_stats = get_manager_outcome_stats(
-        tenant_id=st.session_state.tenant_id,
+        st.write("")
+        manager_stats = _cached_manager_outcome_stats(
+        tenant_id=str(st.session_state.tenant_id or ""),
         lookback_days=7,
-        today=today_value,
+        today_iso=today_value.isoformat(),
     )
-    st.markdown('<div class="today-section-label">Supporting Context</div>', unsafe_allow_html=True)
-    _render_bottom_charts(queue_items, manager_stats)
+        st.markdown('<div class="today-section-label">Supporting Context</div>', unsafe_allow_html=True)
+        _render_bottom_charts(queue_items, manager_stats)
+    finally:
+        st.session_state["_ui_render_guard_active"] = False

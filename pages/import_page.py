@@ -2157,36 +2157,58 @@ def _import_step3(tenant_id: str):
                 "alloc_has_date":    has_date_col,
             })
 
-            # Post-import action engine refresh (kept in background flow).
+            # Post-import refresh can be expensive on larger files. Defer heavy
+            # work so "Run pipeline" completes quickly instead of appearing stuck.
             try:
-                bar.progress(95, text="Refreshing signals and actions…")
+                _batch_size = int(len(uph_batch or []))
+                _should_defer_refresh = _batch_size >= 300
+                bar.progress(95, text="Finalizing import…")
 
-                # Refresh performance signals from archived pipeline output.
-                from pages.common import load_goal_status_history as _load_goal_status_history
-                _gs_after, _history_after = _load_goal_status_history("Refreshing performance signals…")
+                if _should_defer_refresh:
+                    st.session_state["_post_import_refresh_pending"] = True
+                    st.session_state["_last_action_engine_refresh"] = {
+                        "status": "deferred",
+                        "reason": "large_import",
+                        "batch_size": _batch_size,
+                        "queued_at": get_user_timezone_now(tenant_id).isoformat(timespec="seconds"),
+                    }
+                    _log_operational_event(
+                        "post_import_refresh_deferred",
+                        status="queued",
+                        tenant_id=tenant_id,
+                        context={"batch_size": _batch_size},
+                    )
+                else:
+                    bar.progress(95, text="Refreshing signals and actions…")
 
-                # Generate actions from latest signals and normalize open statuses.
-                from services.action_lifecycle_service import run_all_triggers as _run_all_triggers, refresh_action_statuses as _refresh_action_statuses
+                    # Refresh performance signals from archived pipeline output.
+                    from pages.common import load_goal_status_history as _load_goal_status_history
+                    _gs_after, _history_after = _load_goal_status_history("Refreshing performance signals…")
 
-                _trigger_summary = _run_all_triggers(
-                    history=_history_after or [],
-                    tenant_id=tenant_id,
-                )
-                _status_updates = _refresh_action_statuses(tenant_id=tenant_id)
+                    # Generate actions from latest signals and normalize open statuses.
+                    from services.action_lifecycle_service import run_all_triggers as _run_all_triggers, refresh_action_statuses as _refresh_action_statuses
 
-                # Precompute daily signals so Today stays read-only and fast.
-                from services.daily_signals_service import compute_daily_signals
+                    _trigger_summary = _run_all_triggers(
+                        history=_history_after or [],
+                        tenant_id=tenant_id,
+                    )
+                    _status_updates = _refresh_action_statuses(tenant_id=tenant_id)
 
-                compute_daily_signals(
-                    signal_date=date.today(),
-                    tenant_id=tenant_id,
-                )
+                    # Precompute daily signals so Today stays read-only and fast.
+                    from services.daily_signals_service import compute_daily_signals
 
-                st.session_state["_last_action_engine_refresh"] = {
-                    "trigger_summary": _trigger_summary,
-                    "status_updates": int(_status_updates or 0),
-                    "refreshed_at": get_user_timezone_now(tenant_id).isoformat(timespec="seconds"),
-                }
+                    compute_daily_signals(
+                        signal_date=date.today(),
+                        tenant_id=tenant_id,
+                    )
+
+                    st.session_state["_post_import_refresh_pending"] = False
+                    st.session_state["_last_action_engine_refresh"] = {
+                        "status": "completed",
+                        "trigger_summary": _trigger_summary,
+                        "status_updates": int(_status_updates or 0),
+                        "refreshed_at": get_user_timezone_now(tenant_id).isoformat(timespec="seconds"),
+                    }
             except Exception as _action_refresh_err:
                 _log_app_error(
                     "pipeline",

@@ -10,6 +10,7 @@ from core.dependencies import (
 )
 from services.plan_service import get_available_employee_views
 from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback, init_runtime
+from typing import Any
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
 
 init_runtime()
@@ -24,6 +25,15 @@ from services.action_lifecycle_service import log_coaching_lifecycle_entry
 from services.action_query_service import get_employee_action_timeline, get_employee_actions
 from services.activity_comparison_service import list_recent_activity_comparisons, summarize_activity_comparisons
 from services.employee_detail_service import build_employee_detail_context
+from services.display_signal_factory import build_display_signal, build_display_signal_from_employee_detail_context
+from services.signal_formatting_service import (
+    format_comparison_line,
+    format_confidence_line,
+    format_observed_line,
+    format_signal_label,
+    get_signal_display_mode,
+    SignalDisplayMode,
+)
 from services.team_process_service import build_team_process_contexts
 from services.exception_tracking_service import (
     build_exception_context_line,
@@ -87,11 +97,89 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+_READ_CACHE_TTL_SECONDS = 45
+
+
+def _log_heavy_render_compute(name: str) -> None:
+    if not bool(st.session_state.get("_ui_render_guard_active")):
+        return
+    try:
+        _log_app_error(
+            "ui_render_guard",
+            f"Heavy compute executed during render cache miss: {name}",
+            severity="warning",
+        )
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_employee_detail_context(*, emp_id: str, goal_row: dict[str, Any], history_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    _log_heavy_render_compute("build_employee_detail_context")
+    return dict(build_employee_detail_context(emp_id=emp_id, goal_row=goal_row, history_rows=history_rows) or {})
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_employee_action_timeline(*, emp_id: str, tenant_id: str) -> list[dict[str, Any]]:
+    _log_heavy_render_compute("get_employee_action_timeline")
+    return list(get_employee_action_timeline(emp_id, tenant_id=tenant_id) or [])
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_recent_operational_exceptions(*, tenant_id: str, employee_id: str, limit: int) -> list[dict[str, Any]]:
+    _log_heavy_render_compute("list_recent_operational_exceptions")
+    return list(list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=employee_id, limit=limit) or [])
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_follow_through_summary(*, tenant_id: str, employee_id: str, limit: int) -> dict[str, Any]:
+    _log_heavy_render_compute("summarize_follow_through_events")
+    return dict(summarize_follow_through_events(tenant_id=tenant_id, employee_id=employee_id, limit=limit) or {})
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_recent_activity_comparisons(
+    *,
+    tenant_id: str,
+    history_rows: list[dict[str, Any]],
+    expected_uph_by_employee: dict[str, float],
+    employee_id: str = "",
+    per_employee_latest_only: bool = False,
+    include_weak_signals: bool = False,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    _log_heavy_render_compute("list_recent_activity_comparisons")
+    return list(
+        list_recent_activity_comparisons(
+            tenant_id=tenant_id,
+            history_rows=history_rows,
+            expected_uph_by_employee=expected_uph_by_employee,
+            employee_id=employee_id,
+            per_employee_latest_only=per_employee_latest_only,
+            include_weak_signals=include_weak_signals,
+            limit=limit,
+        )
+        or []
+    )
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_activity_comparison_summary(comparisons: list[dict[str, Any]]) -> dict[str, Any]:
+    _log_heavy_render_compute("summarize_activity_comparisons")
+    return dict(summarize_activity_comparisons(comparisons) or {})
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_team_process_contexts(*, goal_status_rows: list[dict[str, Any]], history_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    _log_heavy_render_compute("build_team_process_contexts")
+    return dict(build_team_process_contexts(goal_status_rows=goal_status_rows, history_rows=history_rows) or {})
+
+
 def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: str, emp_dept: str) -> None:
     st.subheader("Operational Exceptions")
     st.caption("Operational context linked to this employee that may help explain recent performance.")
 
-    recent_rows = list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=20)
+    recent_rows = _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=20)
     open_rows = [row for row in recent_rows if str(row.get("status") or "") == "open"]
 
     with st.expander("Log linked exception", expanded=False):
@@ -175,9 +263,9 @@ def _render_employee_follow_through_panel(*, tenant_id: str, emp_id: str, emp_na
     st.subheader("Follow-through Log")
     st.caption("Quick log of what was checked, scheduled, or observed. New entries are stored in the lightweight follow-through log.")
 
-    exception_rows = list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=12)
+    exception_rows = _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=12)
     exception_lookup = {str(row.get("id") or ""): row for row in exception_rows}
-    summary = summarize_follow_through_events(tenant_id=tenant_id, employee_id=emp_id, limit=20)
+    summary = _cached_follow_through_summary(tenant_id=tenant_id, employee_id=emp_id, limit=20)
     rows = summary.get("rows") or []
 
     exception_options = {"Not linked to an exception": ""}
@@ -266,6 +354,19 @@ def _render_employee_follow_through_panel(*, tenant_id: str, emp_id: str, emp_na
 
 
 def _render_activity_comparison_card(comparison: dict, *, show_employee_id: bool = False) -> None:
+    display_signal = build_display_signal(
+        employee_name=comparison.get("employee_name") or comparison.get("employee_id") or "Unknown employee",
+        process=comparison.get("process_name") or comparison.get("department") or "Unassigned",
+        signal_label="lower_than_recent_pace",
+        observed_date=comparison.get("observed_date") or date.today(),
+        observed_value=comparison.get("observed_value") or comparison.get("after_avg") or comparison.get("after_value"),
+        comparison_start_date=comparison.get("comparison_start_date"),
+        comparison_end_date=comparison.get("comparison_end_date"),
+        comparison_value=comparison.get("comparison_value") or comparison.get("before_avg") or comparison.get("baseline_value"),
+        confidence=comparison.get("confidence_label") or "low",
+        data_completeness=comparison.get("data_completeness_status") or "unknown",
+        today=date.today(),
+    )
     with st.container(border=True):
         st.markdown(f"**{comparison.get('outcome_label', 'No clear change yet')}**")
         if show_employee_id and str(comparison.get("employee_id") or "").strip():
@@ -274,9 +375,11 @@ def _render_activity_comparison_card(comparison: dict, *, show_employee_id: bool
             f"What happened: {comparison.get('what_happened')} | Compared to what: {comparison.get('compared_to_what')}"
         )
         st.caption(f"Why shown: {comparison.get('why_shown')}")
-        st.caption(
-            f"Confidence: {comparison.get('confidence_label')} | Data supports: {comparison.get('data_supports')}"
-        )
+        observed_line = format_observed_line(display_signal)
+        comparison_line = format_comparison_line(display_signal)
+        confidence_line = format_confidence_line(display_signal)
+        st.caption(f"{observed_line}{(' | ' + comparison_line) if comparison_line else ''}")
+        st.caption(f"{confidence_line} | Data supports: {comparison.get('data_supports')}")
         comparison_breakdown = comparison.get("comparison_breakdown") or {}
         for key in ("compared_to_target", "compared_to_recent_performance", "compared_to_recent_average"):
             text = str(comparison_breakdown.get(key) or "").strip()
@@ -296,15 +399,22 @@ def _render_activity_comparison_card(comparison: dict, *, show_employee_id: bool
                 )
 
 
-def _render_employee_signal_summary(detail_context: dict) -> None:
+def _render_employee_signal_summary(*, detail_context: dict, employee_name: str, process: str) -> None:
     summary = detail_context.get("signal_summary") or {}
+    signal = build_display_signal_from_employee_detail_context(
+        detail_context=detail_context,
+        employee_name=employee_name,
+        process=process,
+        today=date.today(),
+    )
     st.subheader("Signal Summary")
     with st.container(border=True):
-        line_1 = str(summary.get("line_1") or "Employee · Team")
-        line_2 = str(summary.get("line_2") or summary.get("current_state") or detail_context.get("current_state") or "No clear change yet")
-        line_3 = str(summary.get("line_3") or "")
-        line_4 = str(summary.get("line_4") or "")
-        line_5 = str(summary.get("line_5") or f"Confidence: {str(summary.get('confidence_label') or detail_context.get('confidence_label') or 'Low')}")
+        mode = get_signal_display_mode(signal)
+        line_1 = f"{signal.employee_name} · {signal.process}"
+        line_2 = format_signal_label(signal)
+        line_3 = format_observed_line(signal) if mode != SignalDisplayMode.LOW_DATA else ""
+        line_4 = format_comparison_line(signal) if mode == SignalDisplayMode.FULL else ""
+        line_5 = format_confidence_line(signal)
 
         for idx, line in enumerate((line_1, line_2, line_3, line_4, line_5), start=1):
             text = str(line or "").strip()
@@ -316,22 +426,28 @@ def _render_employee_signal_summary(detail_context: dict) -> None:
                 st.write(text)
 
 
-def _render_employee_signal_explainer(detail_context: dict) -> None:
+def _render_employee_signal_explainer(*, detail_context: dict, employee_name: str, process: str) -> None:
     why = detail_context.get("why_this_is_showing") or {}
     basis = detail_context.get("what_this_is_based_on") or {}
-    summary = detail_context.get("signal_summary") or {}
+    signal = build_display_signal_from_employee_detail_context(
+        detail_context=detail_context,
+        employee_name=employee_name,
+        process=process,
+        today=date.today(),
+    )
+    mode = get_signal_display_mode(signal)
 
     why_line = str(why.get("why_now") or why.get("trigger") or "").strip()
-    basis_line = str(summary.get("line_4") or "").strip().replace("Compared to: ", "")
+    basis_line = str(format_comparison_line(signal) or "").strip().replace("Compared to: ", "")
     data_note = str(
-        summary.get("data_completeness_note")
+        (detail_context.get("signal_summary") or {}).get("data_completeness_note")
         or basis.get("missing_data_note")
         or detail_context.get("data_completeness_note")
         or ""
     ).strip()
 
-    if bool(summary.get("low_data_state") or detail_context.get("low_data_state")):
-        one_line_note = str(summary.get("low_data_note") or detail_context.get("low_data_note") or "Only limited recent records available").strip()
+    if mode == SignalDisplayMode.LOW_DATA:
+        one_line_note = str((detail_context.get("signal_summary") or {}).get("low_data_note") or detail_context.get("low_data_note") or "Only limited recent records available").strip()
         if one_line_note:
             with st.expander("Signal explanation", expanded=False):
                 st.caption(one_line_note)
@@ -346,7 +462,7 @@ def _render_employee_signal_explainer(detail_context: dict) -> None:
             st.write(f"Why: {why_line}")
         if basis_line:
             st.write(f"Based on: {basis_line}")
-        if data_note and str(summary.get("data_completeness_label") or "").strip().lower() not in {"", "data mostly complete"}:
+        if data_note and str((detail_context.get("signal_summary") or {}).get("data_completeness_label") or "").strip().lower() not in {"", "data mostly complete"}:
             st.caption(f"Data note: {data_note}")
 
 
@@ -380,7 +496,7 @@ def _render_related_action_events(*, timeline: list[dict]) -> None:
 
 
 def _render_employee_activity_comparisons(*, tenant_id: str, emp_id: str, expected_uph: float, history_rows: list[dict]) -> None:
-    comparisons = list_recent_activity_comparisons(
+    comparisons = _cached_recent_activity_comparisons(
         tenant_id=tenant_id,
         history_rows=history_rows,
         expected_uph_by_employee={emp_id: expected_uph},
@@ -395,7 +511,7 @@ def _render_employee_activity_comparisons(*, tenant_id: str, emp_id: str, expect
         return
     strong_comparisons = [row for row in comparisons if not bool(row.get("is_weak_signal"))]
     weak_comparisons = [row for row in comparisons if bool(row.get("is_weak_signal"))]
-    summary = summarize_activity_comparisons(strong_comparisons)
+    summary = _cached_activity_comparison_summary(strong_comparisons)
     m1, m2, m3 = st.columns(3)
     m1.metric("Improved", int(summary.get("improved_count", 0) or 0))
     m2.metric("No clear change yet", int(summary.get("no_clear_change_count", 0) or 0))
@@ -417,7 +533,7 @@ def _render_team_activity_comparisons(*, tenant_id: str, history_rows: list[dict
         for row in goal_status or []
         if str(row.get("EmployeeID") or "").strip()
     }
-    comparisons = list_recent_activity_comparisons(
+    comparisons = _cached_recent_activity_comparisons(
         tenant_id=tenant_id,
         history_rows=history_rows,
         expected_uph_by_employee=expected_uph_by_employee,
@@ -430,7 +546,7 @@ def _render_team_activity_comparisons(*, tenant_id: str, history_rows: list[dict
     if not comparisons:
         show_partial_data_state("Recent logged activity does not yet have enough comparable before/after data across the team.")
         return
-    summary = summarize_activity_comparisons(comparisons)
+    summary = _cached_activity_comparison_summary(comparisons)
     m1, m2, m3 = st.columns(3)
     m1.metric("Improved", int(summary.get("improved_count", 0) or 0))
     m2.metric("No clear change yet", int(summary.get("no_clear_change_count", 0) or 0))
@@ -448,7 +564,7 @@ def _render_team_process_view(
     st.subheader("Team / Process Signals")
     st.caption("Use this view to understand whether recent patterns are isolated to one person or systemic across a process.")
 
-    context = build_team_process_contexts(goal_status_rows=goal_status, history_rows=history_rows)
+    context = _cached_team_process_contexts(goal_status_rows=goal_status, history_rows=history_rows)
     cards = context.get("cards") or []
     if not cards:
         show_partial_data_state("No team/process signal context is available yet.")
@@ -561,6 +677,7 @@ def _render_team_process_view(
 def page_employees():
     st.title("👥 Employees")
     if not require_db(): return
+    st.session_state["_ui_render_guard_active"] = True
     tenant_id = str(st.session_state.get("tenant_id", "") or "")
 
     _trace_ctx = st.session_state.get("_drill_traceability_context") or {}
@@ -616,6 +733,8 @@ def page_employees():
     except Exception as e:
         show_error_state(f"Employees view could not load cleanly: {e}")
         _log_app_error("employees", f"Employee page error: {e}", detail=traceback.format_exc())
+    finally:
+        st.session_state["_ui_render_guard_active"] = False
 
 
 
@@ -948,14 +1067,14 @@ def _emp_coaching():
 
             # UPH status + delta since last view
             _emp_gs = next((r for r in gs if str(r.get("EmployeeID","")) == str(emp_id)), None)
-            _detail_context = build_employee_detail_context(
+            _detail_context = _cached_employee_detail_context(
                 emp_id=emp_id,
                 goal_row=_emp_gs or {},
                 history_rows=history_rows,
             )
-            _timeline = get_employee_action_timeline(emp_id, tenant_id=tenant_id)
-            _recent_exception_rows = list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=6)
-            _follow_through_summary = summarize_follow_through_events(tenant_id=tenant_id, employee_id=emp_id, limit=6)
+            _timeline = _cached_employee_action_timeline(emp_id=emp_id, tenant_id=tenant_id)
+            _recent_exception_rows = _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=6)
+            _follow_through_summary = _cached_follow_through_summary(tenant_id=tenant_id, employee_id=emp_id, limit=6)
             if _emp_gs:
                 _trend_icon = {"up": "↑", "down": "↓", "flat": "→"}.get(_emp_gs.get("trend",""), "—")
                 _chg = _emp_gs.get("change_pct", 0)
@@ -993,7 +1112,11 @@ def _emp_coaching():
                 else:
                     st.caption("No coaching on record yet.")
 
-            _render_employee_signal_summary(_detail_context)
+            _render_employee_signal_summary(
+                detail_context=_detail_context,
+                employee_name=str(emp_name or emp_id),
+                process=str(emp_dept or "Unassigned"),
+            )
             if (
                 not bool(_detail_context.get("has_notable_signal"))
                 and not _timeline
@@ -1006,7 +1129,11 @@ def _emp_coaching():
                     show_partial_data_state("This employee card is waiting for enough recent comparable records to classify trend and before/after impact.")
                 if str(_detail_context.get("healthy_state_message") or "").strip():
                     st.caption(str(_detail_context.get("healthy_state_message") or ""))
-            _render_employee_signal_explainer(_detail_context)
+            _render_employee_signal_explainer(
+                detail_context=_detail_context,
+                employee_name=str(emp_name or emp_id),
+                process=str(emp_dept or "Unassigned"),
+            )
 
             st.divider()
 

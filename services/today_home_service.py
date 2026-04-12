@@ -49,11 +49,9 @@ def get_today_signals(*, tenant_id: str, as_of_date: str) -> dict[str, Any] | No
         message = str(exc or "")
         if "daily_signals" in message or "PGRST205" in message:
             fallback_payload = fetch_precomputed_today_payload(tenant_id=str(tenant_id or ""), today=today_value)
-            if fallback_payload:
-                return fallback_payload
-            from services.daily_signals_service import build_transient_today_payload
-
-            return build_transient_today_payload(tenant_id=str(tenant_id or ""), signal_date=today_value)
+            # Keep render path read-only: do not compute transient payload here.
+            # Heavy signal computation is triggered only by explicit refresh/import.
+            return fallback_payload
         raise
 
 
