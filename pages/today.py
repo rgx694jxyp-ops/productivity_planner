@@ -13,33 +13,27 @@ import streamlit as st
 from core.dependencies import _cached_employees
 from domain.insight_card_contract import InsightCardContract
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
-from pages.common import load_goal_status_history
-from services.action_lifecycle_service import run_all_triggers
 from services.action_metrics_service import _recent_action_outcomes, get_manager_outcome_stats
-from services.action_query_service import get_open_actions
-from services.action_recommendation_service import get_ignored_high_performers, get_repeat_offenders
 from services.exception_tracking_service import (
     build_exception_context_line,
     create_operational_exception,
-    list_open_operational_exceptions,
     resolve_operational_exception,
     summarize_open_operational_exceptions,
 )
 from services.attention_scoring_service import AttentionItem, AttentionSummary
 from services.follow_through_service import FOLLOW_THROUGH_STATUSES, log_follow_through_event
-from services.today_home_service import build_today_attention_summary, build_today_home_sections
+from services.today_home_service import get_today_signals
 from services.signal_traceability_service import traceability_payload_from_card
 from ui.state_panels import (
     show_error_state,
     show_healthy_state,
-    show_loading_state,
     show_low_confidence_state,
     show_no_data_state,
     show_partial_data_state,
     show_success_state,
 )
 from ui.traceability_panel import render_traceability_panel
-from ui.today_queue import build_action_queue, render_action_queue
+from ui.today_queue import render_action_queue
 
 
 def _apply_today_styles() -> None:
@@ -546,6 +540,57 @@ def _go_to_drill_down(item: InsightCardContract) -> None:
     st.rerun()
 
 
+def _build_attention_explanation_lines(item: AttentionItem) -> list[str]:
+    snapshot = item.snapshot or {}
+    lines: list[str] = []
+
+    trend_state = str(snapshot.get("trend_state") or snapshot.get("trend") or "").strip().lower()
+    if trend_state in {"declining", "below_expected", "down"}:
+        lines.append("Performance has been lower than usual over recent shifts.")
+    elif trend_state in {"inconsistent"}:
+        lines.append("Performance has been inconsistent across recent shifts.")
+    elif trend_state in {"improving", "up"}:
+        lines.append("Performance has been higher than usual in recent shifts.")
+
+    repeat_count = int(snapshot.get("repeat_count") or 0)
+    if repeat_count > 0:
+        times = "time" if repeat_count == 1 else "times"
+        lines.append(f"This pattern has appeared {repeat_count} {times} recently.")
+
+    queue_status = str(snapshot.get("_queue_status") or "").strip().lower()
+    if queue_status == "overdue":
+        lines.append("A follow-up was logged and is now overdue.")
+    elif queue_status == "due_today":
+        lines.append("A follow-up is due today.")
+
+    confidence = str(snapshot.get("confidence_label") or "").strip().lower()
+    completeness = str(snapshot.get("data_completeness_status") or snapshot.get("completeness") or "").strip().lower()
+    if confidence == "low":
+        lines.append("Limited data available, so confidence is lower.")
+    elif completeness in {"partial", "limited", "incomplete", "unknown"}:
+        lines.append("Some data is missing, which reduces confidence.")
+
+    if not lines:
+        fallback = str(item.attention_summary or "").strip().replace("—", "-")
+        if fallback:
+            lines.append(fallback.split(".", 1)[0].strip() + ".")
+
+    unique_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        clean = str(line or "").strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_lines.append(clean)
+        if len(unique_lines) == 4:
+            break
+    return unique_lines
+
+
 def _render_attention_priority_section(attention: AttentionSummary) -> None:
     """Render the ranked priority attention list at the top of the Today screen."""
     st.markdown('<div class="today-section-label">Recently Surfaced</div>', unsafe_allow_html=True)
@@ -575,8 +620,7 @@ def _render_attention_priority_section(attention: AttentionSummary) -> None:
 
     st.markdown(
         f'<div class="today-supporting-note">{", ".join(note_parts)} item{"s" if total_shown != 1 else ""} '
-        f"ranked from {attention.total_evaluated} evaluated. Ranked by trend severity, repeat patterns, "
-        "overdue follow-ups, and signal confidence.</div>",
+        f"currently shown from {attention.total_evaluated} evaluated.</div>",
         unsafe_allow_html=True,
     )
 
@@ -589,28 +633,21 @@ def _render_attention_priority_section(attention: AttentionSummary) -> None:
         with st.container(border=True):
             st.markdown(
                 f'<div class="{tier_css}">'
-                f'<span class="attention-score-badge {badge_css}">{tier_label} · {item.attention_score}</span>'
+                f'<span class="attention-score-badge {badge_css}">{tier_label}</span>'
                 f"<strong>{item.employee_id}</strong>"
                 + (f" <span style='color:#5d7693;font-size:0.88rem;'>({item.process_name})</span>" if item.process_name and item.process_name.lower() != "unassigned" else "")
                 + "</div>",
                 unsafe_allow_html=True,
             )
+            explanation_lines = _build_attention_explanation_lines(item)
             st.markdown(
-                f'<div class="today-insight-line">{item.attention_summary}</div>',
+                f'<div class="today-insight-line">{(explanation_lines[0] if explanation_lines else item.attention_summary)}</div>',
                 unsafe_allow_html=True,
             )
-            if item.attention_reasons:
-                with st.expander("Why ranked here", expanded=False):
-                    for reason in item.attention_reasons:
-                        icon = "↑" if any(
-                            f.plain_reason == reason and f.weight > 0
-                            for f in item.factors_applied
-                        ) else "↓"
-                        st.markdown(f"- {icon} {reason}")
-                    st.caption(
-                        f"Score: {item.attention_score}/100 · "
-                        f"Factors applied: {len(item.factors_applied)}"
-                    )
+            if explanation_lines:
+                with st.expander("Signal explanation", expanded=False):
+                    for line in explanation_lines:
+                        st.write(line)
             col1, _ = st.columns([1, 3])
             with col1:
                 if st.button(
@@ -709,9 +746,6 @@ def page_today() -> None:
     if "today_queue_filter" not in st.session_state:
         st.session_state.today_queue_filter = "all"
 
-    if "today_auto_triggers_run" not in st.session_state:
-        st.session_state.today_auto_triggers_run = False
-
     today_value = date.today()
 
     _apply_today_styles()
@@ -732,57 +766,84 @@ def page_today() -> None:
     )
     _show_flash_message()
 
-    try:
-        if not st.session_state.today_auto_triggers_run:
-            loading_slot = st.empty()
-            with loading_slot.container():
-                show_loading_state("Refreshing the action queue and latest context.")
-            with st.spinner("Refreshing the action queue..."):
-                run_all_triggers(tenant_id=st.session_state.tenant_id)
-            loading_slot.empty()
-            st.session_state.today_auto_triggers_run = True
+    refresh_col, _ = st.columns([1, 4])
+    with refresh_col:
+        if st.button("Refresh signals", key="today_refresh_precomputed_signals", use_container_width=True):
+            try:
+                from services.daily_signals_service import compute_daily_signals
 
-        open_actions = get_open_actions(tenant_id=st.session_state.tenant_id, today=today_value)
-        repeat_offenders = get_repeat_offenders(
+                loading_slot = st.empty()
+                with loading_slot.container():
+                    show_loading_state("Refreshing precomputed signals for Today…")
+                with st.spinner("Refreshing signals…"):
+                    compute_daily_signals(
+                        signal_date=today_value,
+                        tenant_id=str(st.session_state.get("tenant_id", "") or ""),
+                    )
+                loading_slot.empty()
+                get_today_signals.clear()
+                st.success("Signals refreshed.")
+                st.rerun()
+            except Exception as _refresh_err:
+                show_error_state(f"Signal refresh failed: {_refresh_err}")
+                return
+
+    try:
+        # Today page is read-only: it renders precomputed signals and summaries
+        # and does not run trigger pipelines, trend computation, or scoring.
+        precomputed = get_today_signals(
             tenant_id=st.session_state.tenant_id,
-            today=today_value,
-            open_actions=open_actions,
+            as_of_date=today_value.isoformat(),
         )
-        ignored_high_performers = get_ignored_high_performers(
-            tenant_id=st.session_state.tenant_id,
-            today=today_value,
-            open_actions=open_actions,
-        )
-        queue_items = build_action_queue(
-            open_actions=open_actions,
-            repeat_offenders=repeat_offenders,
-            recognition_opportunities=ignored_high_performers,
-            tenant_id=st.session_state.tenant_id,
-            today=today_value,
-        )
+        if not precomputed:
+            st.info("Signals are being prepared. Refresh shortly.")
+            return
+
+        queue_items = list(precomputed.get("queue_items") or [])
         counts = _queue_counts(queue_items)
-        goal_status, _ = load_goal_status_history("Loading Today context…")
-        goal_status = goal_status or []
-        import_summary = st.session_state.get("_import_complete_summary") or {}
-        home_sections = build_today_home_sections(
-            queue_items=queue_items,
-            goal_status=goal_status,
-            import_summary=import_summary,
-            today=today_value,
-        )
-        eligible_employee_ids = {
-            str(item.drill_down.entity_id or "").strip()
-            for section_key in ("needs_attention", "changed_from_normal", "unresolved_items")
-            for item in (home_sections.get(section_key) or [])
-            if str(item.drill_down.entity_id or "").strip()
-        }
-        open_exception_rows = list_open_operational_exceptions(tenant_id=st.session_state.tenant_id, limit=200)
-        attention_summary = build_today_attention_summary(
-            goal_status=goal_status,
-            queue_items=queue_items,
-            open_exception_rows=open_exception_rows,
-            eligible_employee_ids=eligible_employee_ids,
-        )
+        goal_status = list(precomputed.get("goal_status") or [])
+        import_summary = dict(precomputed.get("import_summary") or {})
+        home_sections = dict(precomputed.get("home_sections") or {})
+        attention_summary = precomputed.get("attention_summary")
+        if not isinstance(attention_summary, AttentionSummary):
+            attention_summary = AttentionSummary(
+                ranked_items=[],
+                is_healthy=True,
+                healthy_message="No strong signals are recently surfaced right now.",
+                suppressed_count=0,
+                total_evaluated=0,
+            )
+
+        if not isinstance(home_sections, dict):
+            st.info("Signals are being prepared. Refresh shortly.")
+            return
+        required_sections = {"needs_attention", "changed_from_normal", "unresolved_items", "data_warnings"}
+        if not required_sections.issubset(set(home_sections.keys())):
+            st.info("Signals are being prepared. Refresh shortly.")
+            return
+
+        for section_key in required_sections.union({"suppressed_signals"}):
+            home_sections.setdefault(section_key, [])
+        for section_key in required_sections.union({"suppressed_signals"}):
+            if not isinstance(home_sections.get(section_key), list):
+                home_sections[section_key] = []
+        for section_key in required_sections.union({"suppressed_signals"}):
+            home_sections[section_key] = [
+                item
+                for item in (home_sections.get(section_key) or [])
+                if isinstance(item, InsightCardContract)
+            ]
+
+        queue_items = [item for item in queue_items if isinstance(item, dict)]
+
+        counts = _queue_counts(queue_items)
+        if not import_summary:
+            import_summary = st.session_state.get("_import_complete_summary") or {}
+        if not isinstance(import_summary, dict):
+            import_summary = {}
+
+        if not goal_status:
+            goal_status = []
     except Exception as exc:
         show_error_state(f"Today screen data could not load cleanly: {exc}")
         return

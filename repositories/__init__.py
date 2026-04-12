@@ -17,6 +17,11 @@ from repositories.daily_employee_snapshots_repo import (
     delete_daily_employee_snapshots,
     list_daily_employee_snapshots,
 )
+from repositories.daily_signals_repo import (
+    batch_upsert_daily_signals,
+    delete_daily_signals,
+    list_daily_signals,
+)
 from repositories.employees_repo import get_employee_count, get_employees
 from repositories.import_repo import batch_store_uph_history, get_all_uph_history
 from repositories.operational_exceptions_repo import (
@@ -34,6 +39,7 @@ __all__ = [
     "create_billing_portal_url",
     "create_operational_exception",
     "delete_daily_employee_snapshots",
+    "delete_daily_signals",
     "get_all_uph_history",
     "get_config",
     "get_employee_count",
@@ -45,6 +51,7 @@ __all__ = [
     "list_activity_records",
     "list_actions",
     "list_daily_employee_snapshots",
+    "list_daily_signals",
     "list_operational_exceptions",
     "log_action_event",
     "resolve_operational_exception",
@@ -52,5 +59,6 @@ __all__ = [
     "set_tenant_stripe_customer_id",
     "update_action",
     "batch_upsert_daily_employee_snapshots",
+    "batch_upsert_daily_signals",
     "update_subscription_state",
 ]

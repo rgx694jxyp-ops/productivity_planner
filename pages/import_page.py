@@ -2174,6 +2174,14 @@ def _import_step3(tenant_id: str):
                 )
                 _status_updates = _refresh_action_statuses(tenant_id=tenant_id)
 
+                # Precompute daily signals so Today stays read-only and fast.
+                from services.daily_signals_service import compute_daily_signals
+
+                compute_daily_signals(
+                    signal_date=date.today(),
+                    tenant_id=tenant_id,
+                )
+
                 st.session_state["_last_action_engine_refresh"] = {
                     "trigger_summary": _trigger_summary,
                     "status_updates": int(_status_updates or 0),

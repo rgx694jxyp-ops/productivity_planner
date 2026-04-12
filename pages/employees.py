@@ -80,6 +80,13 @@ def _normalize_label_text(value, max_len: int = 64) -> str:
     return s or "Unknown"
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: str, emp_dept: str) -> None:
     st.subheader("Operational Exceptions")
     st.caption("Operational context linked to this employee that may help explain recent performance.")
@@ -406,7 +413,7 @@ def _render_employee_activity_comparisons(*, tenant_id: str, emp_id: str, expect
 
 def _render_team_activity_comparisons(*, tenant_id: str, history_rows: list[dict], goal_status: list[dict]) -> None:
     expected_uph_by_employee = {
-        str(row.get("EmployeeID") or ""): float(row.get("Target UPH") or 0.0)
+        str(row.get("EmployeeID") or ""): _safe_float(row.get("Target UPH"), 0.0)
         for row in goal_status or []
         if str(row.get("EmployeeID") or "").strip()
     }
