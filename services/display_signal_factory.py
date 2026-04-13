@@ -601,6 +601,11 @@ def build_display_signal_from_employee_detail_context(
     before_after = dict(detail_context.get("before_after_summary") or {})
     observed_value = before_after.get("trailing_avg_uph")
     comparison_value = before_after.get("prior_avg_uph")
+    if comparison_value in {None, 0, 0.0}:
+        target_context = dict(detail_context.get("target_context") or {})
+        target_uph = _safe_float(target_context.get("target_uph"))
+        if target_uph is not None and target_uph > 0 and observed_value is not None:
+            comparison_value = target_uph
 
     return build_display_signal(
         employee_id=detail_context.get("employee_id") or employee_name,

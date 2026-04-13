@@ -2,7 +2,11 @@ from datetime import date
 
 from domain.display_signal import DisplayConfidenceLevel, DisplaySignalState, SignalLabel
 from services.attention_scoring_service import AttentionItem
-from services.display_signal_factory import build_display_signal, build_display_signal_from_attention_item
+from services.display_signal_factory import (
+    build_display_signal,
+    build_display_signal_from_attention_item,
+    build_display_signal_from_employee_detail_context,
+)
 from services.signal_formatting_service import SignalDisplayMode, format_confidence_line, get_signal_display_mode
 
 
@@ -268,3 +272,76 @@ def test_attention_item_uses_prior_average_baseline_before_target_baseline():
     assert signal.comparison_value == 60.0
     assert get_signal_display_mode(signal) == SignalDisplayMode.FULL
     assert format_confidence_line(signal) == "Confidence: High"
+
+
+def test_employee_detail_signal_uses_has_pattern_flag_for_repeat_context():
+    """Protects against repeat-pattern drift when detail context uses has_pattern."""
+    detail_context = {
+        "employee_id": "E7",
+        "trend_state": "declining",
+        "confidence_label": "Medium",
+        "signal_summary": {
+            "signal_state": "STABLE_TREND",
+            "data_completeness_label": "partial",
+        },
+        "contributing_periods": {
+            "trailing_dates": ["2026-04-10", "2026-04-11"],
+            "prior_dates": ["2026-04-08", "2026-04-09"],
+        },
+        "before_after_summary": {
+            "trailing_avg_uph": 42.0,
+            "prior_avg_uph": 49.0,
+        },
+        "pattern_history": {
+            "has_pattern": True,
+            "repeat_count": 3,
+        },
+        "why_this_is_showing": {
+            "why_now": "Shown now because recent direction is declining.",
+        },
+    }
+
+    signal = build_display_signal_from_employee_detail_context(
+        detail_context=detail_context,
+        employee_name="Taylor Reed",
+        process="Picking",
+    )
+
+    assert signal.flags.get("repeat") is True
+
+
+def test_employee_detail_signal_supporting_text_includes_compared_to_what():
+    """Protects against lost comparison rationale in employee detail explainer lines."""
+    detail_context = {
+        "employee_id": "E8",
+        "trend_state": "declining",
+        "confidence_label": "Medium",
+        "compared_to_what": "Compared with the prior 5 comparable days and configured target.",
+        "signal_summary": {
+            "signal_state": "STABLE_TREND",
+            "data_completeness_label": "partial",
+        },
+        "contributing_periods": {
+            "trailing_dates": ["2026-04-10", "2026-04-11"],
+            "prior_dates": ["2026-04-08", "2026-04-09"],
+        },
+        "before_after_summary": {
+            "trailing_avg_uph": 41.0,
+            "prior_avg_uph": 48.0,
+        },
+        "pattern_history": {
+            "has_pattern": False,
+            "repeat_count": 0,
+        },
+        "why_this_is_showing": {
+            "why_now": "Shown now because current output is below expected range.",
+        },
+    }
+
+    signal = build_display_signal_from_employee_detail_context(
+        detail_context=detail_context,
+        employee_name="Avery Cruz",
+        process="Receiving",
+    )
+
+    assert any("Compared with the prior 5 comparable days" in line for line in list(signal.supporting_text or []))

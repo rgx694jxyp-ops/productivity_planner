@@ -1,5 +1,6 @@
 from datetime import date
 
+from services import today_home_service as ths
 from services.today_home_service import (
     build_today_attention_summary,
     build_today_home_sections,
@@ -94,3 +95,31 @@ def test_build_today_attention_summary_keeps_low_tier_when_weak_data_mode_enable
 
     assert summary.total_evaluated == 1
     assert len(summary.ranked_items) == 1
+
+
+def test_get_today_signals_fallback_receives_session_payload_context(monkeypatch):
+    """Protects fallback path so transient session payload can be read when daily_signals is unavailable."""
+    ths.get_today_signals.cache_clear()
+
+    monkeypatch.setattr(
+        "services.daily_signals_service.read_precomputed_today_signals",
+        lambda **kwargs: (_ for _ in ()).throw(Exception("daily_signals missing")),
+    )
+
+    def _fallback(**kwargs):
+        assert "session_state" in kwargs
+        assert isinstance(kwargs.get("session_state"), dict)
+        return {
+            "tenant_id": "tenant-1",
+            "as_of_date": "2026-04-13",
+            "queue_items": [{"employee_id": "E1"}],
+            "goal_status": [],
+            "import_summary": {"days": 1},
+            "home_sections": {},
+            "attention_summary": None,
+        }
+
+    monkeypatch.setattr(ths, "fetch_precomputed_today_payload", _fallback)
+
+    payload = ths.get_today_signals(tenant_id="tenant-1", as_of_date="2026-04-13")
+    assert payload is not None

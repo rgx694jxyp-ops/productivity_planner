@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from services.plain_language_service import describe_trend
 from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
 from services.signal_interpretation_service import (
     derive_confidence_from_coverage_policy,
@@ -179,6 +180,7 @@ def build_employee_detail_context(
 
     goal_status = str(goal_row.get("goal_status") or "").strip().lower()
     trend = str(goal_row.get("trend") or "").strip().lower()
+    snapshot_trend_state = normalize_trend_state(goal_row.get("trend") or "")
     employee_name = _name_from_goal_row(goal_row, str(emp_id or "Employee"))
     process_name = str(goal_row.get("Resolved Process") or goal_row.get("Department") or goal_row.get("department") or "Team")
     target_context = resolve_target_context(
@@ -202,8 +204,13 @@ def build_employee_detail_context(
     )
 
     coverage_ratio = round(len(trend_rows) / float(lookback_days), 2) if lookback_days > 0 else 0.0
-    confidence_label = _confidence_label(coverage_ratio, len(trend_rows))
-    completeness_label = _completeness_label(coverage_ratio, len(trend_rows))
+    computed_confidence_label = _confidence_label(coverage_ratio, len(trend_rows))
+    snapshot_confidence_label = str(goal_row.get("confidence_label") or "").strip().title()
+    confidence_label = snapshot_confidence_label if snapshot_confidence_label in {"Low", "Medium", "High"} else computed_confidence_label
+
+    computed_completeness_label = _completeness_label(coverage_ratio, len(trend_rows))
+    snapshot_completeness_label = str(goal_row.get("data_completeness_status") or "").strip().lower()
+    completeness_label = snapshot_completeness_label if snapshot_completeness_label in {"complete", "partial", "limited", "unknown"} else computed_completeness_label
 
     if trailing_rows and prior_rows:
         delta = round(trailing_avg - prior_avg, 2)
@@ -224,7 +231,10 @@ def build_employee_detail_context(
         included_count=len(trend_rows),
         recent_values=[float(row.get("uph") or 0.0) for row in trailing_rows if float(row.get("uph") or 0.0) > 0],
     )
-    current_state = str(trend_result.get("label") or normalize_trend_state(goal_row.get("trend") or ""))
+    resolved_trend_state = str(trend_result.get("state") or "").strip().lower()
+    if resolved_trend_state == "insufficient_data" and snapshot_trend_state != "insufficient_data":
+        resolved_trend_state = snapshot_trend_state
+    current_state = str(describe_trend(resolved_trend_state) or "Worth review").strip()
 
     completeness_note = (
         f"{completeness_label}: {len(trend_rows)} included and {len(excluded_rows)} excluded records in the latest {lookback_days}-day window"
@@ -249,16 +259,16 @@ def build_employee_detail_context(
         else "Workload/volume context is limited because units/hours fields are incomplete in one or both windows."
     )
 
-    if trend_result.get("state") == "below_expected" and target_uph > 0 and current_uph > 0:
+    if resolved_trend_state == "below_expected" and target_uph > 0 and current_uph > 0:
         trigger_reason = f"Recent observed pace is {current_uph:.1f} UPH versus {target_uph:.1f} UPH from the {target_context.get('target_source_label', 'configured target')}."
-    elif trend_result.get("state") == "improving" and prior_rows:
+    elif resolved_trend_state == "improving" and prior_rows:
         trigger_reason = f"Recent average moved by {delta:+.1f} UPH versus the prior comparable window."
-    elif trend_result.get("state") == "declining" and prior_rows:
+    elif resolved_trend_state == "declining" and prior_rows:
         trigger_reason = f"Recent average moved by {delta:+.1f} UPH versus the prior comparable window."
-    elif trend_result.get("state") == "inconsistent":
+    elif resolved_trend_state == "inconsistent":
         trigger_reason = f"Recent comparable days vary by {float(trend_result.get('volatility_span_uph') or 0):.1f} UPH, so the pattern is not steady yet."
     else:
-        trigger_reason = str(trend_result.get("plain_explanation") or "Recent comparable days look broadly similar to the prior context.")
+        trigger_reason = str(trend_result.get("plain_explanation") or goal_row.get("trend_explanation") or "Recent comparable days look broadly similar to the prior context.")
 
     why_now_parts: list[str] = []
     if goal_status:
@@ -274,14 +284,15 @@ def build_employee_detail_context(
     )
 
     pattern_memory = detect_pattern_memory_from_goal_row(row=goal_row or {})
+    resolved_repeat_count = max(int(pattern_memory.repeat_count or 0), int(goal_row.get("repeat_count") or 0))
     pattern_history = {
-        "has_pattern": bool(pattern_memory.pattern_detected),
+        "has_pattern": bool(pattern_memory.pattern_detected) or resolved_repeat_count > 0,
         "summary": (
             pattern_memory.summary
             if pattern_memory.pattern_detected
             else "No repeated pattern is standing out in the recent trend context."
         ),
-        "repeat_count": int(pattern_memory.repeat_count or 0),
+        "repeat_count": resolved_repeat_count,
         "pattern_kind": str(pattern_memory.pattern_kind or "none"),
         "evidence_points": list(pattern_memory.evidence_points or []),
     }
@@ -307,7 +318,6 @@ def build_employee_detail_context(
         baseline_used = "No configured target or complete prior baseline is currently available."
 
     has_minimum_context = bool(len(trend_rows) > 0)
-
     has_notable_signal = bool(
         (target_uph > 0 and current_uph > 0 and current_uph < target_uph)
         or delta >= 1.0
@@ -333,15 +343,17 @@ def build_employee_detail_context(
     has_observed_data = bool(observed_date and trailing_avg > 0)
     has_comparison_data = bool(comparison_dates and prior_avg > 0 and comparison_label)
 
+    signal_state = ""
     summary_block = {
         "line_1": f"{employee_name} · {process_name}",
-        "line_2": str(trend_result.get("label") or "Worth review").strip(),
+        "line_2": current_state,
         "line_3": f"Observed: {observed_label} ({trailing_avg:.1f})",
         "line_4": f"Compared to: {comparison_label} avg ({prior_avg:.1f})",
         "line_5": f"Confidence: {confidence_label}",
         "current_state": current_state,
-        "trend_state": str(trend_result.get("state") or normalize_trend_state(goal_row.get("trend") or "")),
-        "trend_explanation": str(trend_result.get("plain_explanation") or ""),
+        "trend_state": resolved_trend_state,
+        "signal_state": signal_state,
+        "trend_explanation": str(trend_result.get("plain_explanation") or goal_row.get("trend_explanation") or ""),
         "compared_to_what": compared_to_what,
         "confidence_label": confidence_label,
         "data_completeness_note": completeness_note,
@@ -351,6 +363,7 @@ def build_employee_detail_context(
     low_data_state = False
     if not has_observed_data:
         low_data_state = True
+        signal_state = "LOW_DATA"
         summary_block.update(
             {
                 "line_1": "",
@@ -358,19 +371,22 @@ def build_employee_detail_context(
                 "line_3": "",
                 "line_4": "",
                 "line_5": "Confidence: Low",
+                "signal_state": signal_state,
                 "low_data_state": True,
                 "low_data_note": "No recent performance data",
             }
         )
     elif not has_comparison_data:
-        low_data_state = True
+        if target_uph > 0 and confidence_label in {"Medium", "High"}:
+            signal_state = "STABLE_TREND" if confidence_label == "High" else "EARLY_TREND"
         summary_block.update(
             {
-                "line_2": "Limited data available",
+                "signal_state": signal_state,
+                "line_2": current_state,
                 "line_3": f"Observed: {observed_label}",
                 "line_4": "",
-                "line_5": "Confidence: Low",
-                "low_data_state": True,
+                "line_5": f"Confidence: {confidence_label}",
+                "low_data_state": False,
                 "low_data_note": "No comparison available",
             }
         )
@@ -411,6 +427,7 @@ def build_employee_detail_context(
         "why_this_is_showing": why_this_is_showing,
         "what_this_is_based_on": what_this_is_based_on,
         "current_state": current_state,
+        "signal_state": signal_state,
         "compared_to_what": compared_to_what,
         "confidence_label": confidence_label,
         "data_completeness_note": completeness_note,
@@ -423,8 +440,8 @@ def build_employee_detail_context(
         ),
         "comparison_breakdown": comparison_descriptions,
         "target_context": target_context,
-        "trend_state": str(trend_result.get("state") or normalize_trend_state(goal_row.get("trend") or "")),
-        "trend_explanation": str(trend_result.get("plain_explanation") or ""),
+        "trend_state": resolved_trend_state,
+        "trend_explanation": str(trend_result.get("plain_explanation") or goal_row.get("trend_explanation") or ""),
         "timeframe_used": what_this_is_based_on["timeframe_used"],
         "baseline_used": baseline_used,
         "workload_context": workload_context,

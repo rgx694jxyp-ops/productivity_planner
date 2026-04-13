@@ -1062,7 +1062,7 @@ def _emp_coaching():
                     st.session_state[_team_analysis_flag_key] = False
                     st.rerun()
 
-            show_partial_data_state("Select an employee from the roster to open employee detail and record-level drill-down.")
+            st.info("Select an employee from the roster to open employee detail and record-level drill-down.")
         else:
             emp_id   = selected_emp["emp_id"]
             emp_name = selected_emp["name"]
