@@ -27,6 +27,7 @@ from services.attention_scoring_service import AttentionFactor, AttentionItem, A
 from services.daily_snapshot_service import get_latest_snapshot_goal_status
 from services.exception_tracking_service import list_open_operational_exceptions
 from services.today_home_service import build_today_attention_summary, build_today_home_sections
+from services.today_page_meaning_service import is_weak_data_mode as _canonical_is_weak_data_mode
 from services.today_queue_service import build_action_queue
 
 
@@ -133,19 +134,10 @@ def _build_import_summary(*, tenant_id: str, goal_status: list[dict[str, Any]]) 
 
 
 def _is_weak_data_mode(import_summary: dict[str, Any]) -> bool:
-    summary = dict(import_summary or {})
-    days = _safe_int(summary.get("days"), 0)
-    trust = dict(summary.get("trust") or {})
-    trust_status = str(trust.get("status") or "").strip().lower()
-    confidence_score = _safe_int(trust.get("confidence_score"), 0)
-
-    if 0 < days <= 2:
-        return True
-    if trust_status in {"partial", "low_confidence", "invalid"}:
-        return True
-    if confidence_score > 0 and confidence_score < 75:
-        return True
-    return False
+    # Canonical product-facing weak-data classification lives in
+    # today_page_meaning_service. Keep this wrapper so persisted/transient Today
+    # signal computation stays aligned with the UI-facing interpretation.
+    return bool(_canonical_is_weak_data_mode(import_summary=dict(import_summary or {})))
 
 
 def _serialize_insight_card(card: InsightCardContract) -> dict[str, Any]:
@@ -269,6 +261,11 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
         for item in (home_sections.get(section_key) or [])
         if str(item.drill_down.entity_id or "").strip()
     }
+    if not eligible_employee_ids:
+        # If all interpreted cards were filtered/suppressed, do not block
+        # attention ranking for every employee. Allow scorer to evaluate full
+        # goal_status so Today can still surface meaningful signals.
+        eligible_employee_ids = None
     open_exception_rows = list_open_operational_exceptions(tenant_id=tenant_id, limit=200)
     attention_summary = build_today_attention_summary(
         goal_status=goal_status,
@@ -414,6 +411,10 @@ def build_transient_today_payload(*, signal_date: date, tenant_id: str) -> dict[
         for item in (home_sections.get(section_key) or [])
         if str(item.drill_down.entity_id or "").strip()
     }
+    if not eligible_employee_ids:
+        # Keep transient fallback semantics aligned with persisted signal
+        # computation so empty interpreted-card sets do not suppress all rows.
+        eligible_employee_ids = None
     open_exception_rows = list_open_operational_exceptions(tenant_id=tenant_id, limit=200)
     attention_summary = build_today_attention_summary(
         goal_status=goal_status,

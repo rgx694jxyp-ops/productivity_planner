@@ -1254,6 +1254,8 @@ def _emp_coaching():
             st.subheader("🧭 Action Decision History")
             _action_history_key = f"_employees_show_action_history_{emp_id}"
             _show_action_history = bool(st.session_state.get(_action_history_key, False))
+            _emp_actions = []
+            _open_emp_actions = []
             if not _show_action_history:
                 st.info("Action decision history is available on demand to keep employee detail reruns responsive.")
                 if st.button("Load action decision history", key=f"employees_load_action_history_{emp_id}", type="secondary"):
