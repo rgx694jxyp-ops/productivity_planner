@@ -243,11 +243,8 @@ def is_simple_mode() -> bool:
 
 
 def toggle_simple_mode():
-    """Add toggle to sidebar."""
-    if st.sidebar.checkbox("🎯 Simple Mode", value=st.session_state.get("simple_mode", False), key="toggle_simple"):
-        st.session_state["simple_mode"] = True
-    else:
-        st.session_state["simple_mode"] = False
+    """Legacy compatibility hook; Simple Mode toggle is no longer shown."""
+    st.session_state["simple_mode"] = False
 
     # Keep the app on the light theme regardless of mode toggles.
     st.markdown(
