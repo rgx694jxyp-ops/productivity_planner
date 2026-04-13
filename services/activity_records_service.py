@@ -132,7 +132,7 @@ def get_recent_activity_records(*, tenant_id: str = "", employee_id: str = "", d
         return rows
 
     # Legacy compatibility fallback while older rows remain only in uph_history.
-    legacy_rows = import_repo.get_all_uph_history(days=days)
+    legacy_rows = import_repo.get_all_uph_history(days=days, limit=max(1, int(limit or 500)))
     out: list[dict] = []
     for row in legacy_rows:
         legacy_emp_id = str(row.get("emp_id") or "").strip()

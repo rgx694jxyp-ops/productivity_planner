@@ -2144,7 +2144,7 @@ def _import_step3(tenant_id: str):
                         from_date="" if _should_defer_snapshot_recompute else (_valid_dates[0] if _valid_dates else ""),
                         to_date="" if _should_defer_snapshot_recompute else (_valid_dates[-1] if _valid_dates else ""),
                         replace_existing_snapshots=False,
-                        ingest_activity=False,
+                        ingest_activity=True,
                         snapshot_source_limit=1500,
                     )
 

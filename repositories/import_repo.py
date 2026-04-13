@@ -12,12 +12,13 @@ from services.app_logging import log_error as log_app_error
 from services.app_logging import log_info, log_warn
 
 
-def get_all_uph_history(days: int = 30) -> list[dict]:
+def get_all_uph_history(days: int = 30, *, limit: int = 0) -> list[dict]:
     """All UPH history records with pagination past Supabase default row caps."""
     sb = get_client()
     all_rows = []
     page_size = 1000
     offset = 0
+    max_rows = max(0, int(limit or 0))
 
     while True:
         query = tenant_query(
@@ -31,6 +32,8 @@ def get_all_uph_history(days: int = 30) -> list[dict]:
         result = query.execute()
         batch = result.data or []
         all_rows.extend(batch)
+        if max_rows > 0 and len(all_rows) >= max_rows:
+            return all_rows[:max_rows]
         if len(batch) < page_size:
             break
         offset += page_size
