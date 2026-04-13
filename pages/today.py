@@ -594,6 +594,8 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
             get_today_signals.clear()
         return True
     except Exception as recovery_err:
+        # Avoid retry loops that can make Today appear stuck after a failed recovery.
+        st.session_state["_post_import_refresh_pending"] = False
         show_error_state(f"Today signal recovery failed: {recovery_err}")
         return False
 
@@ -702,11 +704,12 @@ def _render_queue_orientation_block(
             return
 
         evaluated = int(orientation.total_evaluated or 0)
-        checked_line = (
-            f"{evaluated} snapshot record{'s' if evaluated != 1 else ''} checked."
-            if evaluated > 0
-            else "Available records were checked."
-        )
+        if evaluated > 0:
+            checked_line = f"{evaluated} snapshot record{'s' if evaluated != 1 else ''} checked."
+        elif bool((meaning.state_flags or {}).get("low_data")) or bool((meaning.state_flags or {}).get("partial_data")):
+            checked_line = "Imported records were detected, but comparable history is still building."
+        else:
+            checked_line = "Available records were checked."
 
         if in_early:
             mode_label = "Limited history" if signal_mode == SignalMode.LIMITED_DATA else "Early signal mode"
@@ -748,7 +751,7 @@ def _render_queue_orientation_block(
         mode_label = (
             "Limited history" if signal_mode == SignalMode.LIMITED_DATA else "Early signal mode"
         )
-        heading = "Today's performance snapshot"
+        heading = "What needs attention today"
         chips: list[str] = [mode_label]
         # For snapshot-only mode, chips just identify mode — no trend chips
         if not in_early or orientation.declining_count > 0:
@@ -1642,8 +1645,19 @@ def page_today() -> None:
         ):
             orientation_state = TodaySurfaceState.EARLY_SIGNAL
 
+        orientation_model = build_queue_orientation(attention_summary)
+        if snapshot_cards and orientation_model.total_shown <= 0:
+            orientation_model = TodayQueueOrientationModel(
+                total_shown=len(snapshot_cards),
+                declining_count=orientation_model.declining_count,
+                repeat_count=orientation_model.repeat_count,
+                limited_confidence_count=orientation_model.limited_confidence_count,
+                distinct_processes=orientation_model.distinct_processes,
+                total_evaluated=orientation_model.total_evaluated,
+            )
+
         _render_queue_orientation_block(
-            build_queue_orientation(attention_summary),
+            orientation_model,
             meaning=meaning,
             surface_state=orientation_state,
             signal_mode=signal_mode,

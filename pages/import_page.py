@@ -1941,12 +1941,20 @@ def _import_step3(tenant_id: str):
                 # per employee per day. For overlapping uploads we replace old
                 # rows for the same employee/date keys before inserting fresh rows.
                 _rows_to_replace_ids = []
+                _rows_to_delete_ids = []
                 def _norm_date(_v):
                     return str(_v or "").strip()[:10]
+                _candidate_depts_by_key = {}
+                for _r in uph_batch:
+                    _k = (
+                        _cmp_emp_code(_r.get("emp_id")),
+                        _norm_date(_r.get("work_date", "")),
+                    )
+                    _candidate_depts_by_key.setdefault(_k, set()).add(str(_r.get("department", "") or ""))
                 if _dates and _emp_ids_int:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
-                    _q = _sb.table("uph_history").select("id, emp_id, work_date")
+                    _q = _sb.table("uph_history").select("id, emp_id, work_date, department")
                     if _tenant_id:
                         _q = _q.eq("tenant_id", _tenant_id)
                     # Use exact date filters when reasonably small to avoid scanning
@@ -1963,9 +1971,13 @@ def _import_step3(tenant_id: str):
                             _er_code = _rowid_to_code.get(_er_emp, "")
                             _key2 = (_er_code, _norm_date(_er.get("work_date", "")))
                             if _er_code and _key2 in _candidate_keys and _er.get("id") is not None:
+                                _existing_dept = str(_er.get("department", "") or "")
                                 _rows_to_replace_ids.append(int(_er.get("id")))
+                                if _existing_dept not in _candidate_depts_by_key.get(_key2, set()):
+                                    _rows_to_delete_ids.append(int(_er.get("id")))
 
                 _rows_to_replace_ids = sorted(set(_rows_to_replace_ids))
+                _rows_to_delete_ids = sorted(set(_rows_to_delete_ids))
                 if _rows_to_replace_ids and _tenant_id:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb_rw = _db_get_client()
@@ -1983,6 +1995,18 @@ def _import_step3(tenant_id: str):
 
                     # Do not pre-delete overlap rows: upsert with on_conflict
                     # replaces them in-place and avoids extra write/lock time.
+                    # Only pre-delete stale department rows where employee/day matches
+                    # but incoming department set differs from existing rows.
+                    for _idx in range(0, len(_rows_to_delete_ids), 1000):
+                        _id_chunk = _rows_to_delete_ids[_idx : _idx + 1000]
+                        if not _id_chunk:
+                            continue
+                        _db_tq(
+                            _sb_rw.table("uph_history")
+                            .delete()
+                            .eq("tenant_id", _tenant_id)
+                            .in_("id", _id_chunk)
+                        ).execute()
                     _replaced_existing_rows = len(_rows_to_replace_ids)
 
                 _inserted_key3 = set()
@@ -2145,7 +2169,7 @@ def _import_step3(tenant_id: str):
                         to_date="" if _should_defer_snapshot_recompute else (_valid_dates[-1] if _valid_dates else ""),
                         replace_existing_snapshots=False,
                         ingest_activity=True,
-                        snapshot_source_limit=1500,
+                        snapshot_source_limit=5000,
                     )
 
                     if len(uph_batch) > 0 and (_new_row_ids or _undo_previous_rows):
