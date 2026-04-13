@@ -39,8 +39,22 @@ from services.signal_formatting_service import (
 from services.today_home_service import get_today_signals
 from services.today_page_meaning_service import (
     TodayQueueRenderPlan,
+    TodayQueueOrientationModel,
+    TodaySurfaceState,
+    TodaySurfaceMeaning,
+    build_queue_orientation,
     build_today_queue_render_plan,
     build_today_surface_meaning,
+)
+from services.today_snapshot_signal_service import (
+    SignalMode,
+    build_snapshot_fallback_cards,
+)
+from services.today_signal_status_service import (
+    SIGNAL_STATUS_LOOKED_AT,
+    SIGNAL_STATUS_NEEDS_FOLLOW_UP,
+    list_latest_signal_statuses,
+    set_signal_status,
 )
 from services.today_view_model_service import (
     TodayQueueCardViewModel,
@@ -56,7 +70,6 @@ from ui.state_panels import (
     show_success_state,
 )
 from ui.traceability_panel import render_traceability_panel
-from ui.today_queue import render_action_queue
 
 
 _READ_CACHE_TTL_SECONDS = 45
@@ -313,6 +326,40 @@ def _apply_today_styles() -> None:
         .attention-score-high  { background: #fdecea; color: #c0392b; }
         .attention-score-medium { background: #fef5e7; color: #e67e22; }
         .attention-score-low   { background: #f0f0f0; color: #555; }
+        .today-queue-orientation {
+            background: #f4f8fc;
+            border: 1px solid #dce9f5;
+            border-radius: 10px;
+            padding: 10px 14px;
+            margin-bottom: 12px;
+            font-size: 0.9rem;
+            color: #335a80;
+            line-height: 1.55;
+        }
+        .today-queue-orientation-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 6px;
+        }
+        .today-queue-chip {
+            display: inline-block;
+            background: #e8f0f8;
+            color: #335a80;
+            border-radius: 999px;
+            padding: 2px 10px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .today-signal-status-chip {
+            display: inline-block;
+            color: #5d7693;
+            font-size: 0.78rem;
+            border: 1px solid #d8e3ef;
+            border-radius: 999px;
+            padding: 1px 8px;
+            margin-bottom: 6px;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -323,23 +370,6 @@ def _show_flash_message() -> None:
     message = str(st.session_state.pop("today_flash_message", "") or "")
     if message:
         show_success_state(message)
-
-
-def _render_demo_source_banner(import_summary: dict[str, Any]) -> None:
-    source_mode = str((import_summary or {}).get("source_mode") or "").strip().lower()
-    if source_mode != "demo":
-        return
-    source_label = str((import_summary or {}).get("source_label") or "").strip()
-    suffix = f" Source: {source_label}." if source_label else ""
-    st.markdown(
-        (
-            '<div class="today-stale-banner">'
-            'Demo mode: Today queue is based on sample history, not live uploaded operations data.'
-            f'{suffix}'
-            '</div>'
-        ),
-        unsafe_allow_html=True,
-    )
 
 
 def _is_demo_upload_row(upload_row: dict[str, Any]) -> bool:
@@ -487,6 +517,53 @@ def _render_today_interpretation_strip() -> None:
         )
 
 
+def _render_top_status_area(*, meaning: TodaySurfaceMeaning) -> None:
+    summary = dict(meaning.import_summary or {})
+    source_mode = str(summary.get("source_mode") or "").strip().lower()
+    source_label = str(summary.get("source_label") or "").strip()
+    stale_days = int(meaning.state_flags.get("stale_days") or 0)
+
+    chips: list[str] = []
+    if source_mode == "demo":
+        chips.append("Demo mode")
+    if stale_days > 0:
+        day_word = "day" if stale_days == 1 else "days"
+        chips.append(f"Data {stale_days} {day_word} old")
+    if meaning.signal_mode == SignalMode.LIMITED_DATA:
+        chips.append("Limited history")
+    elif meaning.signal_mode == SignalMode.EARLY_SIGNAL:
+        chips.append("Early signal mode")
+
+    if meaning.status_line:
+        primary_line = meaning.status_line
+    else:
+        primary_line = "Signals are ranked by current evidence strength and recency."
+
+    detail_line = ""
+    if source_mode == "demo":
+        detail_line = "Demo mode is active: the queue is based on sample history, not live uploaded operations data."
+        if source_label:
+            detail_line += f" Source: {source_label}."
+
+    chips_html = "".join(f'<span class="today-queue-chip">{chip}</span>' for chip in chips)
+    chips_block = f'<div class="today-queue-orientation-chips">{chips_html}</div>' if chips else ""
+    detail_block = (
+        f'<div style="color:#5d7693;font-size:0.86rem;margin-top:6px;">{detail_line}</div>' if detail_line else ""
+    )
+
+    st.markdown(
+        (
+            '<div class="today-queue-orientation">'
+            '<strong>Today status</strong>'
+            f'{chips_block}'
+            f'<div style="margin-top:6px;">{primary_line}</div>'
+            f'{detail_block}'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bool:
     """Try to rebuild today's payload once when it is missing or deferred."""
     try:
@@ -587,6 +664,129 @@ def _render_since_yesterday(queue_items: list[dict], recent_outcomes: list[dict]
         st.metric("Still overdue", overdue_count)
 
 
+def _render_queue_orientation_block(
+    orientation: TodayQueueOrientationModel,
+    *,
+    meaning: TodaySurfaceMeaning,
+    surface_state: TodaySurfaceState,
+    signal_mode: SignalMode | None = None,
+) -> None:
+    """Render a compact framing line directly above the Today queue.
+
+    Describes what stands out without recommending or prescribing anything.
+    For zero-signal states, renders a calm trust-oriented placeholder instead.
+    In early/limited signal mode, labels the queue accordingly.
+    """
+    in_early = surface_state == TodaySurfaceState.EARLY_SIGNAL or signal_mode in {
+        SignalMode.EARLY_SIGNAL,
+        SignalMode.LIMITED_DATA,
+    }
+    total = orientation.total_shown
+
+    if total == 0:
+        if surface_state == TodaySurfaceState.NO_USABLE_DATA:
+            st.markdown(
+                (
+                    '<div class="today-queue-orientation">'
+                    "<strong>No usable data is available yet.</strong><br>"
+                    '<span style="color:#5d7693;font-size:0.86rem;">'
+                    "The system could not evaluate today against recent performance because imported history is not available yet."
+                    "</span>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+            return
+
+        evaluated = int(orientation.total_evaluated or 0)
+        checked_line = (
+            f"{evaluated} snapshot record{'s' if evaluated != 1 else ''} checked."
+            if evaluated > 0
+            else "Available records were checked."
+        )
+
+        if in_early:
+            mode_label = "Limited history" if signal_mode == SignalMode.LIMITED_DATA else "Early signal mode"
+        else:
+            mode_label = "Coverage stable"
+
+        secondary_lines: list[str] = []
+        if in_early:
+            secondary_lines.append("Coverage is limited, so smaller changes may not be visible yet.")
+        else:
+            secondary_lines.append("Coverage and history were sufficient for normal threshold checks.")
+
+        if orientation.repeat_count <= 0:
+            secondary_lines.append("No clear repeat patterns were detected in the checked records.")
+
+        if bool((meaning.state_flags or {}).get("partial_data")) and not in_early:
+            secondary_lines.append("Some comparisons remain partial in this snapshot.")
+
+        details_html = "".join(
+            f'<div style="color:#5d7693;font-size:0.85rem;margin-top:4px;">{line}</div>'
+            for line in secondary_lines[:3]
+        )
+
+        st.markdown(
+            (
+                '<div class="today-queue-orientation">'
+                "<strong>No strong signals surfaced today.</strong>"
+                f'<div class="today-queue-orientation-chips"><span class="today-queue-chip">{mode_label}</span></div>'
+                f'<div style="margin-top:6px;color:#5d7693;font-size:0.86rem;">{checked_line} The system checked today\'s available performance and history and did not find a clear issue that stood out.</div>'
+                f"{details_html}"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+        return
+
+    # Non-empty queue
+    if in_early:
+        mode_label = (
+            "Limited history" if signal_mode == SignalMode.LIMITED_DATA else "Early signal mode"
+        )
+        heading = "Today's performance snapshot"
+        chips: list[str] = [mode_label]
+        # For snapshot-only mode, chips just identify mode — no trend chips
+        if not in_early or orientation.declining_count > 0:
+            n = orientation.declining_count
+            if n:
+                chips.append(f"{n} declining trend{'s' if n != 1 else ''}")
+        if orientation.repeat_count > 0:
+            n = orientation.repeat_count
+            chips.append(f"{n} repeat issue{'s' if n != 1 else ''}")
+        if orientation.limited_confidence_count > 0:
+            n = orientation.limited_confidence_count
+            chips.append(f"{n} with limited data confidence")
+    else:
+        signal_word = "signal" if total == 1 else "signals"
+        heading = f"{total} {signal_word} in today's queue"
+        chips = []
+        if orientation.declining_count > 0:
+            n = orientation.declining_count
+            chips.append(f"{n} declining trend{'s' if n != 1 else ''}")
+        if orientation.repeat_count > 0:
+            n = orientation.repeat_count
+            chips.append(f"{n} repeat issue{'s' if n != 1 else ''}")
+        if orientation.limited_confidence_count > 0:
+            n = orientation.limited_confidence_count
+            chips.append(f"{n} with limited data confidence")
+
+    chips_html = "".join(f'<span class="today-queue-chip">{c}</span>' for c in chips)
+    chips_block = (
+        f'<div class="today-queue-orientation-chips">{chips_html}</div>' if chips else ""
+    )
+    st.markdown(
+        (
+            '<div class="today-queue-orientation">'
+            f"<strong>{heading}</strong>"
+            f"{chips_block}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def _render_empty_state() -> None:
     with st.container(border=True):
         st.markdown("### No priority signals right now")
@@ -667,6 +867,12 @@ def _render_bottom_charts(queue_items: list[dict], manager_stats: dict) -> None:
 
 
 def _employee_option_map() -> tuple[list[str], dict[str, dict]]:
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
+    return _cached_employee_option_map(tenant_id=tenant_id)
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_employee_option_map(*, tenant_id: str) -> tuple[list[str], dict[str, dict]]:
     options = ["Not linked to one employee"]
     option_map: dict[str, dict] = {"Not linked to one employee": {}}
     for employee in (_cached_employees() or []):
@@ -956,25 +1162,105 @@ def _confidence_chip(line_5_text: str) -> str:
     return ""
 
 
-def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, compact: bool = False, show_action: bool = True) -> None:
+def _format_signal_status_label(signal_status: str) -> str:
+    normalized = str(signal_status or "").strip().lower()
+    if normalized == SIGNAL_STATUS_LOOKED_AT:
+        return "Looked at"
+    if normalized == SIGNAL_STATUS_NEEDS_FOLLOW_UP:
+        return "Needs follow-up"
+    return ""
+
+
+def _render_signal_status_controls(*, card: TodayQueueCardViewModel, key_prefix: str, status_map: dict[str, dict[str, str]]) -> None:
+    signal_key = str(getattr(card, "signal_key", "") or "").strip()
+    employee_id = str(card.employee_id or "").strip()
+    if not signal_key or not employee_id:
+        return
+
+    current = dict(status_map.get(signal_key) or {})
+    current_status = _format_signal_status_label(str(current.get("status") or ""))
+    owner = str(current.get("owner") or "").strip()
+    if current_status:
+        owner_suffix = f" - {owner}" if owner else ""
+        st.markdown(
+            f'<div class="today-signal-status-chip">Status: {current_status}{owner_suffix}</div>',
+            unsafe_allow_html=True,
+        )
+
+    left, right, _ = st.columns([1.05, 1.4, 2.8])
+    with left:
+        looked_at_clicked = st.button(
+            "Looked at",
+            key=f"{key_prefix}_{signal_key}_looked_at",
+            use_container_width=True,
+            type="secondary",
+        )
+    with right:
+        follow_up_clicked = st.button(
+            "Needs follow-up",
+            key=f"{key_prefix}_{signal_key}_needs_follow_up",
+            use_container_width=True,
+            type="secondary",
+        )
+
+    selected = ""
+    if looked_at_clicked:
+        selected = SIGNAL_STATUS_LOOKED_AT
+    elif follow_up_clicked:
+        selected = SIGNAL_STATUS_NEEDS_FOLLOW_UP
+
+    if not selected:
+        return
+
+    owner_value = str(st.session_state.get("user_email") or st.session_state.get("user_name") or "").strip()
+    tenant_id = str(st.session_state.get("tenant_id") or "").strip()
+    saved = set_signal_status(
+        signal_key=signal_key,
+        employee_id=employee_id,
+        signal_status=selected,
+        owner=owner_value,
+        tenant_id=tenant_id,
+    )
+    if saved:
+        st.session_state["today_flash_message"] = "Signal status saved."
+        st.rerun()
+
+
+def _render_attention_card(
+    *,
+    card: TodayQueueCardViewModel,
+    key_prefix: str,
+    compact: bool = False,
+    show_action: bool = True,
+    signal_status_map: dict[str, dict[str, str]] | None = None,
+) -> None:
     with st.container(border=True):
         st.markdown(f'<div class="today-insight-title">{card.line_1}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="today-insight-line">{card.line_2}</div>', unsafe_allow_html=True)
-        chip_html = _confidence_chip(str(card.line_5 or ""))
-        if chip_html:
-            st.markdown(chip_html, unsafe_allow_html=True)
         if str(card.line_3 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_3}</div>', unsafe_allow_html=True)
-        if str(card.line_4 or "").strip():
-            st.markdown(f'<div class="today-insight-line">{card.line_4}</div>', unsafe_allow_html=True)
+
         line_5_text = str(card.line_5 or "").strip()
+        freshness_text = str(card.freshness_line or "").strip()
+        chip_html = _confidence_chip(line_5_text)
+        if chip_html:
+            st.markdown(chip_html, unsafe_allow_html=True)
         if line_5_text.lower() == "low confidence":
             st.markdown(f'<div class="today-confidence-badge-low">{line_5_text}</div>', unsafe_allow_html=True)
+            if freshness_text:
+                st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="today-insight-meta">{line_5_text}</div>', unsafe_allow_html=True)
-        freshness_text = str(card.freshness_line or "").strip()
-        if freshness_text:
-            st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
+            confidence_freshness = line_5_text
+            if freshness_text:
+                confidence_freshness = (
+                    f"{line_5_text} · {freshness_text}" if line_5_text else freshness_text
+                )
+            if confidence_freshness:
+                st.markdown(f'<div class="today-insight-meta">{confidence_freshness}</div>', unsafe_allow_html=True)
+
+        if str(card.line_4 or "").strip():
+            st.markdown(f'<div class="today-insight-line">{card.line_4}</div>', unsafe_allow_html=True)
+
         collapsed_hint = str(getattr(card, "collapsed_hint", "") or "").strip()
         if collapsed_hint:
             st.markdown(f'<div class="today-insight-meta">{collapsed_hint}</div>', unsafe_allow_html=True)
@@ -990,6 +1276,13 @@ def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, co
             with st.expander("Why this is shown", expanded=False):
                 for line in card.expanded_lines[:3]:
                     st.write(line)
+
+        if signal_status_map is not None:
+            _render_signal_status_controls(
+                card=card,
+                key_prefix=f"{key_prefix}_status",
+                status_map=signal_status_map,
+            )
 
         if show_action:
             if st.button(
@@ -1011,6 +1304,7 @@ def _render_unified_attention_queue(
     is_stale: bool = False,
     show_secondary_open: bool = False,
     weak_data_mode: bool = False,
+    snapshot_cards: list[TodayQueueCardViewModel] | None = None,
 ) -> None:
     plan: TodayQueueRenderPlan = build_today_queue_render_plan(
         attention=attention,
@@ -1019,14 +1313,23 @@ def _render_unified_attention_queue(
         is_stale=is_stale,
         weak_data_mode=weak_data_mode,
         show_secondary_open=show_secondary_open,
+        snapshot_cards=snapshot_cards,
     )
 
     st.markdown(f'<div class="today-section-label">{plan.section_title}</div>', unsafe_allow_html=True)
-    if plan.weak_data_note:
-        st.markdown(f'<div class="today-supporting-note">{plan.weak_data_note}</div>', unsafe_allow_html=True)
     st.markdown(
         f'<div class="today-supporting-note">{plan.start_note}</div>',
         unsafe_allow_html=True,
+    )
+
+    all_signal_keys = {
+        str(getattr(card, "signal_key", "") or "").strip()
+        for card in (list(plan.primary_cards) + list(plan.secondary_cards))
+        if str(getattr(card, "signal_key", "") or "").strip()
+    }
+    signal_status_map = list_latest_signal_statuses(
+        signal_keys=all_signal_keys,
+        tenant_id=str(st.session_state.get("tenant_id") or "").strip(),
     )
 
     if plan.primary_placeholder:
@@ -1036,6 +1339,7 @@ def _render_unified_attention_queue(
             _render_attention_card(
                 card=card,
                 key_prefix=f"today_attention_primary_{idx}",
+                signal_status_map=signal_status_map,
             )
 
     if plan.secondary_cards:
@@ -1047,6 +1351,7 @@ def _render_unified_attention_queue(
                     key_prefix=f"today_attention_other_{idx}",
                     compact=True,
                     show_action=False,
+                    signal_status_map=signal_status_map,
                 )
 
     if plan.suppressed_debug_rows:
@@ -1102,22 +1407,28 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
     with st.container(border=True):
         st.markdown(f'<div class="today-insight-title">{card_vm.line_1}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="today-insight-line">{card_vm.line_2}</div>', unsafe_allow_html=True)
-        chip_html = _confidence_chip(str(card_vm.line_5 or ""))
-        if chip_html:
-            st.markdown(chip_html, unsafe_allow_html=True)
         if str(card_vm.line_3 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card_vm.line_3}</div>', unsafe_allow_html=True)
-        if str(card_vm.line_4 or "").strip():
-            st.markdown(f'<div class="today-insight-line">{card_vm.line_4}</div>', unsafe_allow_html=True)
+
         line_5_text = str(card_vm.line_5 or "").strip()
+        freshness_text = str(card_vm.freshness_line or "").strip()
+        chip_html = _confidence_chip(line_5_text)
+        if chip_html:
+            st.markdown(chip_html, unsafe_allow_html=True)
         if line_5_text.lower() == "low confidence":
             st.markdown(f'<div class="today-confidence-badge-low">{line_5_text}</div>', unsafe_allow_html=True)
+            if freshness_text:
+                st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
         elif line_5_text:
-            st.markdown(f'<div class="today-insight-meta">{line_5_text}</div>', unsafe_allow_html=True)
+            confidence_freshness = (
+                f"{line_5_text} · {freshness_text}" if freshness_text else line_5_text
+            )
+            st.markdown(f'<div class="today-insight-meta">{confidence_freshness}</div>', unsafe_allow_html=True)
+        elif freshness_text:
+            st.markdown(f'<div class="today-insight-meta">{freshness_text}</div>', unsafe_allow_html=True)
 
-        freshness_text = str(card_vm.freshness_line or "").strip()
-        if freshness_text:
-            st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
+        if str(card_vm.line_4 or "").strip():
+            st.markdown(f'<div class="today-insight-line">{card_vm.line_4}</div>', unsafe_allow_html=True)
 
         collapsed_hint = str(getattr(card_vm, "collapsed_hint", "") or "").strip()
         if collapsed_hint:
@@ -1194,9 +1505,6 @@ def page_today() -> None:
         if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"today", ""}:
             render_traceability_panel(_trace_ctx, heading="Signal source context")
 
-        _render_today_interpretation_strip()
-        st.markdown('<div class="today-section-label">Today queue</div>', unsafe_allow_html=True)
-        st.markdown('<div class="today-supporting-note">Signals are ranked by current evidence strength and recency.</div>', unsafe_allow_html=True)
         _show_flash_message()
 
         refresh_col, _ = st.columns([1, 4])
@@ -1312,17 +1620,32 @@ def page_today() -> None:
             today_value=today_value,
         )
 
-        if meaning.status_line:
-            st.caption(meaning.status_line)
-
-        _render_demo_source_banner(meaning.import_summary)
+        _render_top_status_area(meaning=meaning)
         _render_demo_reset_controls(import_summary=meaning.import_summary, tenant_id=tenant_id)
 
-        if meaning.stale_banner:
-            st.markdown(
-                f'<div class="today-stale-banner">{meaning.stale_banner}</div>',
-                unsafe_allow_html=True,
-            )
+        # Build snapshot fallback cards when trend history is too thin.
+        signal_mode = meaning.signal_mode
+        snapshot_cards = None
+        if signal_mode in (SignalMode.EARLY_SIGNAL, SignalMode.LIMITED_DATA):
+            snapshot_cards = build_snapshot_fallback_cards(
+                goal_status=goal_status,
+                today=today_value,
+            ) or None
+
+        orientation_state = meaning.surface_state
+        if (
+            orientation_state == TodaySurfaceState.NO_STRONG_SIGNALS
+            and signal_mode in {SignalMode.EARLY_SIGNAL, SignalMode.LIMITED_DATA}
+            and snapshot_cards
+        ):
+            orientation_state = TodaySurfaceState.EARLY_SIGNAL
+
+        _render_queue_orientation_block(
+            build_queue_orientation(attention_summary),
+            meaning=meaning,
+            surface_state=orientation_state,
+            signal_mode=signal_mode,
+        )
 
         _render_unified_attention_queue(
             attention_summary,
@@ -1330,19 +1653,34 @@ def page_today() -> None:
             is_stale=bool(meaning.state_flags.get("stale_data")),
             show_secondary_open=bool(st.session_state.get("_first_import_just_completed")),
             weak_data_mode=bool(meaning.weak_data_mode),
+            snapshot_cards=snapshot_cards,
         )
 
-        value_strip = build_today_value_strip_view_model(
-            goal_status=goal_status,
-            import_summary=meaning.import_summary,
-        )
-        if value_strip.cards:
-            with st.expander("Supporting context", expanded=bool(st.session_state.get("_first_import_just_completed"))):
-                _render_today_value_strip(
-                    value_strip,
-                    freshness_note=meaning.freshness_note,
-                    is_stale=bool(meaning.state_flags.get("stale_data")),
-                )
+        _supporting_context_key = "_today_supporting_context_loaded"
+        if bool(st.session_state.get("_first_import_just_completed")):
+            st.session_state[_supporting_context_key] = True
+
+        _show_supporting_context = bool(st.session_state.get(_supporting_context_key, False))
+        if _show_supporting_context:
+            value_strip = build_today_value_strip_view_model(
+                goal_status=goal_status,
+                import_summary=meaning.import_summary,
+            )
+            if value_strip.cards:
+                with st.expander("Supporting context", expanded=bool(st.session_state.get("_first_import_just_completed"))):
+                    _render_today_value_strip(
+                        value_strip,
+                        freshness_note=meaning.freshness_note,
+                        is_stale=bool(meaning.state_flags.get("stale_data")),
+                    )
+                    if st.button("Hide supporting context", key="today_hide_supporting_context", type="secondary"):
+                        st.session_state[_supporting_context_key] = False
+                        st.rerun()
+        else:
+            st.info("Supporting context is available on demand to keep Today reruns responsive.")
+            if st.button("Load supporting context", key="today_load_supporting_context", type="secondary"):
+                st.session_state[_supporting_context_key] = True
+                st.rerun()
 
         if bool(st.session_state.get("_first_import_just_completed")):
             st.session_state["_first_import_just_completed"] = False
