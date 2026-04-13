@@ -408,7 +408,9 @@ def _reset_demo_uploads(*, tenant_id: str) -> dict[str, int]:
         "skipped_without_snapshot": 0,
     }
 
-    uploads = list(_list_recent_uploads(tenant_id=tenant_id, days=3650) or [])
+    # Look back 90 days max for demo uploads (not 10 years).
+    # Most demo resets happen within days of import; older data is unlikely to be demo.
+    uploads = list(_list_recent_uploads(tenant_id=tenant_id, days=90) or [])
     for upload in uploads:
         if not _is_demo_upload_row(upload):
             continue
@@ -472,14 +474,15 @@ def _render_demo_reset_controls(*, import_summary: dict[str, Any], tenant_id: st
             disabled=not bool(confirmed),
         ):
             try:
-                outcome = _reset_demo_uploads(tenant_id=tenant_id)
-                _bust_cache()
-                if hasattr(get_today_signals, "cache_clear"):
-                    get_today_signals.cache_clear()
-                elif hasattr(get_today_signals, "clear"):
-                    get_today_signals.clear()
-                st.session_state.pop("_today_precomputed_payload", None)
-                st.session_state[confirm_key] = False
+                with st.spinner("Resetting demo data and restoring history..."):
+                    outcome = _reset_demo_uploads(tenant_id=tenant_id)
+                    _bust_cache()
+                    if hasattr(get_today_signals, "cache_clear"):
+                        get_today_signals.cache_clear()
+                    elif hasattr(get_today_signals, "clear"):
+                        get_today_signals.clear()
+                    st.session_state.pop("_today_precomputed_payload", None)
+                    st.session_state[confirm_key] = False
 
                 reset_count = int(outcome.get("demo_uploads_reset", 0) or 0)
                 if reset_count > 0:
