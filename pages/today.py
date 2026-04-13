@@ -1624,7 +1624,6 @@ def page_today() -> None:
         )
 
         _render_top_status_area(meaning=meaning)
-        _render_demo_reset_controls(import_summary=meaning.import_summary, tenant_id=tenant_id)
 
         # Build snapshot fallback cards when trend history is too thin.
         signal_mode = meaning.signal_mode
