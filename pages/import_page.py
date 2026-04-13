@@ -14,6 +14,7 @@ init_runtime()
 from pages.common import get_user_timezone_now, _normalize_label_text
 from ui.components import diagnose_upload, show_diagnosis, show_manual_entry_form
 import json
+import hashlib
 from pathlib import Path
 from data_loader import auto_detect as _auto_detect, parse_csv_bytes as _parse_csv
 from pages.employees import _build_archived_productivity
@@ -77,6 +78,37 @@ _DEMO_SAMPLE_FILES = [
     "demo_supervisor_history.csv",
     "demo_full_week.csv",
 ]
+
+
+def _build_step3_preview_cache_key(*, sessions: list[dict], work_date: date, tenant_id: str, user_role: str) -> str:
+    """Build a stable key for Step 3 preview artifacts across reruns.
+
+    Performance note: Streamlit reruns this page frequently while widgets change.
+    Caching preview artifacts avoids repeating expensive parse/validate/dup checks
+    when inputs have not changed.
+    """
+    compact_sessions = []
+    for session in sessions or []:
+        compact_sessions.append(
+            {
+                "filename": str(session.get("filename", "") or ""),
+                "row_count": int(session.get("row_count", 0) or 0),
+                "mapping": dict(session.get("mapping") or {}),
+                "timestamp": str(session.get("timestamp", "") or ""),
+                "source_mode": str(session.get("source_mode", "") or ""),
+                "source_label": str(session.get("source_label", "") or ""),
+                "header_count": len(session.get("headers") or []),
+            }
+        )
+
+    payload = {
+        "tenant_id": str(tenant_id or ""),
+        "user_role": str(user_role or ""),
+        "work_date": work_date.isoformat(),
+        "sessions": compact_sessions,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 def _build_sample_demo_sessions(*, tenant_id: str) -> list[dict]:
@@ -593,6 +625,17 @@ def _import_step1(tenant_id: str):
         key="import_entry_mode",
     )
 
+    st.markdown(
+        (
+            '<div style="margin-top:6px;margin-bottom:10px;padding:8px 10px;border:1px solid #dce9f5;'
+            'border-radius:8px;background:#f7fbff;color:#335a80;font-size:0.9rem;">'
+            '<strong>Fast demo path:</strong> Try sample data to load bundled warehouse history through the '
+            'same import and interpretation flow used for uploaded files.'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
     if mode == "Manual entry":
         manual_rows = show_manual_entry_form()
         st.info("Manual entry works even if you only have today's numbers.")
@@ -623,9 +666,15 @@ def _import_step1(tenant_id: str):
         return
 
     if mode == "Try sample data":
-        st.info("Load realistic sample data for immediate evaluation. This stays clearly labeled so it is distinct from your live uploaded data.")
-        st.caption("You will see it marked as Demo mode in the results.")
-        if st.button("Load sample data", type="primary", use_container_width=True, key="import_load_sample_history"):
+        with st.container(border=True):
+            st.markdown("**Try sample data**")
+            st.caption("Explore the product with bundled warehouse sample data.")
+            st.markdown("- See a realistic Today queue in under 30 seconds.")
+            st.markdown("- Uses realistic warehouse-style rows across multiple shifts and processes.")
+            st.markdown("- Runs through the same import pipeline and quality checks as uploaded files.")
+            st.caption("Demo mode remains clearly labeled downstream so sample history is distinct from live uploaded operations data.")
+
+        if st.button("Load sample warehouse data", type="primary", use_container_width=True, key="import_load_sample_history"):
             try:
                 sessions = _build_sample_demo_sessions(tenant_id=tenant_id)
                 if not sessions:
@@ -1226,190 +1275,231 @@ def _import_step3(tenant_id: str):
         st.markdown("**Work date for this import**")
         st.caption("Your CSV has no Date column mapped — all rows will be recorded under this date.")
         work_date = st.date_input("Work date", value=date.today(), label_visibility="collapsed")
+    _user_role = str(st.session_state.get("user_role", "") or "")
+    _preview_cache_key = _build_step3_preview_cache_key(
+        sessions=sessions,
+        work_date=work_date,
+        tenant_id=tenant_id,
+        user_role=_user_role,
+    )
+    _preview_cache = st.session_state.get("_import_step3_preview_cache")
 
-    _candidate_preview_rows = _build_candidate_uph_rows(sessions, work_date)
-    _preview_fingerprint = _build_import_fingerprint(_candidate_preview_rows)
-    _matching_upload = _find_matching_upload_by_fingerprint(st.session_state.get("tenant_id", ""), _preview_fingerprint)
+    _candidate_preview_rows = []
+    _preview_fingerprint = ""
+    _matching_upload = None
     _preview_dup_count = 0
     _preview_exact_duplicate_import = False
     _preview_mismatch_rows = []
-    try:
-        _tenant_id = st.session_state.get("tenant_id", "")
-        if _candidate_preview_rows:
-            if _matching_upload:
-                _preview_dup_count = len(_candidate_preview_rows)
-                _preview_exact_duplicate_import = True
-            else:
-                from database import get_client as _db_get_client, _tq as _db_tq
-                _code_to_primary, _code_to_all, _rowid_to_code = _build_emp_code_maps()
-
-                def _emp_code(_eid):
-                    return str(_eid or "").strip()
-
-                def _candidate_rowids(_code):
-                    _s = _emp_code(_code)
-                    _all = _code_to_all.get(_s)
-                    if _all:
-                        return set(_all)
-                    _p = _code_to_primary.get(_s, _s)
-                    return {_p} if _p else set()
-
-                _dates = sorted({r.get("work_date") for r in _candidate_preview_rows if r.get("work_date")})
-                _emp_ids = sorted({
-                    _rid
-                    for _r in _candidate_preview_rows
-                    for _rid in _candidate_rowids(_r.get("emp_id"))
-                    if _rid
-                })
-                _dmin = _dates[0] if _dates else ""
-                _dmax = _dates[-1] if _dates else ""
-                # Use integer emp_ids only — strings silently fail against bigint column
-                _emp_ids_int = sorted({
-                    int(_rid)
-                    for _rid in _emp_ids
-                    if str(_rid).lstrip("-").isdigit()
-                })
-                # Import history is stored as one row per employee per day for this
-                # pipeline, so duplicate detection should follow the same shape.
-                _existing_2key = set()
-                _history_emp_ids = set()
-                _history_dates_by_emp = {}
-                def _norm_date(_v):
-                    return str(_v or "").strip()[:10]
-                if _dmin and _dmax and _emp_ids_int:
-                    _sb = _db_get_client()
-                    _q = _sb.table("uph_history").select("emp_id, work_date")
-                    if _tenant_id:
-                        _q = _q.eq("tenant_id", _tenant_id)
-                    _q = _q.gte("work_date", _dmin).lte("work_date", _dmax).in_("emp_id", _emp_ids_int)
-                    _res = _db_tq(_q).execute()
-                    for _er in (_res.data or []):
-                        _er_emp = str(_er.get("emp_id", "") or "").strip()
-                        if _er_emp:
-                            _history_emp_ids.add(_er_emp)
-                            _history_dates_by_emp.setdefault(_er_emp, set()).add(_norm_date(_er.get("work_date", "")))
-                            _existing_2key.add((
-                                _er_emp,
-                                _norm_date(_er.get("work_date", "")),
-                            ))
-
-                for _r in _candidate_preview_rows:
-                    _k_date = _norm_date(_r.get("work_date", ""))
-                    _rowids = _candidate_rowids(_r.get("emp_id", ""))
-                    _is_dup = any((str(_rid), _k_date) in _existing_2key for _rid in _rowids)
-                    if _is_dup:
-                        _preview_dup_count += 1
-                    else:
-                        _resolved_rowids = [str(_rid) for _rid in sorted(_rowids)]
-                        _known_dates_str = ""
-                        _matching_emp_ids = [
-                            _rid for _rid in _resolved_rowids if _rid in _history_emp_ids
-                        ]
-                        if not _resolved_rowids:
-                            _reason = "Employee ID not found in employees table"
-                        elif not _matching_emp_ids:
-                            _reason = "No history rows found for this employee"
-                        elif not any(_k_date in _history_dates_by_emp.get(_rid, set()) for _rid in _matching_emp_ids):
-                            _known_dates = sorted({
-                                _d
-                                for _rid in _matching_emp_ids
-                                for _d in _history_dates_by_emp.get(_rid, set())
-                            })
-                            _known_dates_str = ", ".join(_known_dates[:5])
-                            if len(_known_dates) > 5:
-                                _known_dates_str += ", ..."
-                            _reason = "Employee exists in history, but not on this work date"
-                        else:
-                            _reason = "Key mismatch after duplicate comparison"
-                        _preview_mismatch_rows.append({
-                            "Source File(s)": _r.get("source_files", ""),
-                            "Employee ID": str(_r.get("emp_id", "") or ""),
-                            "Resolved Row ID(s)": ", ".join(_resolved_rowids),
-                            "Work Date": _k_date,
-                            "Department": str(_r.get("department", "") or ""),
-                            "Reason": _reason,
-                            "Known History Dates": _known_dates_str,
-                        })
-
-                _preview_exact_duplicate_import = (
-                    len(_candidate_preview_rows) > 0 and
-                    _preview_dup_count == len(_candidate_preview_rows)
-                )
-    except Exception:
-        pass
-
-    # Preview sample rows with selected mapping before writing to DB.
     _preview_rows = []
     _preview_emp_ids = set()
     _preview_dates = set()
-    for _s in sessions:
-        _m = _s.get("mapping", {})
-        _id_col = _m.get("EmployeeID", "")
-        _name_col = _m.get("EmployeeName", "")
-        _dept_col = _m.get("Department", "")
-        _date_col = _m.get("Date", "")
-        _u_col = _m.get("Units", "")
-        _h_col = _m.get("HoursWorked", "")
-        _uph_col = _m.get("UPH", "")
-        for _r in (_s.get("rows") or []):
-            _eid = str(_r.get(_id_col, "") if _id_col else "").strip()
-            _enm = str(_r.get(_name_col, "") if _name_col else "").strip()
-            _dep = str(_r.get(_dept_col, "") if _dept_col else "").strip()
-            _d = str(_r.get(_date_col, "") if _date_col else "").strip()
-            if _eid:
-                _preview_emp_ids.add(_eid)
-            if _d:
-                _preview_dates.add(_d[:10])
-            if len(_preview_rows) < 25:
-                _preview_rows.append({
-                    "Date": _d[:10] if _d else work_date.isoformat(),
-                    "Employee ID": _eid,
-                    "Employee Name": _enm,
-                    "Department": _dep,
-                    "Units": str(_r.get(_u_col, "") if _u_col else "").strip(),
-                    "Hours": str(_r.get(_h_col, "") if _h_col else "").strip(),
-                    "UPH": str(_r.get(_uph_col, "") if _uph_col else "").strip(),
-                })
-
-    _preview_overlap_count = _preview_dup_count
-    _preview_new_count = 0 if _preview_exact_duplicate_import else len(_candidate_preview_rows)
     _preview_result_obj = None
     _preview_trust_summary = {}
     _preview_row_issues = []
-    _user_role = str(st.session_state.get("user_role", "") or "")
-    try:
-        _preview_result_obj = run_import_preview_job(
-            sessions=sessions,
-            fallback_date=work_date,
-            tenant_id=tenant_id,
-            user_role=_user_role,
-        )
-        if _preview_result_obj and _preview_result_obj.success:
-            _preview_trust_summary = {
-                "status": _preview_result_obj.trust_summary.status,
-                "confidence_score": _preview_result_obj.trust_summary.confidence_score,
-                "accepted_rows": _preview_result_obj.trust_summary.accepted_rows,
-                "rejected_rows": _preview_result_obj.trust_summary.rejected_rows,
-                "warnings": _preview_result_obj.trust_summary.warnings,
-                "duplicates": _preview_result_obj.trust_summary.duplicates,
-                "missing_required_fields": _preview_result_obj.trust_summary.missing_required_fields,
-                "inconsistent_names": _preview_result_obj.trust_summary.inconsistent_names,
-                "suspicious_values": _preview_result_obj.trust_summary.suspicious_values,
-            }
-            _preview_row_issues = [
-                {
-                    "code": issue.code,
-                    "message": issue.message,
-                    "severity": issue.severity,
-                    "row_index": issue.row_index,
-                    "field": issue.field,
-                    "value": issue.value,
+
+    if isinstance(_preview_cache, dict) and _preview_cache.get("key") == _preview_cache_key:
+        _candidate_preview_rows = list(_preview_cache.get("candidate_rows") or [])
+        _preview_fingerprint = str(_preview_cache.get("fingerprint") or "")
+        _matching_upload = _preview_cache.get("matching_upload")
+        _preview_dup_count = int(_preview_cache.get("preview_dup_count", 0) or 0)
+        _preview_exact_duplicate_import = bool(_preview_cache.get("exact_duplicate_import"))
+        _preview_mismatch_rows = list(_preview_cache.get("preview_mismatch_rows") or [])
+        _preview_rows = list(_preview_cache.get("preview_rows") or [])
+        _preview_emp_ids = set(_preview_cache.get("preview_emp_ids") or [])
+        _preview_dates = set(_preview_cache.get("preview_dates") or [])
+        _preview_result_obj = _preview_cache.get("preview_result_obj")
+        _preview_trust_summary = dict(_preview_cache.get("preview_trust_summary") or {})
+        _preview_row_issues = list(_preview_cache.get("preview_row_issues") or [])
+    else:
+        # Build a small parsed sample once per unique input so Streamlit reruns
+        # don't repeatedly loop through all rows for the same preview payload.
+        for _s in sessions:
+            _m = _s.get("mapping", {})
+            _id_col = _m.get("EmployeeID", "")
+            _name_col = _m.get("EmployeeName", "")
+            _dept_col = _m.get("Department", "")
+            _date_col = _m.get("Date", "")
+            _u_col = _m.get("Units", "")
+            _h_col = _m.get("HoursWorked", "")
+            _uph_col = _m.get("UPH", "")
+            for _r in (_s.get("rows") or []):
+                _eid = str(_r.get(_id_col, "") if _id_col else "").strip()
+                _enm = str(_r.get(_name_col, "") if _name_col else "").strip()
+                _dep = str(_r.get(_dept_col, "") if _dept_col else "").strip()
+                _d = str(_r.get(_date_col, "") if _date_col else "").strip()
+                if _eid:
+                    _preview_emp_ids.add(_eid)
+                if _d:
+                    _preview_dates.add(_d[:10])
+                if len(_preview_rows) < 25:
+                    _preview_rows.append({
+                        "Date": _d[:10] if _d else work_date.isoformat(),
+                        "Employee ID": _eid,
+                        "Employee Name": _enm,
+                        "Department": _dep,
+                        "Units": str(_r.get(_u_col, "") if _u_col else "").strip(),
+                        "Hours": str(_r.get(_h_col, "") if _h_col else "").strip(),
+                        "UPH": str(_r.get(_uph_col, "") if _uph_col else "").strip(),
+                    })
+
+        try:
+            _preview_result_obj = run_import_preview_job(
+                sessions=sessions,
+                fallback_date=work_date,
+                tenant_id=tenant_id,
+                user_role=_user_role,
+            )
+            if _preview_result_obj and _preview_result_obj.success:
+                _candidate_preview_rows = list(_preview_result_obj.candidate_rows or [])
+                _preview_fingerprint = str(_preview_result_obj.fingerprint or "")
+                _preview_exact_duplicate_import = bool(_preview_result_obj.exact_duplicate_import)
+                _preview_trust_summary = {
+                    "status": _preview_result_obj.trust_summary.status,
+                    "confidence_score": _preview_result_obj.trust_summary.confidence_score,
+                    "accepted_rows": _preview_result_obj.trust_summary.accepted_rows,
+                    "rejected_rows": _preview_result_obj.trust_summary.rejected_rows,
+                    "warnings": _preview_result_obj.trust_summary.warnings,
+                    "duplicates": _preview_result_obj.trust_summary.duplicates,
+                    "missing_required_fields": _preview_result_obj.trust_summary.missing_required_fields,
+                    "inconsistent_names": _preview_result_obj.trust_summary.inconsistent_names,
+                    "suspicious_values": _preview_result_obj.trust_summary.suspicious_values,
                 }
-                for issue in (_preview_result_obj.invalid_issues or [])
-            ]
-    except Exception:
-        _preview_trust_summary = {}
-        _preview_row_issues = []
+                _preview_row_issues = [
+                    {
+                        "code": issue.code,
+                        "message": issue.message,
+                        "severity": issue.severity,
+                        "row_index": issue.row_index,
+                        "field": issue.field,
+                        "value": issue.value,
+                    }
+                    for issue in (_preview_result_obj.invalid_issues or [])
+                ]
+            else:
+                _candidate_preview_rows = _build_candidate_uph_rows(sessions, work_date)
+                _preview_fingerprint = _build_import_fingerprint(_candidate_preview_rows)
+        except Exception:
+            _preview_trust_summary = {}
+            _preview_row_issues = []
+            _candidate_preview_rows = _build_candidate_uph_rows(sessions, work_date)
+            _preview_fingerprint = _build_import_fingerprint(_candidate_preview_rows)
+
+        try:
+            _tenant_id = st.session_state.get("tenant_id", "")
+            if _candidate_preview_rows:
+                if _preview_exact_duplicate_import:
+                    _preview_dup_count = len(_candidate_preview_rows)
+                    if _preview_fingerprint:
+                        _matching_upload = _find_matching_upload_by_fingerprint(
+                            st.session_state.get("tenant_id", ""),
+                            _preview_fingerprint,
+                        )
+                else:
+                    from database import get_client as _db_get_client, _tq as _db_tq
+                    _code_to_primary, _code_to_all, _rowid_to_code = _build_emp_code_maps()
+
+                    def _emp_code(_eid):
+                        return str(_eid or "").strip()
+
+                    def _candidate_rowids(_code):
+                        _s = _emp_code(_code)
+                        _all = _code_to_all.get(_s)
+                        if _all:
+                            return set(_all)
+                        _p = _code_to_primary.get(_s, _s)
+                        return {_p} if _p else set()
+
+                    _dates = sorted({r.get("work_date") for r in _candidate_preview_rows if r.get("work_date")})
+                    _emp_ids = sorted({
+                        _rid
+                        for _r in _candidate_preview_rows
+                        for _rid in _candidate_rowids(_r.get("emp_id"))
+                        if _rid
+                    })
+                    _dmin = _dates[0] if _dates else ""
+                    _dmax = _dates[-1] if _dates else ""
+                    _emp_ids_int = sorted({
+                        int(_rid)
+                        for _rid in _emp_ids
+                        if str(_rid).lstrip("-").isdigit()
+                    })
+                    _existing_2key = set()
+                    _history_emp_ids = set()
+                    _history_dates_by_emp = {}
+
+                    def _norm_date(_v):
+                        return str(_v or "").strip()[:10]
+
+                    if _dmin and _dmax and _emp_ids_int:
+                        _sb = _db_get_client()
+                        _q = _sb.table("uph_history").select("emp_id, work_date")
+                        if _tenant_id:
+                            _q = _q.eq("tenant_id", _tenant_id)
+                        _q = _q.gte("work_date", _dmin).lte("work_date", _dmax).in_("emp_id", _emp_ids_int)
+                        _res = _db_tq(_q).execute()
+                        for _er in (_res.data or []):
+                            _er_emp = str(_er.get("emp_id", "") or "").strip()
+                            if _er_emp:
+                                _history_emp_ids.add(_er_emp)
+                                _history_dates_by_emp.setdefault(_er_emp, set()).add(_norm_date(_er.get("work_date", "")))
+                                _existing_2key.add((_er_emp, _norm_date(_er.get("work_date", ""))))
+
+                    for _r in _candidate_preview_rows:
+                        _k_date = _norm_date(_r.get("work_date", ""))
+                        _rowids = _candidate_rowids(_r.get("emp_id", ""))
+                        _is_dup = any((str(_rid), _k_date) in _existing_2key for _rid in _rowids)
+                        if _is_dup:
+                            _preview_dup_count += 1
+                        else:
+                            _resolved_rowids = [str(_rid) for _rid in sorted(_rowids)]
+                            _known_dates_str = ""
+                            _matching_emp_ids = [_rid for _rid in _resolved_rowids if _rid in _history_emp_ids]
+                            if not _resolved_rowids:
+                                _reason = "Employee ID not found in employees table"
+                            elif not _matching_emp_ids:
+                                _reason = "No history rows found for this employee"
+                            elif not any(_k_date in _history_dates_by_emp.get(_rid, set()) for _rid in _matching_emp_ids):
+                                _known_dates = sorted({
+                                    _d
+                                    for _rid in _matching_emp_ids
+                                    for _d in _history_dates_by_emp.get(_rid, set())
+                                })
+                                _known_dates_str = ", ".join(_known_dates[:5])
+                                if len(_known_dates) > 5:
+                                    _known_dates_str += ", ..."
+                                _reason = "Employee exists in history, but not on this work date"
+                            else:
+                                _reason = "Key mismatch after duplicate comparison"
+                            _preview_mismatch_rows.append({
+                                "Source File(s)": _r.get("source_files", ""),
+                                "Employee ID": str(_r.get("emp_id", "") or ""),
+                                "Resolved Row ID(s)": ", ".join(_resolved_rowids),
+                                "Work Date": _k_date,
+                                "Department": str(_r.get("department", "") or ""),
+                                "Reason": _reason,
+                                "Known History Dates": _known_dates_str,
+                            })
+        except Exception:
+            pass
+
+        st.session_state["_import_step3_preview_cache"] = {
+            "key": _preview_cache_key,
+            "candidate_rows": _candidate_preview_rows,
+            "fingerprint": _preview_fingerprint,
+            "matching_upload": _matching_upload,
+            "preview_dup_count": _preview_dup_count,
+            "exact_duplicate_import": _preview_exact_duplicate_import,
+            "preview_mismatch_rows": _preview_mismatch_rows,
+            "preview_rows": _preview_rows,
+            "preview_emp_ids": list(_preview_emp_ids),
+            "preview_dates": list(_preview_dates),
+            "preview_result_obj": _preview_result_obj,
+            "preview_trust_summary": _preview_trust_summary,
+            "preview_row_issues": _preview_row_issues,
+        }
+
+    _preview_overlap_count = _preview_dup_count
+    _preview_new_count = 0 if _preview_exact_duplicate_import else len(_candidate_preview_rows)
 
     with st.expander("👀 Preview parsed data before import", expanded=True):
         _preview_days = len(_preview_dates) if _preview_dates else 1
@@ -1531,6 +1621,17 @@ def _import_step3(tenant_id: str):
         }
         _mark_import_stage_completed(_import_job, "validate", meta=_validate_meta)
 
+        st.markdown(
+            """
+            <style>
+            .stProgress p {
+                color: #FFFFFF !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
         _progress_container = st.container()
         with _progress_container:
             bar = st.progress(0, text="Registering employees…")
@@ -1615,65 +1716,9 @@ def _import_step3(tenant_id: str):
 
         # Run productivity pipeline
         try:
-            from data_processor import process_data
-            from ranker         import rank_employees, build_department_report, calculate_employee_risk
-            from trends         import calculate_department_trends, build_weekly_summary, calculate_employee_rolling_average
-            from error_log      import ErrorLog
-            from goals          import analyse_trends, build_goal_status
-
-            class _PS:
-                def get(self, k, d=None): return st.session_state.get(k, d)
-                def get_output_dir(self): return tempfile.gettempdir()
-                def get_dept_target_uph(self, d):
-                    t = _cached_targets().get(d, 0)
-                    return float(t) if t else float(st.session_state.get("target_uph",0) or 0)
-                def all_mappings(self): return all_mapping
-
-            ps  = _PS()
-            log = ErrorLog(tempfile.gettempdir(), tenant_id=tenant_id)
-
-            processed = process_data(all_rows, all_mapping, ps, log)
-
-            # User-friendly cleanup pass: normalize employee labels and discard
-            # unrealistic/non-finite UPH values before ranking.
-            _proc_name_col = all_mapping.get("EmployeeName") or "EmployeeName"
-            _proc_id_col = all_mapping.get("EmployeeID") or "EmployeeID"
-            _proc_dept_col = all_mapping.get("Department") or "Department"
-            _proc_uph_col = all_mapping.get("UPH") or "UPH"
-            for _row in processed:
-                _eid = str(_row.get(_proc_id_col, "")).strip()
-                _raw_name = _row.get(_proc_name_col, "")
-                _safe_name, _flagged = _sanitize_employee_name(_raw_name, _eid)
-                if _flagged or _safe_name != str(_raw_name).strip():
-                    name_fixed_count += 1
-                _row[_proc_name_col] = _safe_name
-                _row[_proc_dept_col] = _normalize_label_text(_row.get(_proc_dept_col, ""), max_len=40)
-
-                _raw_uph = _row.get(_proc_uph_col, "")
-                if str(_raw_uph).strip() != "":
-                    try:
-                        _uph = float(_raw_uph)
-                        if (not math.isfinite(_uph)) or _uph < 0 or _uph > max_reasonable_uph:
-                            _row[_proc_uph_col] = ""
-                            uph_rejected_count += 1
-                        else:
-                            _row[_proc_uph_col] = round(_uph, 4)
-                    except (ValueError, TypeError):
-                        _row[_proc_uph_col] = ""
-                        uph_rejected_count += 1
-
-            if name_fixed_count or uph_rejected_count:
-                st.warning(
-                    "Data cleanup applied for readability: "
-                    f"{name_fixed_count} employee label(s) normalized, "
-                    f"{uph_rejected_count} invalid UPH value(s) ignored."
-                )
-
+            # Legacy in-memory processing pass was redundant for the import write
+            # path and added noticeable latency on larger files.
             bar.progress(40, text="Preparing import data…")
-
-            existing = st.session_state.history
-            existing.extend(processed)
-            st.session_state.history = existing
 
             bar.progress(60, text="Storing UPH history…")
 
@@ -1958,49 +2003,9 @@ def _import_step3(tenant_id: str):
                 from database import batch_store_uph_history as _batch_store_uph_history
                 _batch_store_uph_history(uph_batch)
 
-                # -----------------------------------------------------------
-                # After the upsert, fetch the actual PK (id) for every row
-                # that was brand-new (not an overwrite).  Storing PKs instead
-                # of (emp_id, date, dept) triples means rollback is a simple
-                # DELETE WHERE id IN (...) with no type-coercion footguns.
-                # -----------------------------------------------------------
+                # Keep rollback metadata lightweight for speed. We rely on
+                # touched_keys + previous_rows for undo without an extra PK scan.
                 _new_row_ids = []
-                if _bg_tid and _undo_touched_keys:
-                    try:
-                        from database import get_client as _db_get_client, _tq as _db_tq
-                        _sb_pk = _db_get_client()
-                        # All touched keys are new inserts (skipped rows are never upserted)
-                        _new_keys_set = {
-                            (str(_k[0]), str(_k[1]), str(_k[2]))
-                            for _k in _undo_touched_keys
-                        }
-                        if _new_keys_set:
-                            _pk_emp_ids = []
-                            for _nk in _new_keys_set:
-                                try:
-                                    _pk_emp_ids.append(int(_nk[0]))
-                                except (TypeError, ValueError):
-                                    pass
-                            _pk_dates = sorted({_nk[1] for _nk in _new_keys_set})
-                            if _pk_emp_ids and _pk_dates:
-                                _pk_res = _db_tq(
-                                    _sb_pk.table("uph_history")
-                                    .select("id, emp_id, work_date, department")
-                                    .eq("tenant_id", _bg_tid)
-                                    .in_("emp_id", _pk_emp_ids)
-                                    .gte("work_date", _pk_dates[0])
-                                    .lte("work_date", _pk_dates[-1])
-                                ).execute()
-                                for _pk_row in (_pk_res.data or []):
-                                    _pk_k = (
-                                        str(_pk_row.get("emp_id", "")),
-                                        str(_pk_row.get("work_date", "")),
-                                        str(_pk_row.get("department", "") or ""),
-                                    )
-                                    if _pk_k in _new_keys_set and _pk_row.get("id") is not None:
-                                        _new_row_ids.append(_pk_row["id"])
-                    except Exception:
-                        pass
 
                 if _bg_tid:
                     _preview_missing_required = int(_preview_trust_summary.get("missing_required_fields", 0) or 0)

@@ -149,8 +149,9 @@ def batch_store_uph_history(records: list[dict]):
         if fields:
             records = [{**record, **fields} for record in records]
 
-    for index in range(0, len(records), 500):
-        chunk = records[index : index + 500]
+    chunk_size = 1000
+    for index in range(0, len(records), chunk_size):
+        chunk = records[index : index + chunk_size]
         safe_chunk = []
         for row in chunk:
             try:
@@ -192,7 +193,7 @@ def batch_store_uph_history(records: list[dict]):
                 "repo_uph_batch_upsert_succeeded",
                 "Repository UPH batch upsert succeeded.",
                 tenant_id=tenant_id,
-                context={"chunk_index": index // 500, "chunk_size": len(safe_chunk)},
+                context={"chunk_index": index // chunk_size, "chunk_size": len(safe_chunk)},
             )
         except Exception as error:
             log_error(
@@ -205,7 +206,7 @@ def batch_store_uph_history(records: list[dict]):
                 "repo_uph_batch_upsert_failed",
                 "Repository UPH batch upsert failed.",
                 tenant_id=tenant_id,
-                context={"chunk_index": index // 500, "chunk_size": len(safe_chunk)},
+                context={"chunk_index": index // chunk_size, "chunk_size": len(safe_chunk)},
                 error=error,
             )
             raise
