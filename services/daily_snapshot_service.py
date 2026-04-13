@@ -271,6 +271,7 @@ def recompute_daily_employee_snapshots(
     lookback_days: int = 14,
     comparison_days: int = 5,
     replace_existing: bool = True,
+    source_limit: int = 5000,
 ) -> dict:
     if from_date and to_date:
         start_date = _parse_date(from_date)
@@ -284,7 +285,11 @@ def recompute_daily_employee_snapshots(
         fetch_days = max(1, int(days or 30)) + (lookback_days * 3)
         start_date = end_date - timedelta(days=max(0, int(days or 30) - 1))
 
-    activity_rows = get_recent_activity_records(tenant_id=tenant_id, days=fetch_days, limit=5000)
+    activity_rows = get_recent_activity_records(
+        tenant_id=tenant_id,
+        days=fetch_days,
+        limit=max(500, int(source_limit or 5000)),
+    )
     snapshots = build_daily_employee_snapshots(
         activity_records=activity_rows,
         tenant_id=tenant_id,

@@ -111,6 +111,7 @@ def run_snapshot_recompute_job(
     from_date: str,
     to_date: str,
     replace_existing: bool = True,
+    source_limit: int = 5000,
     run_mode: str = "sync",
 ) -> dict[str, Any]:
     request = JobRequest(
@@ -125,6 +126,7 @@ def run_snapshot_recompute_job(
             from_date=from_date,
             to_date=to_date,
             replace_existing=bool(replace_existing),
+            source_limit=int(source_limit or 5000),
         ),
     )
 
@@ -143,6 +145,8 @@ def run_import_postprocess_job(
     from_date: str = "",
     to_date: str = "",
     replace_existing_snapshots: bool = True,
+    ingest_activity: bool = True,
+    snapshot_source_limit: int = 5000,
     run_mode: str = "sync",
 ) -> dict[str, Any]:
     log_operational_event(
@@ -161,17 +165,19 @@ def run_import_postprocess_job(
         context={"exclusion_note": str(exclusion_note or "")},
     )
 
-    ingested_count = run_activity_ingest_job(
-        uph_rows=uph_rows,
-        source_import_job_id=source_import_job_id,
-        source_import_file=source_import_file,
-        source_upload_id=source_upload_id,
-        data_quality_status=data_quality_status,
-        exclusion_note=exclusion_note,
-        handling_choice=handling_choice,
-        handling_note=handling_note,
-        run_mode=run_mode,
-    )
+    ingested_count = 0
+    if ingest_activity:
+        ingested_count = run_activity_ingest_job(
+            uph_rows=uph_rows,
+            source_import_job_id=source_import_job_id,
+            source_import_file=source_import_file,
+            source_upload_id=source_upload_id,
+            data_quality_status=data_quality_status,
+            exclusion_note=exclusion_note,
+            handling_choice=handling_choice,
+            handling_note=handling_note,
+            run_mode=run_mode,
+        )
 
     snapshot_result: dict[str, Any] = {}
     if str(from_date or "").strip() and str(to_date or "").strip():
@@ -180,6 +186,7 @@ def run_import_postprocess_job(
             from_date=from_date,
             to_date=to_date,
             replace_existing=bool(replace_existing_snapshots),
+            source_limit=int(snapshot_source_limit or 5000),
             run_mode=run_mode,
         )
 
