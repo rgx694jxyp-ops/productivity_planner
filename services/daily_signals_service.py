@@ -98,6 +98,11 @@ def _build_import_summary(*, tenant_id: str, goal_status: list[dict[str, Any]]) 
         rejected_rows = _safe_int(stats.get("rejected_rows"), max(0, rows_processed - valid_rows))
         confidence_score = _safe_int(stats.get("confidence_score"), 0)
         trust_status = str(stats.get("trust_status") or "").strip().lower()
+        inferred_days_from_stats = inferred_days
+        if inferred_days_from_stats <= 0 and (rows_processed > 0 or valid_rows > 0):
+            # When snapshot goal rows are not yet materialized, preserve imported
+            # presence so Today does not incorrectly present "no imported records yet".
+            inferred_days_from_stats = 1
 
         trust_payload = {
             "status": trust_status,
@@ -114,6 +119,7 @@ def _build_import_summary(*, tenant_id: str, goal_status: list[dict[str, Any]]) 
 
         return {
             **base_summary,
+            "days": int(inferred_days_from_stats),
             "rows_processed": rows_processed,
             "valid_rows": valid_rows,
             "warning_rows": warning_rows,
