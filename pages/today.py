@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from core.dependencies import _cached_employees, _log_app_error
+from core.dependencies import _bust_cache, _cached_employees, _log_app_error
 from domain.display_signal import DisplaySignal, SignalLabel
 from domain.insight_card_contract import InsightCardContract
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
@@ -340,6 +340,134 @@ def _render_demo_source_banner(import_summary: dict[str, Any]) -> None:
         ),
         unsafe_allow_html=True,
     )
+
+
+def _is_demo_upload_row(upload_row: dict[str, Any]) -> bool:
+    if not bool(upload_row.get("is_active")):
+        return False
+
+    try:
+        from services.import_service import _decode_jsonish
+
+        meta = _decode_jsonish(upload_row.get("header_mapping"))
+    except Exception:
+        meta = {}
+
+    if not isinstance(meta, dict):
+        meta = {}
+
+    stats = dict(meta.get("stats") or {})
+    source_mode = str(meta.get("source_mode") or stats.get("source_mode") or "").strip().lower()
+    if source_mode != "demo":
+        return False
+
+    if bool(meta.get("undo_applied_at")):
+        return False
+
+    return True
+
+
+def _reset_demo_uploads(*, tenant_id: str) -> dict[str, int]:
+    from services.import_service import _decode_jsonish, _deactivate_upload, _list_recent_uploads, _restore_uph_snapshot
+
+    summary = {
+        "demo_uploads_found": 0,
+        "demo_uploads_reset": 0,
+        "restored_rows": 0,
+        "verified_deleted_rows": 0,
+        "skipped_without_snapshot": 0,
+    }
+
+    uploads = list(_list_recent_uploads(tenant_id=tenant_id, days=3650) or [])
+    for upload in uploads:
+        if not _is_demo_upload_row(upload):
+            continue
+
+        summary["demo_uploads_found"] += 1
+        meta = _decode_jsonish(upload.get("header_mapping"))
+        if not isinstance(meta, dict):
+            meta = {}
+
+        undo = meta.get("undo", {}) if isinstance(meta, dict) else {}
+        new_row_ids = list(undo.get("new_row_ids", []) or [])
+        previous_rows = list(undo.get("previous_rows", []) or [])
+        touched_keys = list(undo.get("touched_keys", []) or [])
+
+        if not new_row_ids and not previous_rows and not touched_keys:
+            summary["skipped_without_snapshot"] += 1
+            continue
+
+        restored_rows, _attempted_deletes, verified_deleted = _restore_uph_snapshot(
+            tenant_id,
+            new_row_ids,
+            previous_rows,
+            touched_keys,
+        )
+        summary["restored_rows"] += int(restored_rows)
+        summary["verified_deleted_rows"] += int(verified_deleted)
+
+        meta["undo_applied_at"] = date.today().isoformat()
+        meta["undo_result"] = {
+            "source": "today_demo_reset",
+            "restored_rows": int(restored_rows),
+            "verified_deleted": int(verified_deleted),
+        }
+        _deactivate_upload(tenant_id, upload.get("id"), meta)
+        summary["demo_uploads_reset"] += 1
+
+    return summary
+
+
+def _render_demo_reset_controls(*, import_summary: dict[str, Any], tenant_id: str) -> None:
+    source_mode = str((import_summary or {}).get("source_mode") or "").strip().lower()
+    if source_mode != "demo":
+        return
+
+    with st.container(border=True):
+        st.markdown("**Reset demo data**")
+        st.caption(
+            "This removes demo-imported history from this workspace and keeps real uploaded data unchanged."
+        )
+
+        confirm_key = "confirm_reset_demo_data"
+        confirmed = st.checkbox(
+            "I understand this clears demo data only.",
+            key=confirm_key,
+        )
+        if st.button(
+            "Reset demo data",
+            type="secondary",
+            use_container_width=True,
+            key="today_reset_demo_data",
+            disabled=not bool(confirmed),
+        ):
+            try:
+                outcome = _reset_demo_uploads(tenant_id=tenant_id)
+                _bust_cache()
+                if hasattr(get_today_signals, "cache_clear"):
+                    get_today_signals.cache_clear()
+                elif hasattr(get_today_signals, "clear"):
+                    get_today_signals.clear()
+                st.session_state.pop("_today_precomputed_payload", None)
+                st.session_state[confirm_key] = False
+
+                reset_count = int(outcome.get("demo_uploads_reset", 0) or 0)
+                if reset_count > 0:
+                    st.success(
+                        "Demo data reset complete. "
+                        f"Removed {reset_count} demo upload(s) from active history."
+                    )
+                else:
+                    st.info("No active demo uploads were found to reset.")
+
+                skipped = int(outcome.get("skipped_without_snapshot", 0) or 0)
+                if skipped > 0:
+                    st.warning(
+                        f"{skipped} demo upload(s) had no rollback snapshot and were left unchanged."
+                    )
+                st.rerun()
+            except Exception as exc:
+                show_error_state(f"Demo reset failed: {exc}")
 
 
 def _render_today_interpretation_strip() -> None:
@@ -1188,6 +1316,7 @@ def page_today() -> None:
             st.caption(meaning.status_line)
 
         _render_demo_source_banner(meaning.import_summary)
+        _render_demo_reset_controls(import_summary=meaning.import_summary, tenant_id=tenant_id)
 
         if meaning.stale_banner:
             st.markdown(

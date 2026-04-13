@@ -73,7 +73,7 @@ def build_first_import_insight(
     elif days > 3:
         compared_to_what = (
             "Compared against each employee's own recent average "
-            "(targets not yet configured — add them in Settings to enable target comparisons)."
+            "(targets are not configured for this data yet)."
         )
     else:
         compared_to_what = (

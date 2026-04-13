@@ -623,9 +623,9 @@ def _import_step1(tenant_id: str):
         return
 
     if mode == "Try sample data":
-        st.info("Loads sample/demo history into this tenant so the Today queue can be evaluated immediately.")
-        st.caption("Sample mode is labeled in Today so it is distinct from live uploaded operations data.")
-        if st.button("Load sample history", type="primary", use_container_width=True, key="import_load_sample_history"):
+        st.info("Load realistic sample data for immediate evaluation. This stays clearly labeled so it is distinct from your live uploaded data.")
+        st.caption("You will see it marked as Demo mode in the results.")
+        if st.button("Load sample data", type="primary", use_container_width=True, key="import_load_sample_history"):
             try:
                 sessions = _build_sample_demo_sessions(tenant_id=tenant_id)
                 if not sessions:
@@ -638,7 +638,7 @@ def _import_step1(tenant_id: str):
                 st.rerun()
             except Exception as sample_err:
                 _show_user_error(
-                    "Could not load sample history right now.",
+                    "Could not load sample data right now.",
                     next_steps="Retry in a few seconds. If the issue continues, verify demo files are available.",
                     technical_detail=str(sample_err),
                     category="import",
