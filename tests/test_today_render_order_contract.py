@@ -16,7 +16,7 @@ def _build_card(*, line_5: str, freshness: str) -> TodayQueueCardViewModel:
         state="CURRENT",
         line_1="Alex · Receiving",
         line_2="Below expected pace",
-        line_3="Surfaced because recent output is below the comparison range.",
+        line_3="Surfaced because recent output is below the recent baseline (prior comparable days and target context when available).",
         line_4="Based on 4 recent records",
         line_5=line_5,
         freshness_line=freshness,

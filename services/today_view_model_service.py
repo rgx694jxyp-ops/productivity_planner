@@ -675,7 +675,7 @@ def _why_surfaced_line(source: Any, signal: DisplaySignal) -> str:
         signal_wording("lower_than_recent_pace").lower(),
         signal_wording("below_expected_pace").lower(),
     }:
-        base = "Surfaced because recent output is below the comparison range."
+        base = "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available)."
         scope_label = _source_scope_label(source)
         return f"{base} Scope: {scope_label}." if scope_label else base
     if label == signal_wording("inconsistent_performance").lower():
@@ -683,7 +683,7 @@ def _why_surfaced_line(source: Any, signal: DisplaySignal) -> str:
         scope_label = _source_scope_label(source)
         return f"{base} Scope: {scope_label}." if scope_label else base
     if label == signal_wording("improving_pace").lower():
-        base = "Surfaced because recent output is above the comparison range."
+        base = "Surfaced because recent output is above the recent baseline (prior comparable days and target context when available)."
         scope_label = _source_scope_label(source)
         return f"{base} Scope: {scope_label}." if scope_label else base
 

@@ -21,7 +21,7 @@ def _build_card(*, confidence_level: str = "high", included_rows: int | None = 6
         title="Lower than recent pace",
         what_happened="Lower than recent pace",
         compared_to_what="Compared with the latest 3-day window versus prior 3-day window",
-        why_flagged="Surfaced because recent output is below the comparison range.",
+        why_flagged="Surfaced because recent output is below the recent baseline (prior comparable days and target context when available).",
         confidence=ConfidenceInfo(
             level=confidence_level,
             score=0.55,

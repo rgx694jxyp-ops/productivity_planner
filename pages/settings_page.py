@@ -389,6 +389,67 @@ def page_settings():
         st.divider()
 
         # ── Preserved: chart/labor/audit/cleanup settings ─────────────────────
+        st.subheader("🎯 Department Targets")
+        st.caption("Set optional UPH targets by department/process. These are used as comparison baselines when available.")
+        try:
+            from goals import clear_process_target, get_all_targets, set_process_target
+
+            _target_rows = []
+            _targets = dict(get_all_targets(_tid_team) or {})
+            for _dept_name in sorted(_targets.keys()):
+                _target_rows.append(
+                    {
+                        "Department": str(_dept_name),
+                        "Target UPH": float(_targets.get(_dept_name) or 0),
+                    }
+                )
+
+            if _target_rows:
+                st.dataframe(_target_rows, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No department targets configured yet.")
+
+            _dept_col1, _dept_col2 = st.columns([2, 1])
+            _dept_name_input = _dept_col1.text_input(
+                "Department/process",
+                key="settings_target_department_name",
+                placeholder="e.g. Picking",
+            )
+            _target_input = _dept_col2.number_input(
+                "Target UPH",
+                min_value=0.0,
+                step=0.5,
+                key="settings_target_uph_value",
+            )
+
+            _t1, _t2 = st.columns(2)
+            if _t1.button("Save department target", key="settings_save_department_target", use_container_width=True):
+                _name = str(_dept_name_input or "").strip()
+                if not _name:
+                    st.warning("Enter a department/process name before saving.")
+                else:
+                    set_process_target(_name, float(_target_input or 0), tenant_id=_tid_team)
+                    st.success(f"✓ Saved target for {_name}.")
+                    st.rerun()
+
+            _existing_target_names = sorted([str(name) for name in _targets.keys() if str(name).strip()])
+            _clear_choice = _t2.selectbox(
+                "Remove configured target",
+                ["—"] + _existing_target_names,
+                key="settings_clear_department_target_choice",
+            )
+            if _t2.button("Remove target", key="settings_clear_department_target", use_container_width=True):
+                if _clear_choice == "—":
+                    st.warning("Select a configured department target to remove.")
+                else:
+                    clear_process_target(_clear_choice, tenant_id=_tid_team)
+                    st.success(f"✓ Removed target for {_clear_choice}.")
+                    st.rerun()
+        except Exception as _targets_err:
+            _log_app_error("settings", f"Department targets controls unavailable: {_targets_err}", detail=traceback.format_exc(), severity="warning")
+
+        st.divider()
+        # ── Preserved: chart/labor/audit/cleanup settings ─────────────────────
         st.subheader("⚙️ App Settings")
         st.caption("Configure team-level behavior, labor assumptions, and cleanup tools.")
         _chart_months_default = int(st.session_state.get("chart_months", 12) or 12)
@@ -599,7 +660,6 @@ def page_settings():
     with tab_integrations:
         st.subheader("Integrations")
         st.caption("Connected tools and external services.")
-        st.info("Email delivery is configured in the Email Setup page.")
         st.caption("Stripe billing integration is managed in the Billing tab.")
 
     # ── Advanced tab ─────────────────────────────────────────────────────

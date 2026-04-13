@@ -78,6 +78,10 @@ _DEMO_SAMPLE_FILES = [
     "demo_supervisor_history.csv",
 ]
 
+_DEMO_ACTIONS_FILE = "demo_actions_seed.json"
+_DEMO_ACTION_EVENTS_FILE = "demo_action_events_seed.json"
+_DEMO_SEED_OWNER = "demo.supervisor@example.com"
+
 
 def _build_step3_preview_cache_key(*, sessions: list[dict], work_date: date, tenant_id: str, user_role: str) -> str:
     """Build a stable key for Step 3 preview artifacts across reruns.
@@ -146,6 +150,69 @@ def _build_sample_demo_sessions(*, tenant_id: str) -> list[dict]:
         )
 
     return sessions
+
+
+def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
+    """Seed curated demo actions/events for one tenant.
+
+    This runs only for demo imports so Today/Employees surfaces have a complete
+    walkthrough storyline (overdue, due today, repeat, recognition, resolved).
+    """
+    tid = str(tenant_id or "").strip()
+    if not tid:
+        return {"status": "skipped", "actions": 0, "events": 0}
+
+    seed_dir = Path(__file__).resolve().parents[1] / "demo_data"
+    actions_path = seed_dir / _DEMO_ACTIONS_FILE
+    events_path = seed_dir / _DEMO_ACTION_EVENTS_FILE
+    if not actions_path.exists() or not events_path.exists():
+        return {"status": "missing_seed_files", "actions": 0, "events": 0}
+
+    try:
+        from database import get_client as _db_get_client
+
+        sb = _db_get_client()
+        actions_seed = json.loads(actions_path.read_text(encoding="utf-8"))
+        events_seed = json.loads(events_path.read_text(encoding="utf-8"))
+
+        # Remove prior demo-seeded records for deterministic reruns.
+        sb.table("action_events").delete().eq("tenant_id", tid).eq("performed_by", _DEMO_SEED_OWNER).execute()
+        sb.table("actions").delete().eq("tenant_id", tid).eq("created_by", _DEMO_SEED_OWNER).execute()
+
+        seed_to_db_id: dict[int, str] = {}
+        inserted_actions = 0
+        for action in actions_seed or []:
+            payload = {k: v for k, v in dict(action or {}).items() if k != "id"}
+            payload["tenant_id"] = tid
+            result = sb.table("actions").insert(payload).execute()
+            rows = result.data or []
+            if not rows:
+                continue
+            inserted_actions += 1
+            try:
+                seed_to_db_id[int(action.get("id"))] = str(rows[0].get("id"))
+            except Exception:
+                continue
+
+        inserted_events = 0
+        for event in events_seed or []:
+            try:
+                seed_action_id = int(event.get("action_id"))
+            except Exception:
+                continue
+            db_action_id = seed_to_db_id.get(seed_action_id)
+            if not db_action_id:
+                continue
+            payload = {k: v for k, v in dict(event or {}).items() if k != "id"}
+            payload["tenant_id"] = tid
+            payload["action_id"] = db_action_id
+            result = sb.table("action_events").insert(payload).execute()
+            if result.data:
+                inserted_events += 1
+
+        return {"status": "seeded", "actions": inserted_actions, "events": inserted_events}
+    except Exception:
+        return {"status": "error", "actions": 0, "events": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -661,8 +728,6 @@ def _import_step1(tenant_id: str):
             st.session_state.split_overrides = {}
             st.session_state.import_step = 3
             st.rerun()
-        st.divider()
-        _render_recent_uploads_panel()
         return
 
     if mode == "Try sample data":
@@ -693,8 +758,6 @@ def _import_step1(tenant_id: str):
                     category="import",
                 )
                 return
-        st.divider()
-        _render_recent_uploads_panel()
         return
 
     _uploader_key = f"import_uploader_{int(st.session_state.get('import_uploader_nonce', 0) or 0)}"
@@ -728,8 +791,6 @@ def _import_step1(tenant_id: str):
                 use_container_width=True,
                 key="download_sample_template",
             )
-        st.divider()
-        _render_recent_uploads_panel()
         return
 
     _MAX_FILE_MB = 50
@@ -893,8 +954,7 @@ def _import_step1(tenant_id: str):
                 st.session_state.import_step = 2
             st.rerun()
 
-    st.divider()
-    _render_recent_uploads_panel()
+
 
 
 def _import_step2(tenant_id: str):
@@ -2134,9 +2194,20 @@ def _import_step3(tenant_id: str):
                         str(s.get("source_mode") or "").strip().lower() == "demo"
                         for s in sessions
                     )
-                    # Defer only very large non-demo imports. Demo and normal imports
-                    # should rebuild snapshots immediately so Today can surface signals.
-                    _should_defer_snapshot_recompute = (len(uph_batch) >= 3000) and (not _is_demo_import)
+                    if _is_demo_import:
+                        _demo_seed_result = _seed_demo_action_storyline(tenant_id=_bg_tid)
+                        _log_operational_event(
+                            "demo_action_seed",
+                            status=str(_demo_seed_result.get("status") or "unknown"),
+                            tenant_id=tenant_id,
+                            context={
+                                "actions": int(_demo_seed_result.get("actions") or 0),
+                                "events": int(_demo_seed_result.get("events") or 0),
+                            },
+                        )
+                    # Defer medium+ imports so pipeline completion stays responsive.
+                    # Today already has a pending-refresh recovery path on entry.
+                    _should_defer_snapshot_recompute = len(uph_batch) >= 500
                     if _should_defer_snapshot_recompute:
                         _log_operational_event(
                             "import_snapshot_recompute_deferred",
