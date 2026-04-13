@@ -157,6 +157,7 @@ def _render_first_import_insight(insight: dict) -> None:
     """Render the trust-first first-insight section on the completion screen."""
     conf_label = str(insight.get("confidence_label") or "Low")
     conf_score = int(insight.get("confidence_score") or 0)
+    confidence_basis = str(insight.get("confidence_basis") or "Confidence context is not available yet.")
     conf_colors = {"High": "#1f6f2a", "Medium": "#8a5a00", "Low": "#c0392b"}
     conf_color = conf_colors.get(conf_label, "#555")
 
@@ -181,7 +182,7 @@ def _render_first_import_insight(insight: dict) -> None:
             f'<div style="font-size:0.93rem;line-height:1.45;margin-bottom:6px;">'
             f'<strong>Confidence:</strong> '
             f'<span style="color:{conf_color};font-weight:700;">{conf_label}</span>'
-            f' ({conf_score}/100) — {insight["confidence_basis"]}</div>',
+            f' ({conf_score}/100) — {confidence_basis}</div>',
             unsafe_allow_html=True,
         )
         st.markdown(

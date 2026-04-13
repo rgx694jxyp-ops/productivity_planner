@@ -29,6 +29,25 @@ _UNRESOLVED_OR_REPEATED_KINDS = {
 }
 
 
+def _read_fallback_session_state() -> dict[str, Any]:
+    """Return an explicit dict context for Today fallback reads.
+
+    When Streamlit session state is unavailable (tests, scripts), return an
+    empty dict to make the intentionally partial context explicit.
+    """
+    try:
+        import streamlit as st
+
+        raw_state = getattr(st, "session_state", None)
+        if isinstance(raw_state, dict):
+            return raw_state
+        if raw_state is None:
+            return {}
+        return dict(raw_state)
+    except Exception:
+        return {}
+
+
 # Safe to cache: read-only payload retrieval from precomputed/session-backed data.
 # TTL is short (45s) so reruns avoid repeated lookups while keeping Today fresh.
 @lru_cache(maxsize=32)
@@ -47,7 +66,11 @@ def get_today_signals(*, tenant_id: str, as_of_date: str) -> dict[str, Any] | No
         # daily_signals migration is not applied yet.
         message = str(exc or "")
         if "daily_signals" in message or "PGRST205" in message:
-            fallback_payload = fetch_precomputed_today_payload(tenant_id=str(tenant_id or ""), today=today_value)
+            fallback_payload = fetch_precomputed_today_payload(
+                tenant_id=str(tenant_id or ""),
+                today=today_value,
+                session_state=_read_fallback_session_state(),
+            )
             # Keep render path read-only: do not compute transient payload here.
             # Heavy signal computation is triggered only by explicit refresh/import.
             return fallback_payload

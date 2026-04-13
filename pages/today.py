@@ -1159,8 +1159,6 @@ def _confidence_chip(line_5_text: str) -> str:
     lowered = text.lower()
     if not lowered:
         return ""
-    if "low confidence" in lowered or "confidence: low" in lowered:
-        return '<div class="today-confidence-chip today-confidence-chip-low">Low confidence</div>'
     if "confidence: high" in lowered:
         return '<div class="today-confidence-chip today-confidence-chip-high">High confidence</div>'
     if "confidence: medium" in lowered:

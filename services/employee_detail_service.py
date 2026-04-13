@@ -154,7 +154,8 @@ def build_employee_detail_context(
     lookback_days: int = 14,
     comparison_days: int = 5,
 ) -> dict:
-    employee_history = [row for row in (history_rows or []) if _emp_id(row) == str(emp_id or "")]
+    resolved_employee_id = str(emp_id or _emp_id(goal_row or {}) or "").strip()
+    employee_history = [row for row in (history_rows or []) if _emp_id(row) == resolved_employee_id]
     mapped_rows: list[dict] = []
     excluded_rows: list[dict] = []
     for row in employee_history:
@@ -184,7 +185,7 @@ def build_employee_detail_context(
     employee_name = _name_from_goal_row(goal_row, str(emp_id or "Employee"))
     process_name = str(goal_row.get("Resolved Process") or goal_row.get("Department") or goal_row.get("department") or "Team")
     target_context = resolve_target_context(
-        employee_id=emp_id,
+        employee_id=resolved_employee_id,
         process_name=process_name,
         explicit_target=_safe_float(goal_row.get("Target UPH")),
     )
@@ -423,6 +424,7 @@ def build_employee_detail_context(
     excluded_records = excluded_rows[-lookback_days:]
 
     return {
+        "employee_id": resolved_employee_id,
         "signal_summary": summary_block,
         "why_this_is_showing": why_this_is_showing,
         "what_this_is_based_on": what_this_is_based_on,

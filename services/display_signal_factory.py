@@ -573,6 +573,7 @@ def build_display_signal_from_employee_detail_context(
 ) -> DisplaySignal:
     today_value = today or date.today()
     summary = dict(detail_context.get("signal_summary") or {})
+    pattern_history = dict(detail_context.get("pattern_history") or {})
     trend_state = str(detail_context.get("trend_state") or summary.get("trend_state") or "").strip().lower()
 
     if bool(summary.get("low_data_state") or detail_context.get("low_data_state")):
@@ -607,6 +608,13 @@ def build_display_signal_from_employee_detail_context(
         if target_uph is not None and target_uph > 0 and observed_value is not None:
             comparison_value = target_uph
 
+    compared_to_what = str(
+        detail_context.get("compared_to_what")
+        or summary.get("compared_to_what")
+        or (detail_context.get("what_this_is_based_on") or {}).get("compared_to_what")
+        or ""
+    )
+
     return build_display_signal(
         employee_id=detail_context.get("employee_id") or employee_name,
         employee_name=employee_name,
@@ -617,20 +625,20 @@ def build_display_signal_from_employee_detail_context(
         comparison_start_date=comparison_start,
         comparison_end_date=comparison_end,
         comparison_value=comparison_value,
-        pattern_count=(detail_context.get("pattern_history") or {}).get("repeat_count"),
-        pattern_window_label=(detail_context.get("pattern_history") or {}).get("window_label"),
+        pattern_count=pattern_history.get("repeat_count"),
+        pattern_window_label=pattern_history.get("window_label"),
         state=detail_context.get("signal_state") or summary.get("signal_state"),
         usable_points=len(trailing_dates) if trailing_dates else (1 if observed_value is not None else 0),
         minimum_trend_points=summary.get("minimum_expected_points") or 3,
         confidence=detail_context.get("confidence_label") or summary.get("confidence_label") or "low",
         data_completeness=summary.get("data_completeness_label") or detail_context.get("data_completeness_label") or "unknown",
         flags={
-            "repeat": bool((detail_context.get("pattern_history") or {}).get("pattern_detected")),
+            "repeat": bool(pattern_history.get("has_pattern") or pattern_history.get("pattern_detected")),
             "is_new_employee": bool(detail_context.get("is_new_employee") or False),
         },
         supporting_text=[
             str((detail_context.get("why_this_is_showing") or {}).get("why_now") or ""),
-            str((detail_context.get("what_this_is_based_on") or {}).get("compared_to_what") or ""),
+            compared_to_what,
         ],
         delta_percent=(detail_context.get("signal_summary") or {}).get("delta_percent"),
         today=today_value,
