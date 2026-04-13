@@ -270,6 +270,7 @@ def recompute_daily_employee_snapshots(
     days: int = 30,
     lookback_days: int = 14,
     comparison_days: int = 5,
+    replace_existing: bool = True,
 ) -> dict:
     if from_date and to_date:
         start_date = _parse_date(from_date)
@@ -297,7 +298,7 @@ def recompute_daily_employee_snapshots(
         and (not end_date or (_parse_date(row.get("snapshot_date")) or date.max) <= end_date)
     ]
 
-    if start_date and end_date:
+    if replace_existing and start_date and end_date:
         daily_employee_snapshots_repo.delete_daily_employee_snapshots(
             tenant_id=tenant_id,
             from_date=start_date.isoformat(),

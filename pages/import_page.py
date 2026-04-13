@@ -2143,6 +2143,7 @@ def _import_step3(tenant_id: str):
                         handling_note="Imported through legacy-compatible UPH pipeline",
                         from_date="" if _should_defer_snapshot_recompute else (_valid_dates[0] if _valid_dates else ""),
                         to_date="" if _should_defer_snapshot_recompute else (_valid_dates[-1] if _valid_dates else ""),
+                        replace_existing_snapshots=False,
                     )
 
                     if len(uph_batch) > 0 and (_new_row_ids or _undo_previous_rows):

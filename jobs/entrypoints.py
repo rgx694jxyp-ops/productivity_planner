@@ -110,6 +110,7 @@ def run_snapshot_recompute_job(
     tenant_id: str,
     from_date: str,
     to_date: str,
+    replace_existing: bool = True,
     run_mode: str = "sync",
 ) -> dict[str, Any]:
     request = JobRequest(
@@ -123,6 +124,7 @@ def run_snapshot_recompute_job(
             tenant_id=tenant_id,
             from_date=from_date,
             to_date=to_date,
+            replace_existing=bool(replace_existing),
         ),
     )
 
@@ -140,6 +142,7 @@ def run_import_postprocess_job(
     handling_note: str,
     from_date: str = "",
     to_date: str = "",
+    replace_existing_snapshots: bool = True,
     run_mode: str = "sync",
 ) -> dict[str, Any]:
     log_operational_event(
@@ -176,6 +179,7 @@ def run_import_postprocess_job(
             tenant_id=tenant_id,
             from_date=from_date,
             to_date=to_date,
+            replace_existing=bool(replace_existing_snapshots),
             run_mode=run_mode,
         )
 
