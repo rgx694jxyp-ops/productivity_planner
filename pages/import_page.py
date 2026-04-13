@@ -2106,7 +2106,13 @@ def _import_step3(tenant_id: str):
                             if str(row.get("work_date") or "").strip()
                         }
                     )
-                    _should_defer_snapshot_recompute = len(uph_batch) >= 300
+                    _is_demo_import = bool(sessions) and all(
+                        str(s.get("source_mode") or "").strip().lower() == "demo"
+                        for s in sessions
+                    )
+                    # Defer only very large non-demo imports. Demo and normal imports
+                    # should rebuild snapshots immediately so Today can surface signals.
+                    _should_defer_snapshot_recompute = (len(uph_batch) >= 3000) and (not _is_demo_import)
                     if _should_defer_snapshot_recompute:
                         _log_operational_event(
                             "import_snapshot_recompute_deferred",
@@ -2118,6 +2124,8 @@ def _import_step3(tenant_id: str):
                                 "to_date": _valid_dates[-1] if _valid_dates else "",
                             },
                         )
+                    else:
+                        bar.progress(90, text="Rebuilding daily snapshots for Today…")
 
                     run_import_postprocess_job(
                         uph_rows=uph_batch,
