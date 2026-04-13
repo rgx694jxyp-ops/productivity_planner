@@ -1981,14 +1981,8 @@ def _import_step3(tenant_id: str):
                         ).execute()
                         _undo_previous_rows.extend(_snap_res.data or [])
 
-                    for _idx in range(0, len(_rows_to_replace_ids), 1000):
-                        _id_chunk = _rows_to_replace_ids[_idx : _idx + 1000]
-                        _db_tq(
-                            _sb_rw.table("uph_history")
-                            .delete()
-                            .eq("tenant_id", _tenant_id)
-                            .in_("id", _id_chunk)
-                        ).execute()
+                    # Do not pre-delete overlap rows: upsert with on_conflict
+                    # replaces them in-place and avoids extra write/lock time.
                     _replaced_existing_rows = len(_rows_to_replace_ids)
 
                 _inserted_key3 = set()
@@ -2024,6 +2018,7 @@ def _import_step3(tenant_id: str):
                     )
 
                 _batch_store_uph_history(uph_batch, progress_callback=_on_uph_store_progress)
+                bar.progress(89, text="UPH history stored. Finalizing import records…")
 
                 # Keep rollback metadata lightweight for speed. We rely on
                 # touched_keys + previous_rows for undo without an extra PK scan.
@@ -2111,6 +2106,19 @@ def _import_step3(tenant_id: str):
                             if str(row.get("work_date") or "").strip()
                         }
                     )
+                    _should_defer_snapshot_recompute = len(uph_batch) >= 300
+                    if _should_defer_snapshot_recompute:
+                        _log_operational_event(
+                            "import_snapshot_recompute_deferred",
+                            status="queued",
+                            tenant_id=tenant_id,
+                            context={
+                                "row_count": len(uph_batch),
+                                "from_date": _valid_dates[0] if _valid_dates else "",
+                                "to_date": _valid_dates[-1] if _valid_dates else "",
+                            },
+                        )
+
                     run_import_postprocess_job(
                         uph_rows=uph_batch,
                         tenant_id=tenant_id,
@@ -2125,8 +2133,8 @@ def _import_step3(tenant_id: str):
                         ),
                         handling_choice=str(st.session_state.get("import_preview_continue_path") or ""),
                         handling_note="Imported through legacy-compatible UPH pipeline",
-                        from_date=_valid_dates[0] if _valid_dates else "",
-                        to_date=_valid_dates[-1] if _valid_dates else "",
+                        from_date="" if _should_defer_snapshot_recompute else (_valid_dates[0] if _valid_dates else ""),
+                        to_date="" if _should_defer_snapshot_recompute else (_valid_dates[-1] if _valid_dates else ""),
                     )
 
                     if len(uph_batch) > 0 and (_new_row_ids or _undo_previous_rows):
