@@ -76,7 +76,6 @@ _SAMPLE_TEMPLATE_CSV = (
 
 _DEMO_SAMPLE_FILES = [
     "demo_supervisor_history.csv",
-    "demo_full_week.csv",
 ]
 
 
