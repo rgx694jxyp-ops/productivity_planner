@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from datetime import date, timedelta
 
@@ -134,22 +133,13 @@ def batch_store_uph_history(records: list[dict]):
     if not records:
         return
 
-    def json_safe_value(value):
-        if isinstance(value, float):
-            return value if math.isfinite(value) else 0.0
-        if isinstance(value, list):
-            return [json_safe_value(item) for item in value]
-        if isinstance(value, dict):
-            return {key: json_safe_value(item) for key, item in value.items()}
-        return value
-
     sb = get_client()
     if not records[0].get("tenant_id"):
         fields = tenant_fields()
         if fields:
             records = [{**record, **fields} for record in records]
 
-    chunk_size = 1000
+    chunk_size = 2000
     for index in range(0, len(records), chunk_size):
         chunk = records[index : index + chunk_size]
         safe_chunk = []
@@ -182,19 +172,11 @@ def batch_store_uph_history(records: list[dict]):
                 "hours_worked": hours_val,
             })
 
-        safe_chunk = [json_safe_value(row) for row in safe_chunk]
         try:
-            json.dumps(safe_chunk, allow_nan=False)
             sb.table("uph_history").upsert(
                 safe_chunk,
                 on_conflict="tenant_id,emp_id,work_date,department",
             ).execute()
-            log_info(
-                "repo_uph_batch_upsert_succeeded",
-                "Repository UPH batch upsert succeeded.",
-                tenant_id=tenant_id,
-                context={"chunk_index": index // chunk_size, "chunk_size": len(safe_chunk)},
-            )
         except Exception as error:
             log_error(
                 "uph_history",

@@ -1940,48 +1940,56 @@ def _import_step3(tenant_id: str):
                 # Duplicate detection follows the import pipeline shape: one row
                 # per employee per day. For overlapping uploads we replace old
                 # rows for the same employee/date keys before inserting fresh rows.
-                _existing_2key = set()
-                _rows_to_replace = []
+                _rows_to_replace_ids = []
                 def _norm_date(_v):
                     return str(_v or "").strip()[:10]
-                if _date_min and _date_max and _emp_ids_int:
+                if _dates and _emp_ids_int:
                     from database import get_client as _db_get_client, _tq as _db_tq
                     _sb = _db_get_client()
-                    _q = _sb.table("uph_history").select("id, emp_id, work_date, uph, units, hours_worked, department")
+                    _q = _sb.table("uph_history").select("id, emp_id, work_date")
                     if _tenant_id:
                         _q = _q.eq("tenant_id", _tenant_id)
-                    _q = _q.gte("work_date", _date_min).lte("work_date", _date_max).in_("emp_id", _emp_ids_int)
+                    # Use exact date filters when reasonably small to avoid scanning
+                    # broad date ranges unnecessarily.
+                    if len(_dates) <= 31:
+                        _q = _q.in_("work_date", _dates)
+                    else:
+                        _q = _q.gte("work_date", _date_min).lte("work_date", _date_max)
+                    _q = _q.in_("emp_id", _emp_ids_int)
                     _res = _db_tq(_q).execute()
                     for _er in (_res.data or []):
                         _er_emp = str(_er.get("emp_id", "") or "").strip()
                         if _er_emp:
                             _er_code = _rowid_to_code.get(_er_emp, "")
                             _key2 = (_er_code, _norm_date(_er.get("work_date", "")))
-                            if _er_code:
-                                _existing_2key.add(_key2)
-                                if _key2 in _candidate_keys:
-                                    _rows_to_replace.append({
-                                        "id": _er.get("id"),
-                                        "emp_id": _er.get("emp_id"),
-                                        "work_date": _er.get("work_date"),
-                                        "uph": _er.get("uph"),
-                                        "units": _er.get("units"),
-                                        "hours_worked": _er.get("hours_worked"),
-                                        "department": _er.get("department", ""),
-                                    })
+                            if _er_code and _key2 in _candidate_keys and _er.get("id") is not None:
+                                _rows_to_replace_ids.append(int(_er.get("id")))
 
-                _undo_previous_rows = list(_rows_to_replace)
-                _rows_to_delete = [int(_r["id"]) for _r in _rows_to_replace if _r.get("id") is not None]
-                if _rows_to_delete and _tenant_id:
+                _rows_to_replace_ids = sorted(set(_rows_to_replace_ids))
+                if _rows_to_replace_ids and _tenant_id:
                     from database import get_client as _db_get_client, _tq as _db_tq
-                    _sb_del = _db_get_client()
-                    _db_tq(
-                        _sb_del.table("uph_history")
-                        .delete()
-                        .eq("tenant_id", _tenant_id)
-                        .in_("id", _rows_to_delete)
-                    ).execute()
-                    _replaced_existing_rows = len(_rows_to_delete)
+                    _sb_rw = _db_get_client()
+
+                    _undo_previous_rows = []
+                    for _idx in range(0, len(_rows_to_replace_ids), 1000):
+                        _id_chunk = _rows_to_replace_ids[_idx : _idx + 1000]
+                        _snap_res = _db_tq(
+                            _sb_rw.table("uph_history")
+                            .select("id, emp_id, work_date, uph, units, hours_worked, department")
+                            .eq("tenant_id", _tenant_id)
+                            .in_("id", _id_chunk)
+                        ).execute()
+                        _undo_previous_rows.extend(_snap_res.data or [])
+
+                    for _idx in range(0, len(_rows_to_replace_ids), 1000):
+                        _id_chunk = _rows_to_replace_ids[_idx : _idx + 1000]
+                        _db_tq(
+                            _sb_rw.table("uph_history")
+                            .delete()
+                            .eq("tenant_id", _tenant_id)
+                            .in_("id", _id_chunk)
+                        ).execute()
+                    _replaced_existing_rows = len(_rows_to_replace_ids)
 
                 _inserted_key3 = set()
                 for _r in uph_batch:
