@@ -1067,6 +1067,7 @@ def _emp_coaching():
             emp_id   = selected_emp["emp_id"]
             emp_name = selected_emp["name"]
             emp_dept = selected_emp.get("department","")
+            _open_emp_actions = []
 
             # ── Post-save feedback (persists across rerun once via session_state) ──
             _cn_fb = st.session_state.get("_cn_feedback")
@@ -1262,7 +1263,7 @@ def _emp_coaching():
                     st.session_state[_action_history_key] = True
                     st.rerun()
             else:
-                _emp_actions = get_employee_actions(emp_id, tenant_id=tenant_id)
+                _emp_actions = list(get_employee_actions(emp_id, tenant_id=tenant_id) or [])
                 _open_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"new", "in_progress", "follow_up_due", "overdue", "escalated"}]
                 _closed_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"resolved", "deprioritized", "transferred"}]
 

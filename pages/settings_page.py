@@ -654,6 +654,17 @@ def page_settings():
                                     from cache import bust_cache as _bust_cache
 
                                     _bust_cache()
+                                    for _key in [
+                                        "_import_step3_preview_cache",
+                                        "_import_complete_summary",
+                                        "_last_import_undo",
+                                        "_today_precomputed_payload",
+                                        "_post_import_refresh_pending",
+                                        "data_sessions",
+                                        "submission_plan",
+                                        "split_overrides",
+                                    ]:
+                                        st.session_state.pop(_key, None)
                                     st.session_state.confirm_reset_tenant_operational = False
                                     if _result.get("errors"):
                                         st.warning(
