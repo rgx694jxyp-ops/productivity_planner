@@ -212,7 +212,7 @@ def test_today_card_pattern_shows_one_repeat_support_line_without_overriding_tre
     assert card.line_2 == "Lower than recent pace"
     assert card.line_3 == "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available)."
     assert card.line_4 == "Latest snapshot only"
-    assert card.expanded_lines == ["Seen 3 times this week"]
+    assert card.expanded_lines == ["Repeated 3 times this week"]
 
 
 def test_today_card_pattern_adds_repeat_evidence_when_snapshot_history_repeats(monkeypatch):
@@ -253,7 +253,7 @@ def test_today_card_pattern_adds_repeat_evidence_when_snapshot_history_repeats(m
     card = vm.primary_cards[0]
 
     assert card.line_3 == "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available)."
-    assert "Repeat issue pattern detected." in card.line_4
+    assert "Seen 3 times in the last 5 snapshots" in card.line_4
     assert card.repeat_count == 3
     assert card.repeat_window_label == "last 5 snapshots"
 
@@ -335,8 +335,8 @@ def test_today_card_expanded_lines_include_source_and_exception_context(monkeypa
     card = vm.primary_cards[0]
 
     joined = " | ".join(card.expanded_lines).lower()
-    assert "signal source:" in joined
-    assert "open operational exception is still unresolved" in joined
+    assert "source:" in joined
+    assert "open operational exception remains unresolved" in joined
     assert card.collapsed_hint.startswith("Flagged due to")
     assert card.collapsed_evidence.startswith("Source: ")
     assert card.collapsed_issue == "Active issue linked"

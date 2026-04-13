@@ -362,8 +362,30 @@ def _attention_primary_signal(item: Any, signal: DisplaySignal) -> str:
 def _attention_context_lines(item: Any, signal: DisplaySignal, max_lines: int = 2) -> list[str]:
     lines: list[str] = []
     snapshot = dict(getattr(item, "snapshot", {}) or {})
-    for text in list(getattr(signal, "supporting_text", []) or []):
+
+    def _normalized_support_line(text: str) -> str:
         clean = str(text or "").strip()
+        if not clean:
+            return ""
+        lowered = clean.lower()
+        if lowered.startswith("watch for"):
+            return ""
+        if lowered.startswith("compared to:") or lowered.startswith("compared with"):
+            return "Compared against recent baseline"
+        if lowered.startswith("signal source:"):
+            source = clean.split(":", 1)[1].strip() if ":" in clean else ""
+            return f"Source: {source}" if source else "Source available"
+        if lowered.startswith("seen ") and " times " in lowered:
+            parts = clean.split(" ", 1)
+            return f"Repeated {parts[1]}" if len(parts) > 1 else clean
+        if lowered == "open operational exception is still unresolved":
+            return "Open operational exception remains unresolved"
+        if lowered == signal_wording("follow_up_not_completed").lower():
+            return "Follow-up remains open"
+        return clean
+
+    for text in list(getattr(signal, "supporting_text", []) or []):
+        clean = _normalized_support_line(str(text or ""))
         if clean:
             lines.append(clean)
 
@@ -375,11 +397,11 @@ def _attention_context_lines(item: Any, signal: DisplaySignal, max_lines: int = 
         or ""
     ).strip()
     if source_label:
-        lines.append(f"Signal source: {source_label}")
+        lines.append(f"Source: {source_label}")
 
     factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
     if "open_exception" in factor_keys:
-        lines.append("Open operational exception is still unresolved")
+        lines.append("Open operational exception remains unresolved")
 
     import_job = str(snapshot.get("import_job_id") or "").strip()
     if import_job:
@@ -394,17 +416,31 @@ def _attention_context_lines(item: Any, signal: DisplaySignal, max_lines: int = 
         lines.append(observed)
 
     if factor_keys.intersection({"overdue_followup", "due_today_followup", "open_exception"}):
-        lines.append(signal_wording("follow_up_not_completed"))
+        lines.append("Follow-up remains open")
+
+    label = str(format_signal_label(signal) or "").strip().lower()
+    if label in {
+        signal_wording("lower_than_recent_pace").lower(),
+        signal_wording("below_expected_pace").lower(),
+    }:
+        lines.append("Trend has declined across recent days")
+    elif label == signal_wording("inconsistent_performance").lower():
+        lines.append("Recent pace has varied day to day")
+    elif label == signal_wording("improving_pace").lower():
+        lines.append("Trend has improved across recent days")
+
+    if signal.comparison_start_date is not None and signal.comparison_end_date is not None:
+        lines.append("Compared against recent baseline")
+
     repeat_count, repeat_window_label = _repeat_context(item, signal)
     if repeat_count >= 2:
-        has_repeat_line = any(
-            ("seen " in str(line).lower() and " times " in str(line).lower())
-            or ("similar pattern" in str(line).lower())
-            or ("repeat issue pattern" in str(line).lower())
-            for line in lines
-        )
-        if not has_repeat_line:
-            lines.append(_repeat_summary_line(repeat_count=repeat_count, repeat_window_label=repeat_window_label))
+        window = str(repeat_window_label or "recent history").strip()
+        if window == "this week":
+            lines.append(f"Repeated {repeat_count} times this week")
+        elif window.startswith("last "):
+            lines.append(f"Repeated {repeat_count} times in the {window}")
+        else:
+            lines.append(f"Repeated {repeat_count} times in {window}")
 
     if not lines:
         reasons = [str(reason or "").strip() for reason in list(getattr(item, "attention_reasons", []) or [])]
@@ -476,9 +512,13 @@ def _ranking_hint(item: Any, signal: DisplaySignal) -> str:
             reasons.append(label)
 
     if len(reasons) >= 2:
-        return f"Flagged due to {reasons[0]} and {reasons[1]}."
+        return "Flagged due to multiple signal factors."
     if reasons:
-        return f"Flagged due to {reasons[0]}."
+        if reasons[0] == "follow-up status":
+            return "Flagged due to follow-up status."
+        if reasons[0] == "active issue":
+            return "Flagged due to an active issue."
+        return "Flagged due to a current signal pattern."
     return ""
 
 
@@ -537,10 +577,10 @@ def _repeat_context(source: Any, signal: DisplaySignal, *, include_signal_fallba
 def _repeat_summary_line(*, repeat_count: int, repeat_window_label: str) -> str:
     window = str(repeat_window_label or "recent history").strip()
     if window == "this week":
-        return f"This has appeared {repeat_count} times this week."
+        return f"Seen {repeat_count} times this week"
     if window.startswith("last "):
-        return f"This has appeared {repeat_count} times in the {window}."
-    return f"This has appeared {repeat_count} times in {window}."
+        return f"Seen {repeat_count} times in the {window}"
+    return f"Seen {repeat_count} times in {window}"
 
 
 def _observed_value_text(signal: DisplaySignal) -> str:
@@ -693,12 +733,13 @@ def _why_surfaced_line(source: Any, signal: DisplaySignal) -> str:
 
 
 def _evidence_basis_line(source: Any, signal: DisplaySignal) -> str:
+    label = str(format_signal_label(signal) or "").strip().lower()
+    headline_already_repeat = label == "repeated pattern"
+
     repeat_count, repeat_window_label = _repeat_context(source, signal, include_signal_fallback=False)
-    repeat_evidence = (
-        f"Repeat issue pattern detected. {_repeat_summary_line(repeat_count=repeat_count, repeat_window_label=repeat_window_label)}"
-        if repeat_count >= 2
-        else ""
-    )
+    repeat_evidence = ""
+    if repeat_count >= 2 and not headline_already_repeat:
+        repeat_evidence = _repeat_summary_line(repeat_count=repeat_count, repeat_window_label=repeat_window_label)
 
     shift_context = _source_shift_context_line(source, signal)
 
@@ -1066,6 +1107,30 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             max_lines=3,
         )
 
+    line_3_lower = line_3.strip().lower()
+    line_4_lower = line_4.strip().lower()
+    if "baseline" in line_3_lower:
+        expanded = [line for line in list(expanded or []) if "compared against recent baseline" not in str(line).lower()]
+    if (" seen " in f" {line_4_lower} " and " times " in line_4_lower) or ("repeat" in line_4_lower and "times" in line_4_lower):
+        expanded = [
+            line
+            for line in list(expanded or [])
+            if "repeated " not in str(line).lower() or " times " not in str(line).lower()
+        ]
+    if any("repeated " in str(line).lower() and " times " in str(line).lower() for line in list(expanded or [])):
+        expanded = [
+            line
+            for line in list(expanded or [])
+            if "trend has declined across recent days" not in str(line).lower()
+        ]
+
+    if line_2.strip().lower() == "seen multiple times":
+        expanded = [
+            line
+            for line in list(expanded or [])
+            if "seen " not in str(line).lower() or " times " not in str(line).lower()
+        ]
+
     return TodayQueueCardViewModel(
         employee_id=employee_id,
         process_id=process_id,
@@ -1148,6 +1213,30 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
         excluded=[line_3, line_4, format_observed_line(signal), format_comparison_line(signal), _follow_up_due_line(card, signal), _short_follow_up_context(card, signal)],
         max_lines=3,
     )
+
+    line_3_lower = line_3.strip().lower()
+    line_4_lower = line_4.strip().lower()
+    if "baseline" in line_3_lower:
+        expanded = [line for line in list(expanded or []) if "compared against recent baseline" not in str(line).lower()]
+    if (" seen " in f" {line_4_lower} " and " times " in line_4_lower) or ("repeat" in line_4_lower and "times" in line_4_lower):
+        expanded = [
+            line
+            for line in list(expanded or [])
+            if "repeated " not in str(line).lower() or " times " not in str(line).lower()
+        ]
+    if any("repeated " in str(line).lower() and " times " in str(line).lower() for line in list(expanded or [])):
+        expanded = [
+            line
+            for line in list(expanded or [])
+            if "trend has declined across recent days" not in str(line).lower()
+        ]
+
+    if line_2.strip().lower() == "seen multiple times":
+        expanded = [
+            line
+            for line in list(expanded or [])
+            if "seen " not in str(line).lower() or " times " not in str(line).lower()
+        ]
 
     return TodayQueueCardViewModel(
         employee_id=employee_id,

@@ -241,6 +241,12 @@ def _apply_today_styles() -> None:
             color: #5d7693;
             font-size: 0.92rem;
         }
+        .today-action-helper {
+            margin-top: -4px;
+            margin-bottom: 8px;
+            color: #738aa2;
+            font-size: 0.82rem;
+        }
         .today-value-card {
             background: linear-gradient(180deg, #f9fbfe 0%, #eef4fb 100%);
             border: 1px solid #d9e4f0;
@@ -248,6 +254,15 @@ def _apply_today_styles() -> None:
             padding: 14px 14px 12px;
             min-height: 132px;
             margin-bottom: 10px;
+        }
+        .today-value-card-subtle {
+            background: #fbfdff;
+            border: 1px solid #e4ecf4;
+            border-radius: 12px;
+            padding: 12px 12px 10px;
+            min-height: 118px;
+            margin-bottom: 8px;
+            box-shadow: none;
         }
         .today-value-title {
             font-size: 0.74rem;
@@ -257,6 +272,13 @@ def _apply_today_styles() -> None:
             color: #6a8098;
             margin-bottom: 8px;
         }
+        .today-value-title-subtle {
+            font-size: 0.69rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            color: #7b90a7;
+            margin-bottom: 6px;
+        }
         .today-value-headline {
             color: #0f2d52;
             font-size: 1rem;
@@ -264,10 +286,37 @@ def _apply_today_styles() -> None:
             line-height: 1.28;
             margin-bottom: 6px;
         }
+        .today-value-headline-subtle {
+            color: #214463;
+            font-size: 0.95rem;
+            font-weight: 700;
+            line-height: 1.25;
+            margin-bottom: 5px;
+        }
         .today-value-detail {
             color: #49647f;
             font-size: 0.87rem;
             line-height: 1.38;
+        }
+        .today-value-detail-subtle {
+            color: #607b95;
+            font-size: 0.84rem;
+            line-height: 1.34;
+        }
+        .today-secondary-context-label {
+            display: inline-block;
+            margin-bottom: 4px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: #7b90a7;
+        }
+        .today-secondary-context-note {
+            margin-top: -1px;
+            margin-bottom: 8px;
+            color: #738aa2;
+            font-size: 0.86rem;
         }
         .today-secondary-label {
             margin-top: 10px;
@@ -543,16 +592,19 @@ def _render_top_status_area(*, meaning: TodaySurfaceMeaning) -> None:
         primary_line = "Signals are ranked by current evidence strength and recency."
 
     detail_line = ""
+    detail_source_line = ""
     if source_mode == "demo":
-        detail_line = "Demo mode is active: the queue is based on sample history, not live uploaded operations data."
+        detail_line = "Demo mode: based on sample data, not live operations."
         if source_label:
-            detail_line += f" Source: {source_label}."
+            detail_source_line = f"Source: {source_label}"
 
     chips_html = "".join(f'<span class="today-queue-chip">{chip}</span>' for chip in chips)
     chips_block = f'<div class="today-queue-orientation-chips">{chips_html}</div>' if chips else ""
-    detail_block = (
-        f'<div style="color:#5d7693;font-size:0.86rem;margin-top:6px;">{detail_line}</div>' if detail_line else ""
-    )
+    detail_block = ""
+    if detail_line:
+        detail_block += f'<div style="color:#5d7693;font-size:0.86rem;margin-top:6px;">{detail_line}</div>'
+    if detail_source_line:
+        detail_block += f'<div style="color:#7b90a7;font-size:0.79rem;margin-top:2px;">{detail_source_line}</div>'
 
     st.markdown(
         (
@@ -747,11 +799,17 @@ def _render_queue_orientation_block(
         return
 
     # Non-empty queue
+    if total == 1:
+        heading = "1 signal needs attention now"
+    elif total <= 3:
+        heading = "A few signals need attention now"
+    else:
+        heading = f"{total} signals need attention now"
+
     if in_early:
         mode_label = (
             "Limited history" if signal_mode == SignalMode.LIMITED_DATA else "Early signal mode"
         )
-        heading = "What needs attention today"
         chips: list[str] = [mode_label]
         # For snapshot-only mode, chips just identify mode — no trend chips
         if not in_early or orientation.declining_count > 0:
@@ -765,8 +823,6 @@ def _render_queue_orientation_block(
             n = orientation.limited_confidence_count
             chips.append(f"{n} with limited data confidence")
     else:
-        signal_word = "signal" if total == 1 else "signals"
-        heading = f"{total} {signal_word} in today's queue"
         chips = []
         if orientation.declining_count > 0:
             n = orientation.declining_count
@@ -777,6 +833,8 @@ def _render_queue_orientation_block(
         if orientation.limited_confidence_count > 0:
             n = orientation.limited_confidence_count
             chips.append(f"{n} with limited data confidence")
+
+    chips.append(f"{total} total in queue")
 
     chips_html = "".join(f'<span class="today-queue-chip">{c}</span>' for c in chips)
     chips_block = (
@@ -1325,6 +1383,11 @@ def _render_unified_attention_queue(
         f'<div class="today-supporting-note">{plan.start_note}</div>',
         unsafe_allow_html=True,
     )
+    if plan.primary_cards or plan.secondary_cards:
+        st.markdown(
+            '<div class="today-action-helper">Mark signals to track what you\'ve reviewed.</div>',
+            unsafe_allow_html=True,
+        )
 
     all_signal_keys = {
         str(getattr(card, "signal_key", "") or "").strip()
@@ -1362,15 +1425,28 @@ def _render_unified_attention_queue(
         st.session_state["_today_suppressed_signals_debug"] = list(plan.suppressed_debug_rows)
 
 
-def _render_today_value_strip(value_strip: TodayValueStripViewModel, *, freshness_note: str = "", is_stale: bool = False) -> None:
+def _render_today_value_strip(
+    value_strip: TodayValueStripViewModel,
+    *,
+    freshness_note: str = "",
+    is_stale: bool = False,
+    subdued: bool = False,
+) -> None:
     if not value_strip.cards:
         return
 
-    st.markdown('<div class="today-section-label">Quick read</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="today-supporting-note">A compact interpretation of the current snapshot before queue details.</div>',
-        unsafe_allow_html=True,
-    )
+    if subdued:
+        st.markdown('<div class="today-secondary-context-label">Supporting context</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="today-secondary-context-note">Secondary snapshot context, shown beneath the main queue.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown('<div class="today-section-label">Quick read</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="today-supporting-note">A compact interpretation of the current snapshot before queue details.</div>',
+            unsafe_allow_html=True,
+        )
     if str(freshness_note or "").strip():
         st.caption(freshness_note)
 
@@ -1380,12 +1456,16 @@ def _render_today_value_strip(value_strip: TodayValueStripViewModel, *, freshnes
             display_title = str(card.title or "")
             if is_stale and "today" in display_title.lower():
                 display_title = display_title.replace("today", "latest snapshot").replace("Today", "Latest snapshot")
+            card_class = "today-value-card-subtle" if subdued else "today-value-card"
+            title_class = "today-value-title-subtle" if subdued else "today-value-title"
+            headline_class = "today-value-headline-subtle" if subdued else "today-value-headline"
+            detail_class = "today-value-detail-subtle" if subdued else "today-value-detail"
             st.markdown(
                 (
-                    '<div class="today-value-card">'
-                    f'<div class="today-value-title">{display_title}</div>'
-                    f'<div class="today-value-headline">{card.headline}</div>'
-                    f'<div class="today-value-detail">{card.detail}</div>'
+                    f'<div class="{card_class}">'
+                    f'<div class="{title_class}">{display_title}</div>'
+                    f'<div class="{headline_class}">{card.headline}</div>'
+                    f'<div class="{detail_class}">{card.detail}</div>'
                     '</div>'
                 ),
                 unsafe_allow_html=True,
@@ -1686,6 +1766,7 @@ def page_today() -> None:
                         value_strip,
                         freshness_note=meaning.freshness_note,
                         is_stale=bool(meaning.state_flags.get("stale_data")),
+                        subdued=True,
                     )
                     if st.button("Hide supporting context", key="today_hide_supporting_context", type="secondary"):
                         st.session_state[_supporting_context_key] = False
