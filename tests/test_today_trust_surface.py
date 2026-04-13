@@ -54,7 +54,7 @@ def test_current_state_card_keeps_confidence_and_freshness_visible(monkeypatch):
     assert vm.primary_cards
     card = vm.primary_cards[0]
     assert card.line_5 == "Low confidence"
-    assert card.freshness_line.startswith("Data age:")
+    assert card.freshness_line.startswith("Freshness:")
 
 
 def test_value_strip_data_health_includes_confidence_label():

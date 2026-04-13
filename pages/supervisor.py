@@ -359,29 +359,29 @@ def page_supervisor():
                 rc3.metric("Variance", f"{d.get('variance_score', 0):.1f}pt", f"{d.get('variance_pct', 0):.0f}% CV")
                 
                 st.write("")
-                st.markdown("**👉 Suggested Next Actions:**")
+                st.markdown("**👉 Suggested Context Notes:**")
                 
                 # Build context-aware actions
                 actions = []
                 
                 # Context-specific actions (take priority)
                 if "Equipment issues" in emp['context_tags']:
-                    actions.append("🔧 **Fix the equipment first** — Resolve tool/system issues before coaching.")
+                    actions.append("🔧 **Equipment context surfaced** — Tool/system conditions may be influencing this signal.")
                 if "New employee" in emp['context_tags']:
-                    actions.append("📋 **Structured onboarding check** — Ensure proper training & mentoring.")
+                    actions.append("📋 **New-employee context surfaced** — Early ramp-up conditions may influence current output.")
                 if "Cross-training" in emp['context_tags']:
-                    actions.append("🎓 **Support transition** — Provide extra mentoring during skill-building.")
+                    actions.append("🎓 **Cross-training context surfaced** — Skill-building phase may affect short-term consistency.")
                 if "Shift change" in emp['context_tags']:
-                    actions.append("⏰ **Allow adjustment time** — Follow up in 2 weeks for impact.")
+                    actions.append("⏰ **Shift-change context surfaced** — Recent schedule transitions may explain part of this pattern.")
                 if "Short staffed" in emp['context_tags']:
-                    actions.append("👥 **Increase capacity** — Hiring or redistribution may help faster.")
+                    actions.append("👥 **Staffing context surfaced** — Capacity constraints may be contributing to variance.")
                 
                 # Trend-based actions
                 if not any(tag in emp['context_tags'] for tag in ["Equipment issues", "Short staffed"]):
                     if emp["trend"] == "down":
-                        actions.append("💬 **Identify obstacles** — Ask what's changed. Check for workload/personal issues.")
+                        actions.append("💬 **Trend context** — Data suggests a downward change worth review for workload or condition shifts.")
                     elif emp["trend"] == "flat":
-                        actions.append("📈 **Break the plateau** — Try different task rotation or side-by-side work with a high performer.")
+                        actions.append("📈 **Trend context** — Data suggests a flat pattern compared with target expectations.")
                 
                 # Gap-based actions
                 try:
@@ -389,15 +389,15 @@ def page_supervisor():
                     if target > 0:
                         gap = target - emp["avg_uph"]
                         if gap > 5 and "New employee" not in emp['context_tags']:
-                            actions.append("📊 **Major gap** — Structured improvement plan with weekly check-ins.")
+                            actions.append("📊 **Gap context** — Based on current records, the target gap is materially above normal range.")
                         elif gap > 2 and "New employee" not in emp['context_tags']:
-                            actions.append("🤝 **1-on-1 coaching** — Discuss goals and what support they need.")
+                            actions.append("🤝 **Gap context** — Data suggests a moderate target gap in the latest window.")
                 except (ValueError, TypeError):
                     pass
                 
                 # Default if no actions were generated
                 if not actions:
-                    actions.append("🤝 **1-on-1 conversation** — Discuss performance, barriers, and support.")
+                    actions.append("🤝 **General context** — This signal is worth review with additional drill-down evidence.")
                 
                 for action in actions:
                     st.write(action)
@@ -409,7 +409,7 @@ def page_supervisor():
     # ────────────────────────────────────────────────────────────────────────────
     
     with st.expander("📉 Trends (collapsed by default)", expanded=False):
-        st.subheader("⚠️ Trending Down — Proactive Check-In Recommended")
+        st.subheader("⚠️ Trending Down — Early Signal View")
         trending_down = [r for r in gs if r.get("trend") == "down" and r.get("goal_status") != "below_goal"]
         
         if trending_down:

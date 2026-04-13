@@ -522,10 +522,56 @@ def _freshness_line(signal: DisplaySignal) -> str:
         return ""
     age_days = max(0, (date.today() - observed).days)
     if age_days == 0:
-        return "Data age: current shift/day. Safe for live review."
+        return "Freshness: Current shift/day snapshot"
     if age_days == 1:
-        return "Data age: 1 day old. Confirm recent shift changes before acting."
-    return f"Data age: {age_days} days old. Treat as latest snapshot/backlog review, not live floor state."
+        return "Freshness: 1 day old snapshot"
+    return f"Freshness: {age_days} days old snapshot"
+
+
+def _why_surfaced_line(source: Any, signal: DisplaySignal) -> str:
+    mode = get_signal_display_mode(signal)
+    if mode == SignalDisplayMode.LOW_DATA:
+        return "Surfaced because limited recent history is available for comparison."
+
+    flags = dict(signal.flags or {})
+    if bool(flags.get("overdue")):
+        return "Surfaced because this follow-up is still open past its due date."
+    if bool(flags.get("due_today")):
+        return "Surfaced because this follow-up is due in the current snapshot."
+
+    repeat_count = 0
+    try:
+        snapshot = dict(getattr(source, "snapshot", {}) or {})
+        repeat_count = int(snapshot.get("repeat_count") or 0)
+    except Exception:
+        repeat_count = 0
+    if repeat_count >= 2:
+        return "Surfaced because a similar pattern has appeared multiple times recently."
+
+    label = str(format_signal_label(signal) or "").strip().lower()
+    if label in {
+        signal_wording("lower_than_recent_pace").lower(),
+        signal_wording("below_expected_pace").lower(),
+    }:
+        return "Surfaced because recent output is below the comparison range."
+    if label == signal_wording("inconsistent_performance").lower():
+        return "Surfaced because recent output has been more variable than usual."
+    if label == signal_wording("improving_pace").lower():
+        return "Surfaced because recent output is above the comparison range."
+
+    return "Surfaced because this pattern differs from recent operating context."
+
+
+def _evidence_basis_line(source: Any, signal: DisplaySignal) -> str:
+    recent_count = _low_data_recent_count(source, signal)
+    if recent_count is not None and recent_count > 1:
+        return f"Based on {recent_count} recent records"
+
+    observed = getattr(signal, "observed_date", None)
+    if observed is not None:
+        return "Latest snapshot only"
+
+    return ""
 
 
 def _low_data_recent_count(source: Any, signal: DisplaySignal) -> int | None:
@@ -793,13 +839,13 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
     current_state_mode = mode == SignalDisplayMode.CURRENT_STATE
     line_1 = f"{employee_name} · {process_name}"
     line_2 = _attention_primary_signal(item, signal)
+    line_3 = _why_surfaced_line(item, signal)
+    line_4 = _evidence_basis_line(item, signal)
     line_5 = format_confidence_line(signal)
 
     if low_data_state:
         collapsed = format_low_data_collapsed_lines(signal)
         line_2 = collapsed[0] if collapsed else signal_wording("not_enough_history_yet")
-        line_3 = ""
-        line_4 = ""
         expanded = format_low_data_expanded_lines(signal, recent_record_count=_low_data_recent_count(item, signal))
         return TodayQueueCardViewModel(
             employee_id=str(getattr(item, "employee_id", "") or ""),
@@ -810,7 +856,7 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             line_3=line_3,
             line_4=line_4,
             line_5=line_5,
-            expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, max_lines=3),
+            expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, excluded=[line_3, line_4], max_lines=3),
             collapsed_hint=_ranking_hint(item, signal),
             collapsed_evidence=_collapsed_evidence_line(item, signal),
             collapsed_issue="Active issue linked" if _has_open_exception(item, signal) else "",
@@ -818,8 +864,6 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
 
     if current_state_mode:
         line_2 = format_signal_label(signal)
-        line_3 = format_observed_line(signal)
-        line_4 = ""
         return TodayQueueCardViewModel(
             employee_id=str(getattr(item, "employee_id", "") or ""),
             process_id=str(getattr(item, "process_name", "") or ""),
@@ -837,19 +881,18 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
         )
 
     if _is_follow_up_signal(signal):
-        line_3 = _follow_up_due_line(item, signal)
-        line_4 = _short_follow_up_context(item, signal)
         expanded_candidates = _attention_context_lines(item, signal, max_lines=4)
-        if line_4:
-            expanded_candidates = [line for line in expanded_candidates if str(line).strip().lower() != line_4.lower()]
-        expanded = _dedupe_expanded(primary=line_2, lines=expanded_candidates, excluded=[line_3, line_4], max_lines=3)
+        expanded = _dedupe_expanded(
+            primary=line_2,
+            lines=expanded_candidates,
+            excluded=[line_3, line_4, _follow_up_due_line(item, signal), _short_follow_up_context(item, signal)],
+            max_lines=3,
+        )
     else:
-        line_3 = format_observed_line(signal)
-        line_4 = format_comparison_line(signal)
         expanded = _dedupe_expanded(
             primary=line_2,
             lines=_attention_context_lines(item, signal, max_lines=4),
-            excluded=[line_3, line_4],
+            excluded=[line_3, line_4, format_observed_line(signal), format_comparison_line(signal)],
             max_lines=3,
         )
 
@@ -878,6 +921,8 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
     process_name = str(signal.process)
     line_1 = f"{employee_name} · {process_name}"
     line_2 = _attention_primary_signal(card, signal)
+    line_3 = _why_surfaced_line(card, signal)
+    line_4 = _evidence_basis_line(card, signal)
     line_5 = format_confidence_line(signal)
 
     if low_data_state:
@@ -890,16 +935,14 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             state=str(signal.state.value),
             line_1=line_1,
             line_2=line_2,
-            line_3="",
-            line_4="",
+            line_3=line_3,
+            line_4=line_4,
             line_5=line_5,
-            expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, max_lines=3),
+            expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, excluded=[line_3, line_4], max_lines=3),
         )
 
     if current_state_mode:
         line_2 = format_signal_label(signal)
-        line_3 = format_observed_line(signal)
-        line_4 = ""
         return TodayQueueCardViewModel(
             employee_id=str(card.drill_down.entity_id or ""),
             process_id=process_name,
@@ -913,14 +956,12 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             freshness_line=_freshness_line(signal),
         )
 
-    if _is_follow_up_signal(signal):
-        line_3 = _follow_up_due_line(card, signal)
-        line_4 = _short_follow_up_context(card, signal)
-        expanded = _dedupe_expanded(primary=line_2, lines=[], excluded=[line_3, line_4], max_lines=3)
-    else:
-        line_3 = format_observed_line(signal)
-        line_4 = format_comparison_line(signal)
-        expanded = _dedupe_expanded(primary=line_2, lines=[], excluded=[line_3, line_4], max_lines=3)
+    expanded = _dedupe_expanded(
+        primary=line_2,
+        lines=[],
+        excluded=[line_3, line_4, format_observed_line(signal), format_comparison_line(signal), _follow_up_due_line(card, signal), _short_follow_up_context(card, signal)],
+        max_lines=3,
+    )
 
     return TodayQueueCardViewModel(
         employee_id=str(card.drill_down.entity_id or ""),
@@ -934,6 +975,14 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
         expanded_lines=expanded,
         freshness_line=_freshness_line(signal),
     )
+
+
+def build_today_queue_card_from_insight_card(*, card: InsightCardContract, today: date) -> TodayQueueCardViewModel | None:
+    """Public thin adapter so legacy renderers can consume normalized card semantics."""
+    signal = build_display_signal_from_insight_card(card=card, today=today)
+    if not is_display_signal_eligible(signal, allow_low_data_case=False):
+        return None
+    return _card_from_insight_card(card, signal)
 
 
 def build_today_queue_view_model(

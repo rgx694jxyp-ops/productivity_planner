@@ -271,7 +271,7 @@ def toggle_simple_mode():
 def simplified_supervisor_view(gs: list[dict]):
     """
     Stripped-down supervisor view for Simple Mode.
-    Just shows: who needs attention, in plain language, with one action button.
+    Just shows where signals are surfacing, in plain language, with quick drill-down.
     """
     below = [r for r in gs if r.get("goal_status") == "below_goal"]
     
@@ -279,7 +279,7 @@ def simplified_supervisor_view(gs: list[dict]):
         st.success("✅ Everyone's on track today")
         return
     
-    st.markdown("### 👥 People who need attention")
+    st.markdown("### 👥 People with surfaced signals")
     
     for emp in below[:5]:  # Show top 5
         name = emp.get("Employee Name", emp.get("Employee", "Unknown"))
@@ -294,8 +294,8 @@ def simplified_supervisor_view(gs: list[dict]):
         col1, col2 = st.columns([3, 1])
         col1.markdown(f"**{name}** · {dept}\n*{status}*")
         
-        if col2.button("Coach", key=f"simple_coach_{emp.get('EmployeeID')}", 
-                      help="Start coaching conversation"):
+        if col2.button("View details", key=f"simple_coach_{emp.get('EmployeeID')}", 
+                  help="Open performance context"):
             st.session_state["goto_page"] = "employees"
             st.session_state["emp_view"] = "Performance Journal"
             st.session_state["cn_selected_emp"] = str(emp.get("EmployeeID", ""))
@@ -314,15 +314,15 @@ def show_start_shift_card(gs: list[dict], follow_up_due: int = 0):
     c3.metric("Follow-up due", follow_up_due)
 
     if below:
-        st.caption("Start with the people below target first, then follow up on anyone whose performance is slipping.")
-        if st.button("▶ Start coaching", key="start_shift_cta", type="primary", use_container_width=True):
+        st.caption("Signals are surfaced for below-target output and downward trend movement.")
+        if st.button("▶ Open review", key="start_shift_cta", type="primary", use_container_width=True):
             top_emp = below[0]
             st.session_state["goto_page"] = "employees"
             st.session_state["emp_view"] = "Performance Journal"
             st.session_state["cn_selected_emp"] = str(top_emp.get("EmployeeID", top_emp.get("Employee Name", "")))
             st.rerun()
     else:
-        st.success("Everyone is on track right now. Use this shift to follow up and reinforce wins.")
+        st.success("Everyone is on track right now based on current data.")
 
 
 def detect_department_patterns(gs: list[dict]) -> list[dict]:

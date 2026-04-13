@@ -132,7 +132,7 @@ def page_cost_impact():
                 f'<div style="font-size:11px;color:#777;">Gap: {_r["GAP (UPH)"]:.1f} UPH · '
                 f'{_r["Lost units/week"]:,} units lost/wk</div>'
                 f'<div style="font-size:11px;color:#1B5E20;margin-top:4px;">'
-                f'✔ Fix = +${_r["Value if at target"]:,.0f}/wk recovered</div>'
+                f'✔ At target = +${_r["Value if at target"]:,.0f}/wk potential</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -140,7 +140,7 @@ def page_cost_impact():
         st.markdown(
             f'<div style="background:#FFF3E0;border:1px solid #E65100;border-radius:8px;'
             f'padding:12px 16px;margin:12px 0;">'
-            f'<b>Fixing top {min(len(rows_behind), 3)} = '
+            f'<b>Top {min(len(rows_behind), 3)} at-target potential = '
             f'${_top3_total:,.0f}/week recovered</b> · '
             f'${_top3_total * 52:,.0f}/year</div>',
             unsafe_allow_html=True,

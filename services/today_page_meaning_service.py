@@ -95,15 +95,13 @@ def _build_status_line(*, state_flags: dict[str, Any], has_queue_items: bool) ->
     if bool(state_flags.get("stale_data")):
         stale_days = int(state_flags.get("stale_days") or 0)
         day_word = "day" if stale_days == 1 else "days"
-        return f"Status: Latest data is {stale_days} {day_word} old. Confirm on-floor updates before acting."
+        return f"Status: Latest data is {stale_days} {day_word} old. Queue reflects the most recent available snapshot."
     if bool(state_flags.get("no_data")):
         return "Status: No imported records yet. Import data to start the queue."
-    if bool(state_flags.get("low_data")):
-        return "Status: Limited history so far. Use these as early signals with confidence labels."
+    if bool(state_flags.get("low_data")) or bool(state_flags.get("partial_data")) or bool(state_flags.get("low_confidence")):
+        return "Early-signal mode: limited history, directional evidence only."
     if not has_queue_items and bool(state_flags.get("healthy")):
         return "Status: No important changes surfaced today."
-    if bool(state_flags.get("partial_data")) or bool(state_flags.get("low_confidence")):
-        return "Status: Partial data is present. Confidence labels show where to double-check."
     return ""
 
 
@@ -179,7 +177,7 @@ def build_today_queue_render_plan(
     primary_placeholder = ""
     if not primary_cards_to_render:
         if secondary_cards_to_render:
-            primary_placeholder = "Early signals are available below. They are lower confidence, but still useful for triage."
+            primary_placeholder = "Early signals are shown below. Confidence is limited until more history is available."
         else:
             primary_placeholder = "No items need immediate attention right now."
 
@@ -195,8 +193,8 @@ def build_today_queue_render_plan(
 
     return TodayQueueRenderPlan(
         section_title=section_title,
-        weak_data_note="Early signals (limited data available)" if weak_data_mode else "",
-        start_note="Start here.",
+        weak_data_note="Early signals are shown below. Confidence is limited until more history is available." if weak_data_mode else "",
+        start_note="Signals are ranked by current evidence strength and recency.",
         primary_cards=primary_cards_to_render,
         secondary_cards=secondary_cards_to_render,
         primary_placeholder=primary_placeholder,

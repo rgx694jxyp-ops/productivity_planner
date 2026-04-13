@@ -14,6 +14,7 @@ init_runtime()
 from pages.common import get_user_timezone_now, _normalize_label_text
 from ui.components import diagnose_upload, show_diagnosis, show_manual_entry_form
 import json
+from pathlib import Path
 from data_loader import auto_detect as _auto_detect, parse_csv_bytes as _parse_csv
 from pages.employees import _build_archived_productivity
 from services.import_service import (
@@ -70,6 +71,50 @@ _SAMPLE_TEMPLATE_CSV = (
     "2026-04-07,1004,Taylor Moore,Receiving,210,6.0\n"
     "2026-04-07,1005,Jordan Lee,Picking,445,8.0\n"
 )
+
+
+_DEMO_SAMPLE_FILES = [
+    "demo_supervisor_history.csv",
+    "demo_day_one_thin_data.csv",
+]
+
+
+def _build_sample_demo_sessions(*, tenant_id: str) -> list[dict]:
+    sessions: list[dict] = []
+    seed_dir = Path(__file__).resolve().parents[1] / "demo_data"
+
+    for file_name in _DEMO_SAMPLE_FILES:
+        file_path = seed_dir / file_name
+        if not file_path.exists():
+            continue
+        headers, rows = _parse_csv(file_path.read_bytes())
+        if not headers or not rows:
+            continue
+
+        auto = _auto_detect(headers)
+        sessions.append(
+            {
+                "filename": f"sample/{file_name}",
+                "rows": rows,
+                "headers": headers,
+                "row_count": len(rows),
+                "mapping": {
+                    "Date": auto.get("Date", ""),
+                    "EmployeeID": auto.get("EmployeeID", ""),
+                    "EmployeeName": auto.get("EmployeeName", ""),
+                    "Department": auto.get("Department", ""),
+                    "Shift": auto.get("Shift", ""),
+                    "UPH": auto.get("UPH", ""),
+                    "Units": auto.get("Units", ""),
+                    "HoursWorked": auto.get("HoursWorked", ""),
+                },
+                "timestamp": get_user_timezone_now(tenant_id).strftime("%Y-%m-%d %H:%M"),
+                "source_mode": "demo",
+                "source_label": "sample_pack",
+            }
+        )
+
+    return sessions
 
 
 # ---------------------------------------------------------------------------
@@ -201,14 +246,18 @@ def _render_import_ready_message(summary: dict) -> None:
     employees = int(summary.get("emp_count", 0) or 0)
     row_label = "row" if rows_ready == 1 else "rows"
     employee_label = "employee" if employees == 1 else "employees"
+    trust = dict(summary.get("trust") or {})
+    confidence_level = trust_level_from_summary(trust)
+    if confidence_level == "Moderate":
+        confidence_level = "Medium"
 
     st.markdown(
         f'<div class="dpd-import-done" style="background:#ffffff;border:1px solid #d9e2ef;border-radius:10px;padding:14px 16px;">'
-        f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">Your data is ready</div>'
+        f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">Import complete: first signal view is ready</div>'
         f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;margin-top:6px;"><strong>{rows_ready:,}</strong> {row_label} across <strong>{employees:,}</strong> {employee_label}</div>'
-        f'<div class="dpd-import-row" style="color:#000000;font-size:15px;line-height:1.5;margin-top:8px;">Data looks good</div>'
-        f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:10px;">You can start reviewing performance now</div>'
-        f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:4px;">Comparisons will appear after more data is available</div>'
+        f'<div class="dpd-import-row" style="color:#000000;font-size:15px;line-height:1.5;margin-top:8px;">Compared using available targets and recent history.</div>'
+        f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:10px;">Signals are surfaced to establish an initial baseline.</div>'
+        f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:4px;">Confidence: {confidence_level} based on available data completeness and sample depth.</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -539,7 +588,7 @@ def _import_step1(tenant_id: str):
 
     mode = st.radio(
         "Choose a starting point",
-        ["Upload file", "Manual entry"],
+        ["Upload file", "Manual entry", "Try sample data"],
         horizontal=True,
         key="import_entry_mode",
     )
@@ -569,6 +618,32 @@ def _import_step1(tenant_id: str):
             st.session_state.split_overrides = {}
             st.session_state.import_step = 3
             st.rerun()
+        st.divider()
+        _render_recent_uploads_panel()
+        return
+
+    if mode == "Try sample data":
+        st.info("Loads sample/demo history into this tenant so the Today queue can be evaluated immediately.")
+        st.caption("Sample mode is labeled in Today so it is distinct from live uploaded operations data.")
+        if st.button("Load sample history", type="primary", use_container_width=True, key="import_load_sample_history"):
+            try:
+                sessions = _build_sample_demo_sessions(tenant_id=tenant_id)
+                if not sessions:
+                    st.error("Sample files are not available. Ensure demo_data files are present in this workspace.")
+                    return
+                st.session_state.uploaded_sessions = sessions
+                st.session_state.submission_plan = None
+                st.session_state.split_overrides = {}
+                st.session_state.import_step = 3
+                st.rerun()
+            except Exception as sample_err:
+                _show_user_error(
+                    "Could not load sample history right now.",
+                    next_steps="Retry in a few seconds. If the issue continues, verify demo files are available.",
+                    technical_detail=str(sample_err),
+                    category="import",
+                )
+                return
         st.divider()
         _render_recent_uploads_panel()
         return
@@ -680,7 +755,7 @@ def _import_step1(tenant_id: str):
         diagnosis = diagnose_upload(pending)
         show_diagnosis(diagnosis)
         if diagnosis.get("days_of_data", 0) <= 1:
-            st.info("Using today's performance only. No trend pattern yet, but we can still show who needs attention.")
+            st.info("Using today's performance only. No trend pattern yet, but early signals can still be surfaced.")
         elif diagnosis.get("days_of_data", 0) < 3:
             st.info("Limited trend confidence. Recommendations will lean more on recent performance than longer patterns.")
 
@@ -921,7 +996,7 @@ def _import_step2(tenant_id: str):
 
                 if confirmed:
                     if not can_confirm:
-                        st.warning("Fix the issues above before confirming.")
+                        st.warning("Resolve the issues above before confirming.")
                     else:
                         sessions[idx]["mapping"] = {
                             "Date":        d_date,
@@ -1077,26 +1152,6 @@ def _import_step3(tenant_id: str):
                     st.dataframe(pd.DataFrame(_complete_excluded_rows), use_container_width=True, hide_index=True)
                 else:
                     st.caption("No excluded rows were captured for this import.")
-
-            # Plain-language confidence note — replaces the old no-op radio.
-            _conf_score = int((_ic_trust or {}).get("confidence_score", 0) or 0)
-            if _conf_score >= 75:
-                st.success(
-                    "Data confidence is **High**. Comparisons and trend signals are reliable. "
-                    "Navigate to Today or Team to see interpreted results."
-                )
-            elif _conf_score >= 50:
-                st.warning(
-                    "Data confidence is **Medium**. Some rows have quality issues — comparisons "
-                    "will work but are noted with caveats where data is incomplete. "
-                    "You can continue now or address issues later."
-                )
-            else:
-                st.warning(
-                    "Data confidence is **Low**. Several quality issues were found. "
-                    "You can still continue — insights will note where confidence is limited "
-                    "and comparisons may shift after cleanup."
-                )
         _ic_c1, _ic_c2 = st.columns(2)
         _ic_btn_label = f"See latest signals ({_ic_below} need attention)" if _ic_below > 0 else "See latest signals"
         if _ic_c1.button(f"👥 {_ic_btn_label}", type="primary", use_container_width=True, key="ic_start_day"):
@@ -1983,6 +2038,9 @@ def _import_step3(tenant_id: str):
                             break
                     _upload_payload = {
                         "files": [s.get("filename", "") for s in sessions],
+                        "source_mode": "demo"
+                        if sessions and all(str(s.get("source_mode") or "").strip().lower() == "demo" for s in sessions)
+                        else "real",
                         "data_fingerprint": _batch_fingerprint,
                         "mapping_profile": _build_mapping_profile_payload(
                             headers=_profile_headers,
@@ -2002,6 +2060,9 @@ def _import_step3(tenant_id: str):
                             "suspicious_values": int(_final_trust.suspicious_values),
                             "trust_status": str(_final_trust.status),
                             "confidence_score": int(_final_trust.confidence_score),
+                            "source_mode": "demo"
+                            if sessions and all(str(s.get("source_mode") or "").strip().lower() == "demo" for s in sessions)
+                            else "real",
                         },
                         "import_job": _serialize_import_job(_import_job),
                         "undo": {
@@ -2092,13 +2153,13 @@ def _import_step3(tenant_id: str):
                 _show_user_error(
                     "Could not save imported history right now.",
                     next_steps=(
-                        "Fix unresolved employee IDs (or missing employee records) and try the import again."
+                        "Resolve unresolved employee IDs (or missing employee records) and try the import again."
                     ),
                     technical_detail=traceback.format_exc(),
                     category="pipeline",
                 )
                 st.info(
-                    "Import stopped. Fix unresolved employee IDs (or missing employee records) "
+                    "Import stopped. Resolve unresolved employee IDs (or missing employee records) "
                     "and run the import again so all history rows are written."
                 )
                 _log_app_error("pipeline", f"UPH history storage failed: {_uph_err}",

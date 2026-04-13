@@ -10,7 +10,7 @@ from domain.risk_scoring import _compute_priority_summary
 
 
 def _render_priority_strip(gs: list[dict], history: list[dict]):
-    """Top-of-page action strip that answers 'what should I do right now?'"""
+    """Top-of-page signal strip summarizing where priority patterns are surfacing."""
     p = _compute_priority_summary(gs, history)
     c1, c2, c3 = st.columns(3)
     c1.metric("⚠️ Below Goal", p["below"])
@@ -22,7 +22,7 @@ def _render_priority_strip(gs: list[dict], history: list[dict]):
         st.session_state["goto_page"] = "productivity"
         st.session_state["prod_view"] = "📋 Priority List"
         st.rerun()
-    if a2.button("Start Coaching", use_container_width=True, key="pri_strip_coaching"):
+    if a2.button("Open Journal", use_container_width=True, key="pri_strip_coaching"):
         st.session_state["goto_page"] = "employees"
         st.session_state["emp_view"] = "Performance Journal"
         st.rerun()
@@ -36,8 +36,8 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
     if not rec:
         st.markdown(
             '<div class="dpd-rail">'
-            '<div class="dpd-rail-label">▶ Recommended Action</div>'
-            '<div class="dpd-rail-ok">✓ All employees on track — no action needed</div>'
+            '<div class="dpd-rail-label">▶ Primary Signal</div>'
+            '<div class="dpd-rail-ok">✓ All employees on track — no priority signal surfaced</div>'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -74,7 +74,7 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
 
     st.markdown(
         f'<div class="dpd-rail" style="{rail_style}">'
-        f'<div class="dpd-rail-label" style="color:#FFFFFF !important;">▶ Recommended Action</div>'
+        f'<div class="dpd-rail-label" style="color:#FFFFFF !important;">▶ Primary Signal</div>'
         f'<div class="dpd-rail-name">{_name}{_dept_str}</div>'
         f'<div class="dpd-rail-why">{_context}</div>'
         f"{_remaining_note}"
@@ -86,7 +86,7 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
         st.caption(f"💡 {adaptive['emphasis']}")
 
     col1, col2 = st.columns(2)
-    action_label = adaptive.get("action", "Start Coaching") if adaptive else "Start Coaching"
+    action_label = adaptive.get("action", "Open Journal") if adaptive else "Open Journal"
     if col1.button(f"▶ {action_label}", key=f"{key_prefix}_start_coach", type="primary", use_container_width=True):
         st.session_state["goto_page"] = "employees"
         st.session_state["emp_view"] = "Performance Journal"

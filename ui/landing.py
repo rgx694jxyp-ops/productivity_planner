@@ -144,7 +144,7 @@ def show_landing_page() -> None:
         st.image(shot, use_container_width=True)
     else:
         st.info("Add a screenshot at assets/landing-supervisor-screenshot.png to boost conversions.")
-    st.caption("Start your shift knowing exactly who needs attention.")
+    st.caption("Start your shift with a clear view of where signals are surfacing.")
 
     demo_url = os.getenv("LANDING_DEMO_URL", "").strip()
     try:
@@ -171,9 +171,9 @@ def show_landing_page() -> None:
     st.markdown("### The solution")
     st.markdown(
         """
-        - See who needs attention now
-        - Understand likely causes quickly
-        - Take action and track improvement over time
+        - See where performance signals are surfacing now
+        - Understand likely contributing factors quickly
+        - Track trends over time with supporting context
         """
     )
 
@@ -181,8 +181,8 @@ def show_landing_page() -> None:
     st.markdown(
         """
         1. Upload CSV/Excel or enter data manually
-        2. Get a prioritized action list
-        3. Coach, document, and monitor results
+        2. Get a prioritized review queue
+        3. Review context, document notes, and monitor results
         """
     )
 

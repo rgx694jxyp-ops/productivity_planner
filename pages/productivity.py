@@ -208,7 +208,7 @@ def page_productivity():
         st.caption("Set one default target, refine it by process, and add an employee override only when needed.")
         st.caption("Trend window and Top/Bottom % only affect ranking/highlighting views.")
 
-        st.info("Quick start: start with one default target, then only add process or employee targets where expectations are meaningfully different.")
+        st.info("A single default target works as a baseline; process or employee targets are useful when operating context differs meaningfully.")
 
         with st.expander("Advanced scoring controls"):
             tw = st.slider("Trend window used for trend scoring (weeks)", 2, 12,
@@ -1167,36 +1167,36 @@ def page_productivity():
                     for note in emp['context_impact']:
                         st.info(note, icon="📌")
 
-                # Suggested actions based on trend and gap
-                st.markdown("#### Suggested Actions")
+                # Suggested context notes based on trend and gap
+                st.markdown("#### Suggested Context Notes")
                 actions = []
 
                 # Equipment-specific action
                 if "Equipment issues" in emp['context_tags']:
-                    actions.append("**Fix the equipment first** — Resolve tool/system issues before coaching on performance.")
+                    actions.append("**Equipment context surfaced** — Tool/system conditions may be influencing this signal.")
 
                 # New employee specific action
                 if "New employee" in emp['context_tags']:
-                    actions.append("**Structured onboarding check** — Ensure they have proper training and mentoring.")
+                    actions.append("**New-employee context surfaced** — Early ramp-up conditions may influence current output.")
 
                 # Cross-training specific action
                 if "Cross-training" in emp['context_tags']:
-                    actions.append("**Support the transition** — Provide extra mentoring during skill-building phase.")
+                    actions.append("**Cross-training context surfaced** — Skill-building phase may affect short-term consistency.")
 
                 # Shift change specific action
                 if "Shift change" in emp['context_tags']:
-                    actions.append("**Allow adjustment time** — Follow up in 2 weeks to see if new rhythm improves performance.")
+                    actions.append("**Shift-change context surfaced** — Recent schedule transitions may explain part of this pattern.")
 
                 # Staffing specific action
                 if "Short staffed" in emp['context_tags']:
-                    actions.append("**Increase team capacity** — Hiring or task redistribution may solve this faster than coaching.")
+                    actions.append("**Staffing context surfaced** — Capacity constraints may be contributing to variance.")
 
                 # Trend-based actions (only if not covered by context)
                 if not any(tag in emp['context_tags'] for tag in ["Equipment issues", "Short staffed"]):
                     if emp["trend"] == "down":
-                        actions.append("**Identify obstacles** — Ask what's changed. Look for workload spikes or personal issues.")
+                        actions.append("**Trend context** — Data suggests a downward change worth review for workload or condition shifts.")
                     elif emp["trend"] == "flat":
-                        actions.append("**Break the plateau** — Try different task rotation or side-by-side work with a high performer.")
+                        actions.append("**Trend context** — Data suggests a flat pattern compared with target expectations.")
 
                 # Gap-based actions
                 try:
@@ -1204,15 +1204,15 @@ def page_productivity():
                     if target > 0:
                         gap = target - emp["avg_uph"]
                         if gap > 5 and "New employee" not in emp['context_tags']:
-                            actions.append("**Major gap** — Structured improvement plan with weekly check-ins.")
+                            actions.append("**Gap context** — Based on current records, the target gap is materially above normal range.")
                         elif gap > 2 and "New employee" not in emp['context_tags']:
-                            actions.append("**1-on-1 coaching** — Discuss goals and what support they need.")
+                            actions.append("**Gap context** — Data suggests a moderate target gap in the latest window.")
                 except (ValueError, TypeError):
                     pass
 
                 # Default actions
                 if not actions:
-                    actions.append("**1-on-1 conversation** — Discuss performance, barriers, and support.")
+                    actions.append("**General context** — This signal is worth review with additional drill-down evidence.")
 
                 for action in actions:
                     st.markdown(f"→ {action}")

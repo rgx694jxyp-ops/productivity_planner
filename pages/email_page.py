@@ -372,7 +372,7 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                     if not chosen:
                         st.warning("Select at least one recipient.")
                     elif _sn_end < _sn_start:
-                        st.warning("Fix the date range first.")
+                        st.warning("Adjust the date range before sending.")
                     else:
                         to_addrs = [r.split("<")[1].rstrip(">") for r in chosen]
                         with st.spinner("Building report…"):

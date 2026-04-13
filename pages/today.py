@@ -45,6 +45,7 @@ from services.today_page_meaning_service import (
 from services.today_view_model_service import (
     TodayQueueCardViewModel,
     TodayValueStripViewModel,
+    build_today_queue_card_from_insight_card,
     build_today_value_strip_view_model,
 )
 from services.signal_traceability_service import traceability_payload_from_card
@@ -324,6 +325,40 @@ def _show_flash_message() -> None:
         show_success_state(message)
 
 
+def _render_demo_source_banner(import_summary: dict[str, Any]) -> None:
+    source_mode = str((import_summary or {}).get("source_mode") or "").strip().lower()
+    if source_mode != "demo":
+        return
+    source_label = str((import_summary or {}).get("source_label") or "").strip()
+    suffix = f" Source: {source_label}." if source_label else ""
+    st.markdown(
+        (
+            '<div class="today-stale-banner">'
+            'Demo mode: Today queue is based on sample history, not live uploaded operations data.'
+            f'{suffix}'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_today_interpretation_strip() -> None:
+    with st.container(border=True):
+        st.markdown('<div class="today-section-label">What you are seeing</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="today-supporting-note">This queue highlights where current data differs from expected or recent patterns.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="today-supporting-note">Each item shows why it surfaced and how reliable the evidence is.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="today-supporting-note">Low-confidence items are early signals, not final conclusions.</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bool:
     """Try to rebuild today's payload once when it is missing or deferred."""
     try:
@@ -426,12 +461,12 @@ def _render_since_yesterday(queue_items: list[dict], recent_outcomes: list[dict]
 
 def _render_empty_state() -> None:
     with st.container(border=True):
-        st.markdown("### No urgent actions right now")
+        st.markdown("### No priority signals right now")
         st.write(
             "That means the queue is clear for the moment. This page becomes valuable when fresh productivity data "
-            "turns into a short list of people who need a check-in, a follow-up, or recognition."
+            "turns into a short list of people with noteworthy changes, follow-up context, or recognition signals."
         )
-        st.info("Import fresh data to refill the queue and surface who needs attention next.")
+        st.info("The queue updates when newer data snapshots are available.")
 
 
 def _render_first_time_empty_state() -> None:
@@ -439,10 +474,10 @@ def _render_first_time_empty_state() -> None:
     with st.container(border=True):
         st.markdown("### First signals are ready")
         st.markdown(
-            "You have enough data to start with early signal review. Some signals may be low confidence until "
+            "You have enough data for early signal visibility. Some signals may be low confidence until "
             "more shifts are imported."
         )
-        st.info("Next step: Review the signals shown here first, then drill into people who need a closer look.")
+        st.info("Early signals are shown below. Confidence is limited until more history is available.")
         if st.button("📁 Import more shifts", type="secondary", use_container_width=True, key="first_time_import_more"):
             st.session_state["goto_page"] = "import"
             st.rerun()
@@ -784,7 +819,7 @@ def _confidence_chip(line_5_text: str) -> str:
     lowered = text.lower()
     if not lowered:
         return ""
-    if "low confidence" in lowered:
+    if "low confidence" in lowered or "confidence: low" in lowered:
         return '<div class="today-confidence-chip today-confidence-chip-low">Low confidence</div>'
     if "confidence: high" in lowered:
         return '<div class="today-confidence-chip today-confidence-chip-high">High confidence</div>'
@@ -800,9 +835,9 @@ def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, co
         chip_html = _confidence_chip(str(card.line_5 or ""))
         if chip_html:
             st.markdown(chip_html, unsafe_allow_html=True)
-        if not compact and str(card.line_3 or "").strip():
+        if str(card.line_3 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_3}</div>', unsafe_allow_html=True)
-        if not compact and str(card.line_4 or "").strip():
+        if str(card.line_4 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_4}</div>', unsafe_allow_html=True)
         line_5_text = str(card.line_5 or "").strip()
         if line_5_text.lower() == "low confidence":
@@ -816,7 +851,8 @@ def _render_attention_card(*, card: TodayQueueCardViewModel, key_prefix: str, co
         if collapsed_hint:
             st.markdown(f'<div class="today-insight-meta">{collapsed_hint}</div>', unsafe_allow_html=True)
         collapsed_evidence = str(getattr(card, "collapsed_evidence", "") or "").strip()
-        if collapsed_evidence:
+        line_4_text = str(card.line_4 or "").strip().lower()
+        if collapsed_evidence and collapsed_evidence.strip().lower() != line_4_text:
             st.markdown(f'<div class="today-insight-meta">{collapsed_evidence}</div>', unsafe_allow_html=True)
         collapsed_issue = str(getattr(card, "collapsed_issue", "") or "").strip()
         if collapsed_issue:
@@ -895,7 +931,7 @@ def _render_today_value_strip(value_strip: TodayValueStripViewModel, *, freshnes
 
     st.markdown('<div class="today-section-label">Quick read</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="today-supporting-note">A small read on today&apos;s data before you work the queue.</div>',
+        '<div class="today-supporting-note">A compact interpretation of the current snapshot before queue details.</div>',
         unsafe_allow_html=True,
     )
     if str(freshness_note or "").strip():
@@ -920,8 +956,9 @@ def _render_today_value_strip(value_strip: TodayValueStripViewModel, *, freshnes
 
 
 def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
-    display_signal = build_display_signal_from_insight_card(card=item, today=date.today())
-    if not is_signal_display_eligible(display_signal, allow_low_data_case=False):
+    card_vm = build_today_queue_card_from_insight_card(card=item, today=date.today())
+    if card_vm is None:
+        display_signal = build_display_signal_from_insight_card(card=item, today=date.today())
         suppressed = list(st.session_state.get("_today_suppressed_signals_debug") or [])
         suppressed.append(
             {
@@ -933,68 +970,45 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
         )
         st.session_state["_today_suppressed_signals_debug"] = suppressed
         return
-    mode = get_signal_display_mode(display_signal)
+
     with st.container(border=True):
-        low_data_state = mode == SignalDisplayMode.LOW_DATA
-        current_state_mode = mode == SignalDisplayMode.CURRENT_STATE
-        collapsed_lines = format_low_data_collapsed_lines(display_signal) if low_data_state else []
-        if low_data_state:
-            line_1 = ""
-            line_2 = collapsed_lines[0] if len(collapsed_lines) > 0 else signal_wording("not_enough_history_yet")
-            line_3 = ""
-            line_4 = ""
-            line_5 = collapsed_lines[1] if len(collapsed_lines) > 1 else "Low confidence"
-        elif current_state_mode:
-            line_1 = f"{display_signal.employee_name} · {display_signal.process}"
-            line_2 = format_signal_label(display_signal)
-            line_3 = format_observed_line(display_signal)
-            line_4 = format_confidence_line(display_signal)
-            line_5 = ""
-        else:
-            line_1 = f"{display_signal.employee_name} · {display_signal.process}"
-            line_2 = format_signal_label(display_signal)
-            line_3 = format_observed_line(display_signal)
-            line_4 = format_comparison_line(display_signal)
-            line_5 = format_confidence_line(display_signal)
+        st.markdown(f'<div class="today-insight-title">{card_vm.line_1}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-insight-line">{card_vm.line_2}</div>', unsafe_allow_html=True)
+        chip_html = _confidence_chip(str(card_vm.line_5 or ""))
+        if chip_html:
+            st.markdown(chip_html, unsafe_allow_html=True)
+        if str(card_vm.line_3 or "").strip():
+            st.markdown(f'<div class="today-insight-line">{card_vm.line_3}</div>', unsafe_allow_html=True)
+        if str(card_vm.line_4 or "").strip():
+            st.markdown(f'<div class="today-insight-line">{card_vm.line_4}</div>', unsafe_allow_html=True)
+        line_5_text = str(card_vm.line_5 or "").strip()
+        if line_5_text.lower() == "low confidence":
+            st.markdown(f'<div class="today-confidence-badge-low">{line_5_text}</div>', unsafe_allow_html=True)
+        elif line_5_text:
+            st.markdown(f'<div class="today-insight-meta">{line_5_text}</div>', unsafe_allow_html=True)
 
-        for idx, text in enumerate((line_1, line_2, line_3, line_4, line_5), start=1):
-            line_text = str(text or "").strip()
-            if not line_text:
-                continue
-            if idx == 1:
-                st.markdown(f'<div class="today-insight-title">{line_text}</div>', unsafe_allow_html=True)
-            elif idx == 5:
-                if line_text.lower() == "low confidence":
-                    st.markdown(f'<div class="today-confidence-badge-low">{line_text}</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="today-insight-meta">{line_text}</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="today-insight-line">{line_text}</div>', unsafe_allow_html=True)
+        freshness_text = str(card_vm.freshness_line or "").strip()
+        if freshness_text:
+            st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
 
-        why_line = str(item.metadata.get("secondary_status") or "").strip()
-        basis_line = line_4
-        data_note = str(item.data_completeness.summary or "").strip()
-        has_extra = bool(low_data_state or why_line or basis_line or (data_note and item.data_completeness.status != "complete"))
+        collapsed_hint = str(getattr(card_vm, "collapsed_hint", "") or "").strip()
+        if collapsed_hint:
+            st.markdown(f'<div class="today-insight-meta">{collapsed_hint}</div>', unsafe_allow_html=True)
+        collapsed_evidence = str(getattr(card_vm, "collapsed_evidence", "") or "").strip()
+        line_4_text = str(card_vm.line_4 or "").strip().lower()
+        if collapsed_evidence and collapsed_evidence.strip().lower() != line_4_text:
+            st.markdown(f'<div class="today-insight-meta">{collapsed_evidence}</div>', unsafe_allow_html=True)
+        collapsed_issue = str(getattr(card_vm, "collapsed_issue", "") or "").strip()
+        if collapsed_issue:
+            st.markdown(f'<div class="today-insight-meta">{collapsed_issue}</div>', unsafe_allow_html=True)
 
-        c1, c2 = st.columns([3, 2])
-        with c1:
-            if has_extra:
-                with st.expander("Why this is shown", expanded=False):
-                    if low_data_state:
-                        recent_count = _estimate_recent_record_count(item)
-                        for line in format_low_data_expanded_lines(display_signal, recent_record_count=recent_count):
-                            st.write(line)
-                    else:
-                        if why_line:
-                            st.write(f"Why: {why_line}")
-                        if basis_line:
-                            st.write(f"Based on: {basis_line.replace('Compared to: ', '')}")
-                        if data_note and item.data_completeness.status != "complete":
-                            st.caption(f"Data note: {data_note}")
+        if card_vm.expanded_lines:
+            with st.expander("Why this is shown", expanded=False):
+                for line in list(card_vm.expanded_lines or [])[:3]:
+                    st.write(line)
 
-        with c2:
-            if st.button(item.drill_down.label, key=f"{key_prefix}_{item.insight_id}", use_container_width=True):
-                _go_to_drill_down(item)
+        if st.button(item.drill_down.label, key=f"{key_prefix}_{item.insight_id}", use_container_width=True):
+            _go_to_drill_down(item)
 
 
 def _render_section_placeholder(message: str, todo_note: str, *, key: str) -> None:
@@ -1052,8 +1066,9 @@ def page_today() -> None:
         if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"today", ""}:
             render_traceability_panel(_trace_ctx, heading="Signal source context")
 
+        _render_today_interpretation_strip()
         st.markdown('<div class="today-section-label">Today queue</div>', unsafe_allow_html=True)
-        st.markdown('<div class="today-supporting-note">Start here and work top to bottom.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-supporting-note">Signals are ranked by current evidence strength and recency.</div>', unsafe_allow_html=True)
         _show_flash_message()
 
         refresh_col, _ = st.columns([1, 4])
@@ -1172,6 +1187,8 @@ def page_today() -> None:
         if meaning.status_line:
             st.caption(meaning.status_line)
 
+        _render_demo_source_banner(meaning.import_summary)
+
         if meaning.stale_banner:
             st.markdown(
                 f'<div class="today-stale-banner">{meaning.stale_banner}</div>',
@@ -1191,7 +1208,7 @@ def page_today() -> None:
             import_summary=meaning.import_summary,
         )
         if value_strip.cards:
-            with st.expander("Supporting context", expanded=False):
+            with st.expander("Supporting context", expanded=bool(st.session_state.get("_first_import_just_completed"))):
                 _render_today_value_strip(
                     value_strip,
                     freshness_note=meaning.freshness_note,

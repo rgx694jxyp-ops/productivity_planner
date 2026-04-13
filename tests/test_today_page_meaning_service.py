@@ -32,6 +32,7 @@ def test_surface_meaning_weak_data_mode_for_partial_trust():
 
     assert meaning.weak_data_mode is True
     assert meaning.state_flags["partial_data"] is True
+    assert meaning.status_line == "Early-signal mode: limited history, directional evidence only."
 
 
 def test_queue_render_plan_promotes_secondary_when_weak_data(monkeypatch):
@@ -70,5 +71,5 @@ def test_queue_render_plan_promotes_secondary_when_weak_data(monkeypatch):
 
     assert len(plan.primary_cards) == 1
     assert len(plan.secondary_cards) == 0
-    assert plan.weak_data_note == "Early signals (limited data available)"
+    assert plan.weak_data_note == "Early signals are shown below. Confidence is limited until more history is available."
     assert plan.primary_placeholder == ""

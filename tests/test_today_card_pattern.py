@@ -4,6 +4,7 @@ import re
 from domain.display_signal import DisplaySignal, SignalConfidence, SignalLabel
 from services.attention_scoring_service import AttentionFactor, AttentionItem, AttentionSummary
 from services.today_view_model_service import build_today_queue_view_model
+from tests.product_posture_assertions import assert_no_prescriptive_language
 
 
 def _item(employee_id: str = "E1") -> AttentionItem:
@@ -51,9 +52,8 @@ def test_today_card_pattern_performance_signal(monkeypatch):
 
     assert card.line_1 == "Alex · Receiving"
     assert card.line_2 == "Below expected pace"
-    assert card.line_3.startswith("Observed: ")
-    assert "(" in card.line_3 and "UPH" in card.line_3
-    assert card.line_4.startswith("Compared to: ") and "avg" in card.line_4
+    assert card.line_3 == "Surfaced because recent output is below the comparison range."
+    assert card.line_4 == "Latest snapshot only"
     assert card.line_5 == "Confidence: High"
 
 
@@ -79,8 +79,8 @@ def test_today_card_pattern_follow_up_signal(monkeypatch):
 
     assert card.line_1 == "Taylor · Receiving"
     assert card.line_2 == "Follow-up not completed"
-    assert card.line_3 == "Due: Overdue"
-    assert card.line_4 == ""
+    assert card.line_3 == "Surfaced because this follow-up is still open past its due date."
+    assert card.line_4 == "Latest snapshot only"
     assert card.line_5 == "Confidence: Medium"
 
 
@@ -111,8 +111,8 @@ def test_today_card_pattern_low_data_signal(monkeypatch):
 
     assert card.line_1 == "Jordan · Receiving"
     assert card.line_2 == "Not enough history yet"
-    assert card.line_3 == ""
-    assert card.line_4 == ""
+    assert card.line_3 == "Surfaced because limited recent history is available for comparison."
+    assert card.line_4 == "Latest snapshot only"
     assert card.line_5 == "Low confidence"
     assert card.expanded_lines == ["Only 1 recent record(s) available", "Observed: Apr 11"]
 
@@ -180,8 +180,8 @@ def test_today_card_trend_lines_use_canonical_short_window_and_no_repeated_meani
     card = vm.secondary_cards[0]
 
     assert card.line_2 == "Lower than recent pace"
-    assert card.line_3 == "Observed: Apr 11 (38.1 UPH)"
-    assert card.line_4 == "Compared to: Apr 9–Apr 10 avg (42.0 UPH)"
+    assert card.line_3 == "Surfaced because recent output is below the comparison range."
+    assert card.line_4 == "Latest snapshot only"
     assert card.line_5 == "Confidence: Low"
     assert card.expanded_lines == ["Watch for continued drift"]
 
@@ -210,8 +210,8 @@ def test_today_card_pattern_shows_one_repeat_support_line_without_overriding_tre
     card = vm.secondary_cards[0]
 
     assert card.line_2 == "Lower than recent pace"
-    assert card.line_3 == "Observed: Apr 11 (38.1 UPH)"
-    assert card.line_4 == "Compared to: Apr 9–Apr 10 avg (42.0 UPH)"
+    assert card.line_3 == "Surfaced because recent output is below the comparison range."
+    assert card.line_4 == "Latest snapshot only"
     assert card.expanded_lines == ["Seen 3 times this week"]
 
 
@@ -297,3 +297,45 @@ def test_today_card_expanded_lines_include_source_and_exception_context(monkeypa
     assert card.collapsed_hint.startswith("Flagged due to")
     assert card.collapsed_evidence.startswith("Source: ")
     assert card.collapsed_issue == "Active issue linked"
+
+
+def test_today_card_contract_non_prescriptive_and_required_fields(monkeypatch):
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=31.2,
+        comparison_start_date=date(2026, 4, 6),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=40.0,
+        confidence=SignalConfidence.HIGH,
+        data_completeness=None,
+        flags={},
+    )
+
+    monkeypatch.setattr("services.today_view_model_service.build_display_signal_from_attention_item", lambda item, today: signal)
+    vm = build_today_queue_view_model(attention=_summary(_item("E10")), suppressed_cards=[], today=date(2026, 4, 11))
+    card = vm.primary_cards[0]
+
+    assert " · " in card.line_1
+    assert card.line_2
+    assert card.line_3.startswith("Surfaced because")
+    assert card.line_5.lower().startswith("confidence") or card.line_5.lower() == "low confidence"
+    assert str(card.freshness_line or "").startswith("Freshness:")
+    assert card.line_4 in {"Latest snapshot only"} or card.line_4.startswith("Based on")
+
+    assert_no_prescriptive_language(
+        [
+            card.line_1,
+            card.line_2,
+            card.line_3,
+            card.line_4,
+            card.line_5,
+            card.freshness_line,
+            *list(card.expanded_lines or []),
+            card.collapsed_hint,
+            card.collapsed_evidence,
+            card.collapsed_issue,
+        ]
+    )

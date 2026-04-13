@@ -77,6 +77,8 @@ def _build_import_summary(*, tenant_id: str, goal_status: list[dict[str, Any]]) 
         "emp_count": emp_count,
         "below": below_count,
         "risks": 0,
+        "source_mode": "real",
+        "source_label": "",
     }
 
     try:
@@ -102,6 +104,14 @@ def _build_import_summary(*, tenant_id: str, goal_status: list[dict[str, Any]]) 
             "confidence_score": confidence_score,
         } if trust_status else {}
 
+        source_mode_raw = str(
+            meta.get("source_mode")
+            or stats.get("source_mode")
+            or "real"
+        ).strip().lower()
+        source_mode = "demo" if source_mode_raw == "demo" else "real"
+        source_label = str(latest.get("filename") or "").strip()
+
         return {
             **base_summary,
             "rows_processed": rows_processed,
@@ -109,6 +119,8 @@ def _build_import_summary(*, tenant_id: str, goal_status: list[dict[str, Any]]) 
             "warning_rows": warning_rows,
             "rejected_rows": rejected_rows,
             "trust": trust_payload,
+            "source_mode": source_mode,
+            "source_label": source_label,
         }
     except Exception:
         return base_summary

@@ -63,7 +63,7 @@ def test_first_run_secondary_only_shows_early_signal_placeholder(monkeypatch):
                 },
             )()
         ]
-        primary_placeholder = "Early signals are available below. They are lower confidence, but still useful for triage."
+        primary_placeholder = "Early signals are shown below. Confidence is limited until more history is available."
         secondary_caption = "Early signals based on limited data"
         secondary_expanded = True
         suppressed_debug_rows = []
@@ -85,4 +85,4 @@ def test_first_run_secondary_only_shows_early_signal_placeholder(monkeypatch):
         show_secondary_open=True,
     )
 
-    assert any("Early signals are available below" in text for text in markdown_calls)
+    assert any("Early signals are shown below. Confidence is limited until more history is available." in text for text in markdown_calls)

@@ -444,11 +444,13 @@ def build_display_signal_from_insight_card(*, card: InsightCardContract, today: 
     comparison_start = card.time_context.compared_window_start.date() if card.time_context.compared_window_start else None
     comparison_end = card.time_context.compared_window_end.date() if card.time_context.compared_window_end else None
 
+    resolved_label = label_map.get(str(card.insight_kind or ""), SignalLabel.LOW_DATA)
+
     return build_display_signal(
         employee_id=metadata.get("employee_id") or card.drill_down.entity_id or metadata.get("employee_name") or "unknown-employee",
         employee_name=metadata.get("employee_name") or card.drill_down.entity_id or "Unknown employee",
         process=metadata.get("process_name") or card.workload_context.impacted_group_label or "Unassigned",
-        signal_label=label_map.get(str(card.insight_kind or ""), SignalLabel.LOW_DATA.value),
+        signal_label=resolved_label.value,
         observed_date=observed_date,
         observed_value=card.workload_context.observed_volume,
         comparison_start_date=comparison_start,

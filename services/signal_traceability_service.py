@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime
 
 from domain.insight_card_contract import (
     DataCompletenessNote,
@@ -80,6 +81,35 @@ def infer_traceability_context(
 
 
 def traceability_payload_from_card(item: InsightCardContract) -> dict:
+    sample_size = item.confidence.sample_size
+    min_points = item.confidence.minimum_expected_points
+    included_rows = item.traceability.included_rows
+
+    maturity_label = "stable signal"
+    maturity_reason = "comparison context and evidence coverage are available"
+    if isinstance(included_rows, int) and included_rows > 0 and included_rows < 3:
+        maturity_label = "limited-data prompt"
+        maturity_reason = "fewer than 3 usable points are available"
+    elif isinstance(sample_size, int) and sample_size > 0 and sample_size < 3:
+        maturity_label = "limited-data prompt"
+        maturity_reason = "fewer than 3 usable points are available"
+    elif str(item.confidence.level or "").strip().lower() == "low":
+        maturity_label = "early signal"
+        maturity_reason = "evidence coverage is still limited"
+    elif isinstance(min_points, int) and isinstance(sample_size, int) and min_points > 0 and sample_size < min_points:
+        maturity_label = "early signal"
+        maturity_reason = "usable points are below the stable-window threshold"
+
+    observed_label = str(item.time_context.observed_window_label or "").strip()
+    compared_label = str(item.time_context.compared_window_label or "").strip()
+    freshness_text = observed_label or "Latest snapshot"
+    if item.time_context.last_updated_at:
+        try:
+            ts = datetime.fromisoformat(str(item.time_context.last_updated_at))
+            freshness_text = f"{freshness_text} · Updated {ts.strftime('%Y-%m-%d %H:%M')}"
+        except Exception:
+            pass
+
     payload = asdict(item.traceability)
     payload.update(
         {
@@ -87,6 +117,19 @@ def traceability_payload_from_card(item: InsightCardContract) -> dict:
             "insight_title": item.title,
             "drill_down_screen": item.drill_down.screen,
             "drill_down_section": item.drill_down.section,
+            "signal_summary": str(item.what_happened or item.title or "").strip(),
+            "surfaced_because": str(item.why_flagged or "").strip(),
+            "confidence_level": str(item.confidence.level or "low").strip().lower(),
+            "confidence_basis": str(item.confidence.basis or "").strip(),
+            "confidence_caveat": str(item.confidence.caveat or "").strip(),
+            "confidence_sample_size": sample_size,
+            "confidence_minimum_points": min_points,
+            "comparison_statement": str(item.compared_to_what or "").strip(),
+            "freshness_statement": freshness_text,
+            "observed_window_label": observed_label,
+            "compared_window_label": compared_label,
+            "signal_maturity_label": maturity_label,
+            "signal_maturity_reason": maturity_reason,
         }
     )
     return payload
