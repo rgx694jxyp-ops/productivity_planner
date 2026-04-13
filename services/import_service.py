@@ -319,14 +319,10 @@ def _get_upload_by_id(tenant_id: str, upload_id):
 
 def _estimate_new_employees_for_sessions(sessions: list[dict]) -> tuple[list[str], dict[str, str]]:
     """Return (new_employee_ids, id_to_name) inferred from uploaded sessions."""
-    from repositories.employees_repo import get_employees as _get_employees
+    from repositories.employees_repo import get_employee_ids as _get_employee_ids
     from data_loader import auto_detect as _auto_detect
 
-    _existing_ids = {
-        str(e.get("emp_id", "")).strip()
-        for e in (_get_employees() or [])
-        if str(e.get("emp_id", "")).strip()
-    }
+    _existing_ids = set(_get_employee_ids() or [])
     _new_ids = set()
     _name_map = {}
 

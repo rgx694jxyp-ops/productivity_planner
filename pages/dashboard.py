@@ -1,8 +1,11 @@
 from core.runtime import date, pd, st, init_runtime
 
 init_runtime()
-from domain.risk import _get_all_risk_levels
-from pages.common import load_goal_status_history
+from pages.common import (
+    get_below_goal_employees,
+    load_goal_status_history,
+    load_risk_levels,
+)
 from ui.components import (
     _render_breadcrumb,
     _render_confidence_ux,
@@ -44,7 +47,7 @@ def page_dashboard():
     st.divider()
 
     # Filter for below_goal employees
-    below_goal = [r for r in gs if r.get("goal_status") == "below_goal"]
+    below_goal = get_below_goal_employees(gs)
     
     if not below_goal:
         st.success("✅ All employees are meeting their goals!")
@@ -56,25 +59,6 @@ def page_dashboard():
             st.metric("Employees meeting goals", len(on_goal))
         return
 
-    # Score all below-goal employees using shared risk calculator
-    _risk_cache_all = _get_all_risk_levels(gs, history)
-    risk_list = []
-    for emp in below_goal:
-        emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
-        risk_level, risk_score, risk_details = _risk_cache_all.get(emp_id, ("🟢 Low", 0, {}))
-        risk_list.append({
-            "name": emp.get("Employee", emp.get("Employee Name", "Unknown")),
-            "department": emp.get("Department", ""),
-            "emp_id": emp_id,
-            "avg_uph": round(float(emp.get("Average UPH", 0) or 0), 2),
-            "target_uph": emp.get("Target UPH", "—"),
-            "trend": emp.get("trend", "—"),
-            "change_pct": emp.get("change_pct", 0.0),
-            "risk_level": risk_level,
-            "risk_score": risk_score,
-            "risk_details": risk_details,
-        })
-
     # Filter controls
     with st.expander("⚙️ Filters", expanded=False):
         col1, col2, col3 = st.columns([2, 2, 1])
@@ -85,7 +69,13 @@ def page_dashboard():
             key="dash_risk_filter"
         )
 
-        dept_options = sorted(set(r["department"] for r in risk_list if r["department"]))
+        dept_options = sorted(
+            {
+                str(row.get("Department", "") or "").strip()
+                for row in below_goal
+                if str(row.get("Department", "") or "").strip()
+            }
+        )
         dept_filter = col2.multiselect(
             "Filter by department",
             ["All departments"] + dept_options,
@@ -99,10 +89,30 @@ def page_dashboard():
             key="dash_sort"
         )
 
-    # Apply filters
-    filtered = [r for r in risk_list if r["risk_level"] in risk_filter]
+    # Apply cheap filters first, then compute risk rows only for the filtered subset.
+    filtered_rows = list(below_goal)
     if "All departments" not in dept_filter:
-        filtered = [r for r in filtered if r["department"] in dept_filter]
+        filtered_rows = [r for r in filtered_rows if str(r.get("Department", "")) in dept_filter]
+
+    _risk_cache_all = load_risk_levels(gs, history)
+    filtered = []
+    for emp in filtered_rows:
+        emp_id = str(emp.get("EmployeeID", emp.get("Employee Name", "")))
+        risk_level, risk_score, risk_details = _risk_cache_all.get(emp_id, ("🟢 Low", 0, {}))
+        row = {
+            "name": emp.get("Employee", emp.get("Employee Name", "Unknown")),
+            "department": emp.get("Department", ""),
+            "emp_id": emp_id,
+            "avg_uph": round(float(emp.get("Average UPH", 0) or 0), 2),
+            "target_uph": emp.get("Target UPH", "—"),
+            "trend": emp.get("trend", "—"),
+            "change_pct": emp.get("change_pct", 0.0),
+            "risk_level": risk_level,
+            "risk_score": risk_score,
+            "risk_details": risk_details,
+        }
+        if row["risk_level"] in risk_filter:
+            filtered.append(row)
 
     # Active filter chips (persistent visible state: show what's active, allow quick clear)
     _chip_parts = []

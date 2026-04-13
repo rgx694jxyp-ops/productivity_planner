@@ -93,3 +93,14 @@ def test_traceability_payload_non_prescriptive_language_guard():
             payload.get("signal_maturity_reason"),
         ]
     )
+
+
+def test_traceability_payload_exposes_process_and_shift_context_fields():
+    card = _build_card(confidence_level="high", included_rows=6, sample_size=6)
+    card.metadata.update({"process_name": "Receiving", "shift_name": "Night", "is_shift_level": True})
+
+    payload = traceability_payload_from_card(card)
+
+    assert payload["process_context_label"] == "Receiving"
+    assert payload["shift_context_label"] == "Night"
+    assert payload["is_shift_level"] is True

@@ -110,30 +110,34 @@ def get_employee_action_timeline(
             employee_id=employee_id,
         )
         by_action_id = {str(a.get("id") or ""): a for a in (actions or [])}
+        action_ids = [action_id for action_id in by_action_id.keys() if action_id]
         timeline: list[dict] = []
-        for action in actions or []:
-            action_id = str(action.get("id") or "")
-            events = action_events_repo.list_action_events(
-                action_id=action_id,
-                tenant_id=tenant_id,
+        batched_events = action_events_repo.list_action_events_for_action_ids(
+            action_ids=action_ids,
+            tenant_id=tenant_id,
+            newest_first=True,
+            limit=max(500, len(action_ids) * 30),
+            columns="action_id, linked_exception_id, event_type, event_at, owner, performed_by, details, notes, outcome, due_date, next_follow_up_at, status",
+        )
+        for ev in batched_events or []:
+            action_id = str(ev.get("action_id") or "")
+            action = by_action_id.get(action_id, {})
+            timeline.append(
+                {
+                    "action_id": action_id,
+                    "linked_exception_id": ev.get("linked_exception_id"),
+                    "event_type": ev.get("event_type"),
+                    "event_at": ev.get("event_at"),
+                    "performed_by": ev.get("owner") or ev.get("performed_by"),
+                    "notes": ev.get("details") or ev.get("notes"),
+                    "outcome": ev.get("outcome"),
+                    "next_follow_up_at": ev.get("due_date") or ev.get("next_follow_up_at"),
+                    "status": ev.get("status") or action.get("status"),
+                    "issue_type": action.get("issue_type"),
+                    "action_type": action.get("action_type"),
+                    "trigger_summary": action.get("trigger_summary"),
+                }
             )
-            for ev in events or []:
-                timeline.append(
-                    {
-                        "action_id": action_id,
-                        "linked_exception_id": ev.get("linked_exception_id"),
-                        "event_type": ev.get("event_type"),
-                        "event_at": ev.get("event_at"),
-                        "performed_by": ev.get("owner") or ev.get("performed_by"),
-                        "notes": ev.get("details") or ev.get("notes"),
-                        "outcome": ev.get("outcome"),
-                        "next_follow_up_at": ev.get("due_date") or ev.get("next_follow_up_at"),
-                        "status": ev.get("status") or action.get("status"),
-                        "issue_type": action.get("issue_type"),
-                        "action_type": action.get("action_type"),
-                        "trigger_summary": action.get("trigger_summary"),
-                    }
-                )
 
         generic_events = action_events_repo.list_action_events(
             action_id="",
@@ -141,6 +145,7 @@ def get_employee_action_timeline(
             employee_id=employee_id,
             limit=120,
             newest_first=True,
+            columns="action_id, linked_exception_id, event_type, event_at, owner, performed_by, details, notes, outcome, due_date, next_follow_up_at, status",
         )
         for ev in generic_events or []:
             if str(ev.get("action_id") or "").strip():

@@ -215,6 +215,49 @@ def test_today_card_pattern_shows_one_repeat_support_line_without_overriding_tre
     assert card.expanded_lines == ["Seen 3 times this week"]
 
 
+def test_today_card_pattern_adds_repeat_evidence_when_snapshot_history_repeats(monkeypatch):
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.LOWER_THAN_RECENT_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=38.1,
+        comparison_start_date=date(2026, 4, 9),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=42.0,
+        confidence=SignalConfidence.MEDIUM,
+        data_completeness=None,
+        flags={},
+    )
+
+    monkeypatch.setattr("services.today_view_model_service.build_display_signal_from_attention_item", lambda item, today: signal)
+
+    base = _item("E9")
+    repeated_item = AttentionItem(
+        employee_id=base.employee_id,
+        process_name=base.process_name,
+        attention_score=base.attention_score,
+        attention_tier=base.attention_tier,
+        attention_reasons=base.attention_reasons,
+        attention_summary=base.attention_summary,
+        factors_applied=base.factors_applied,
+        snapshot={
+            "employee_id": "E9",
+            "process_name": "Receiving",
+            "repeat_count": 3,
+            "recent_goal_status_history": ["below_goal", "below_goal", "on_goal", "below_goal", "below_goal"],
+        },
+    )
+
+    vm = build_today_queue_view_model(attention=_summary(repeated_item), suppressed_cards=[], today=date(2026, 4, 11))
+    card = vm.primary_cards[0]
+
+    assert card.line_3 == "Surfaced because recent output is below the comparison range."
+    assert "Repeat issue pattern detected." in card.line_4
+    assert card.repeat_count == 3
+    assert card.repeat_window_label == "last 5 snapshots"
+
+
 def test_today_card_expanded_lines_humanize_iso_dates(monkeypatch):
     signal = DisplaySignal(
         employee_name="Alex",
@@ -339,3 +382,72 @@ def test_today_card_contract_non_prescriptive_and_required_fields(monkeypatch):
             card.collapsed_issue,
         ]
     )
+
+
+def test_today_card_process_scope_adds_scope_and_shift_fallback(monkeypatch):
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=31.2,
+        comparison_start_date=date(2026, 4, 6),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=40.0,
+        confidence=SignalConfidence.HIGH,
+        data_completeness=None,
+        flags={},
+    )
+
+    monkeypatch.setattr("services.today_view_model_service.build_display_signal_from_attention_item", lambda item, today: signal)
+
+    scoped_item = AttentionItem(
+        employee_id="E20",
+        process_name="Receiving",
+        attention_score=80,
+        attention_tier="high",
+        attention_reasons=["Context line"],
+        attention_summary="summary",
+        factors_applied=[],
+        snapshot={"employee_id": "E20", "process_name": "Receiving", "linked_scope": "process"},
+    )
+
+    vm = build_today_queue_view_model(attention=_summary(scoped_item), suppressed_cards=[], today=date(2026, 4, 11))
+    card = vm.primary_cards[0]
+
+    assert "Scope: Process-level signal." in card.line_3
+    assert "Shift context unavailable in this snapshot" in card.line_4
+
+
+def test_today_card_shift_context_uses_named_shift_when_present(monkeypatch):
+    signal = DisplaySignal(
+        employee_name="Alex",
+        process="Receiving",
+        signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+        observed_date=date(2026, 4, 11),
+        observed_value=31.2,
+        comparison_start_date=date(2026, 4, 6),
+        comparison_end_date=date(2026, 4, 10),
+        comparison_value=40.0,
+        confidence=SignalConfidence.HIGH,
+        data_completeness=None,
+        flags={},
+    )
+
+    monkeypatch.setattr("services.today_view_model_service.build_display_signal_from_attention_item", lambda item, today: signal)
+
+    shift_item = AttentionItem(
+        employee_id="E21",
+        process_name="Receiving",
+        attention_score=80,
+        attention_tier="high",
+        attention_reasons=["Context line"],
+        attention_summary="summary",
+        factors_applied=[],
+        snapshot={"employee_id": "E21", "process_name": "Receiving", "shift_name": "Night"},
+    )
+
+    vm = build_today_queue_view_model(attention=_summary(shift_item), suppressed_cards=[], today=date(2026, 4, 11))
+    card = vm.primary_cards[0]
+
+    assert "Shift context: Night" in card.line_4

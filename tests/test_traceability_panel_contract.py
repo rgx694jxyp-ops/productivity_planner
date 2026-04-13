@@ -102,3 +102,28 @@ def test_maturity_under_three_points_never_uses_stable_signal_wording(monkeypatc
     maturity_line = fake_st.writes[5].lower()
     assert "limited-data prompt" in maturity_line
     assert "stable signal" not in maturity_line
+
+
+def test_traceability_basis_line_includes_process_and_shift_context_when_present():
+    context = _base_context()
+    context["process_context_label"] = "Receiving"
+    context["shift_context_label"] = "Night"
+
+    line = panel._data_basis_statement(context)
+
+    assert line.startswith("Based on")
+    assert "Process context: Receiving" in line
+    assert "Shift context: Night" in line
+
+
+def test_traceability_basis_line_calls_out_missing_shift_for_process_scope():
+    context = _base_context()
+    context["linked_scope"] = "process"
+    context["process_context_label"] = "Packing"
+    context["shift_context_label"] = ""
+    context["is_shift_level"] = False
+
+    line = panel._data_basis_statement(context)
+
+    assert "Process context: Packing" in line
+    assert "Shift context unavailable in this snapshot" in line

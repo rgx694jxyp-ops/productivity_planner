@@ -85,6 +85,7 @@ def preview_import(sessions: list[dict], *, fallback_date: date, tenant_id: str 
 
         parsed_rows = parse_sessions_to_rows(sessions, fallback_date)
         candidate_rows, issues, duplicate_rows_in_file = validate_rows(parsed_rows)
+        merged_review = review_mapping(merged_mapping)
 
         fingerprint = _build_import_fingerprint(candidate_rows)
         exact_duplicate = bool(_find_matching_upload_by_fingerprint(tenant_id, fingerprint)) if fingerprint else False
@@ -92,7 +93,7 @@ def preview_import(sessions: list[dict], *, fallback_date: date, tenant_id: str 
         summary = ImportSummary(
             total_rows=len(parsed_rows),
             valid_rows=len(candidate_rows),
-            invalid_rows=len([i for i in issues if i.severity == "error"]),
+            invalid_rows=sum(1 for issue in issues if issue.severity == "error"),
             duplicate_rows_in_file=duplicate_rows_in_file,
             duplicate_rows_existing=(len(candidate_rows) if exact_duplicate else 0),
         )
@@ -147,7 +148,7 @@ def preview_import(sessions: list[dict], *, fallback_date: date, tenant_id: str 
             success=True,
             can_import=can_import,
             summary=summary,
-            mapping_review=review_mapping(merged_mapping),
+            mapping_review=merged_review,
             candidate_rows=candidate_rows,
             invalid_issues=issues,
             exact_duplicate_import=exact_duplicate,

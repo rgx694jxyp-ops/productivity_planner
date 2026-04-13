@@ -65,12 +65,25 @@ def _data_basis_statement(context: dict) -> str:
     included = context.get("included_rows")
     sample = context.get("confidence_sample_size")
     source_summary = str(context.get("source_summary") or "").strip()
+    process_context = str(context.get("process_context_label") or "").strip()
+    shift_context = str(context.get("shift_context_label") or "").strip()
+    is_shift_level = bool(context.get("is_shift_level") or False)
+
     if included is not None:
         try:
             value = int(included)
             if value >= 1:
                 base = f"Based on {value} usable records"
-                return f"{base} from {source_summary}" if source_summary else base
+                statement = f"{base} from {source_summary}" if source_summary else base
+                if process_context:
+                    statement = f"{statement} · Process context: {process_context}"
+                if shift_context:
+                    statement = f"{statement} · Shift context: {shift_context}"
+                elif is_shift_level:
+                    statement = f"{statement} · Shift context: shift-level comparison"
+                elif str(context.get("linked_scope") or "").strip().lower() in {"team", "process"}:
+                    statement = f"{statement} · Shift context unavailable in this snapshot"
+                return statement
         except Exception:
             pass
     if sample is not None:
@@ -78,22 +91,44 @@ def _data_basis_statement(context: dict) -> str:
             value = int(sample)
             if value >= 1:
                 base = f"Based on {value} recent records"
-                return f"{base} from {source_summary}" if source_summary else base
+                statement = f"{base} from {source_summary}" if source_summary else base
+                if process_context:
+                    statement = f"{statement} · Process context: {process_context}"
+                if shift_context:
+                    statement = f"{statement} · Shift context: {shift_context}"
+                elif is_shift_level:
+                    statement = f"{statement} · Shift context: shift-level comparison"
+                elif str(context.get("linked_scope") or "").strip().lower() in {"team", "process"}:
+                    statement = f"{statement} · Shift context unavailable in this snapshot"
+                return statement
         except Exception:
             pass
-    return "Latest snapshot only"
+    statement = "Latest snapshot only"
+    if process_context:
+        statement = f"{statement} · Process context: {process_context}"
+    if shift_context:
+        statement = f"{statement} · Shift context: {shift_context}"
+    elif is_shift_level:
+        statement = f"{statement} · Shift context: shift-level comparison"
+    elif str(context.get("linked_scope") or "").strip().lower() in {"team", "process"}:
+        statement = f"{statement} · Shift context unavailable in this snapshot"
+    return statement
 
 
 def _comparison_statement(context: dict) -> str:
     comparison = str(context.get("comparison_statement") or context.get("baseline_or_target_used") or "").strip()
+    is_shift_level = bool(context.get("is_shift_level") or False)
+    suffix = ""
+    if is_shift_level:
+        suffix = " (shift-level context)"
     if comparison:
         lowered = comparison.lower()
         if lowered.startswith("compared with"):
-            return comparison
+            return comparison + suffix
         if lowered.startswith("compared to"):
-            return comparison.replace("Compared to", "Compared with", 1)
-        return f"Compared with {comparison}"
-    return "Compared with available snapshot context only; baseline comparison is limited or missing"
+            return comparison.replace("Compared to", "Compared with", 1) + suffix
+        return f"Compared with {comparison}{suffix}"
+    return "Compared with available snapshot context only; baseline comparison is limited or missing" + suffix
 
 
 def _freshness_statement(context: dict) -> str:

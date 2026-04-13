@@ -49,6 +49,9 @@ class TodayQueueCardViewModel:
     collapsed_hint: str = ""
     collapsed_evidence: str = ""
     collapsed_issue: str = ""
+    signal_key: str = ""
+    repeat_count: int = 0
+    repeat_window_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -279,6 +282,57 @@ def _attention_employee_and_process(item: Any, signal: DisplaySignal) -> tuple[s
     return employee_name, process_name
 
 
+def _source_scope_label(source: Any) -> str:
+    snapshot = dict(getattr(source, "snapshot", {}) or {})
+    metadata = dict(getattr(source, "metadata", {}) or {})
+    traceability = getattr(source, "traceability", None)
+    drill_down = getattr(source, "drill_down", None)
+
+    raw_scope = str(
+        metadata.get("linked_scope")
+        or snapshot.get("linked_scope")
+        or getattr(traceability, "linked_scope", "")
+        or ""
+    ).strip().lower()
+
+    if raw_scope in {"team", "process"}:
+        return "Process-level signal"
+    if raw_scope == "employee":
+        return ""
+
+    screen = str(getattr(drill_down, "screen", "") or "").strip().lower()
+    if screen == "team_process":
+        return "Process-level signal"
+    return ""
+
+
+def _source_shift_context_line(source: Any, signal: DisplaySignal) -> str:
+    snapshot = dict(getattr(source, "snapshot", {}) or {})
+    metadata = dict(getattr(source, "metadata", {}) or {})
+
+    shift_name = ""
+    for key in ("shift_name", "shift_label", "shift", "work_shift", "Shift"):
+        shift_name = str(metadata.get(key) or snapshot.get(key) or "").strip()
+        if shift_name:
+            break
+
+    if shift_name:
+        return f"Shift context: {shift_name}"
+
+    is_shift_level = bool(
+        metadata.get("is_shift_level")
+        or snapshot.get("is_shift_level")
+        or (signal.flags or {}).get("is_shift_level")
+    )
+    if is_shift_level:
+        return "Shift context: shift-level comparison"
+
+    if _source_scope_label(source):
+        return "Shift context unavailable in this snapshot"
+
+    return ""
+
+
 def _attention_primary_signal(item: Any, signal: DisplaySignal) -> str:
     primary_label = str(getattr(signal, "primary_label", "") or "").strip()
     if primary_label:
@@ -341,8 +395,16 @@ def _attention_context_lines(item: Any, signal: DisplaySignal, max_lines: int = 
 
     if factor_keys.intersection({"overdue_followup", "due_today_followup", "open_exception"}):
         lines.append(signal_wording("follow_up_not_completed"))
-    if factor_keys.intersection({"repeat_1", "repeat_2", "repeat_3_or_more"}):
-        lines.append("Seen multiple times")
+    repeat_count, repeat_window_label = _repeat_context(item, signal)
+    if repeat_count >= 2:
+        has_repeat_line = any(
+            ("seen " in str(line).lower() and " times " in str(line).lower())
+            or ("similar pattern" in str(line).lower())
+            or ("repeat issue pattern" in str(line).lower())
+            for line in lines
+        )
+        if not has_repeat_line:
+            lines.append(_repeat_summary_line(repeat_count=repeat_count, repeat_window_label=repeat_window_label))
 
     if not lines:
         reasons = [str(reason or "").strip() for reason in list(getattr(item, "attention_reasons", []) or [])]
@@ -428,6 +490,59 @@ def _is_follow_up_signal(signal: DisplaySignal) -> bool:
     return bool(flags.get("overdue") or flags.get("due_today"))
 
 
+def _repeat_context(source: Any, signal: DisplaySignal, *, include_signal_fallback: bool = True) -> tuple[int, str]:
+    snapshot = dict(getattr(source, "snapshot", {}) or {})
+    metadata = dict(getattr(source, "metadata", {}) or {})
+
+    repeat_count = 0
+    values: list[Any] = [
+        snapshot.get("repeat_count"),
+        metadata.get("repeat_count"),
+    ]
+    if include_signal_fallback:
+        values.append(getattr(signal, "pattern_count", None))
+
+    for raw_value in values:
+        try:
+            if raw_value is not None:
+                repeat_count = max(repeat_count, int(raw_value))
+        except Exception:
+            continue
+
+    if repeat_count < 2:
+        return 0, ""
+
+    window_label = str(
+        snapshot.get("pattern_window_label")
+        or metadata.get("pattern_window_label")
+        or ""
+    ).strip()
+    if not window_label:
+        recent_history = snapshot.get("recent_goal_status_history") or metadata.get("recent_goal_status_history")
+        if isinstance(recent_history, list) and len(recent_history) >= 2:
+            window_label = f"last {len(recent_history)} snapshots"
+    if not window_label:
+        try:
+            window_days = int(metadata.get("pattern_recent_window_days") or 0)
+        except Exception:
+            window_days = 0
+        if window_days > 0:
+            window_label = f"last {window_days} days"
+    if not window_label:
+        window_label = "recent history"
+
+    return repeat_count, window_label
+
+
+def _repeat_summary_line(*, repeat_count: int, repeat_window_label: str) -> str:
+    window = str(repeat_window_label or "recent history").strip()
+    if window == "this week":
+        return f"This has appeared {repeat_count} times this week."
+    if window.startswith("last "):
+        return f"This has appeared {repeat_count} times in the {window}."
+    return f"This has appeared {repeat_count} times in {window}."
+
+
 def _observed_value_text(signal: DisplaySignal) -> str:
     if signal.observed_value is None:
         return ""
@@ -478,6 +593,16 @@ def _normalize_display_key(text: str) -> str:
     return value
 
 
+def _build_signal_instance_key(*, employee_id: str, process_name: str, signal: DisplaySignal) -> str:
+    """Build a deterministic key for one rendered Today signal instance."""
+    employee = _normalize_display_key(str(employee_id or "")) or "unknown-employee"
+    process = _normalize_display_key(str(process_name or "")) or "unassigned"
+    label = _normalize_display_key(str(getattr(signal.signal_label, "value", signal.signal_label) or "")) or "unknown"
+    state = _normalize_display_key(str(getattr(signal.state, "value", signal.state) or "")) or "unknown"
+    observed = str(getattr(signal, "observed_date", "") or "")[:10] or "unknown-date"
+    return f"today-signal:{employee}:{process}:{label}:{state}:{observed}"
+
+
 def _follow_up_due_line(item: Any, signal: DisplaySignal) -> str:
     snapshot = dict(getattr(item, "snapshot", {}) or {})
     due_raw = snapshot.get("follow_up_due_at") or snapshot.get("due_date")
@@ -504,9 +629,9 @@ def _short_follow_up_context(item: Any, signal: DisplaySignal) -> str:
     factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
     if "open_exception" in factor_keys:
         return "Active issue linked"
-    repeat_count = int(snapshot.get("repeat_count") or 0)
+    repeat_count, repeat_window_label = _repeat_context(item, signal)
     if repeat_count >= 2:
-        return f"Seen {repeat_count} times this week"
+        return _repeat_summary_line(repeat_count=repeat_count, repeat_window_label=repeat_window_label)
 
     return ""
 
@@ -531,47 +656,75 @@ def _freshness_line(signal: DisplaySignal) -> str:
 def _why_surfaced_line(source: Any, signal: DisplaySignal) -> str:
     mode = get_signal_display_mode(signal)
     if mode == SignalDisplayMode.LOW_DATA:
-        return "Surfaced because limited recent history is available for comparison."
+        base = "Surfaced because limited recent history is available for comparison."
+        scope_label = _source_scope_label(source)
+        return f"{base} Scope: {scope_label}." if scope_label else base
 
     flags = dict(signal.flags or {})
     if bool(flags.get("overdue")):
-        return "Surfaced because this follow-up is still open past its due date."
+        base = "Surfaced because this follow-up is still open past its due date."
+        scope_label = _source_scope_label(source)
+        return f"{base} Scope: {scope_label}." if scope_label else base
     if bool(flags.get("due_today")):
-        return "Surfaced because this follow-up is due in the current snapshot."
-
-    repeat_count = 0
-    try:
-        snapshot = dict(getattr(source, "snapshot", {}) or {})
-        repeat_count = int(snapshot.get("repeat_count") or 0)
-    except Exception:
-        repeat_count = 0
-    if repeat_count >= 2:
-        return "Surfaced because a similar pattern has appeared multiple times recently."
+        base = "Surfaced because this follow-up is due in the current snapshot."
+        scope_label = _source_scope_label(source)
+        return f"{base} Scope: {scope_label}." if scope_label else base
 
     label = str(format_signal_label(signal) or "").strip().lower()
     if label in {
         signal_wording("lower_than_recent_pace").lower(),
         signal_wording("below_expected_pace").lower(),
     }:
-        return "Surfaced because recent output is below the comparison range."
+        base = "Surfaced because recent output is below the comparison range."
+        scope_label = _source_scope_label(source)
+        return f"{base} Scope: {scope_label}." if scope_label else base
     if label == signal_wording("inconsistent_performance").lower():
-        return "Surfaced because recent output has been more variable than usual."
+        base = "Surfaced because recent output has been more variable than usual."
+        scope_label = _source_scope_label(source)
+        return f"{base} Scope: {scope_label}." if scope_label else base
     if label == signal_wording("improving_pace").lower():
-        return "Surfaced because recent output is above the comparison range."
+        base = "Surfaced because recent output is above the comparison range."
+        scope_label = _source_scope_label(source)
+        return f"{base} Scope: {scope_label}." if scope_label else base
 
-    return "Surfaced because this pattern differs from recent operating context."
+    base = "Surfaced because this pattern differs from recent operating context."
+    scope_label = _source_scope_label(source)
+    return f"{base} Scope: {scope_label}." if scope_label else base
 
 
 def _evidence_basis_line(source: Any, signal: DisplaySignal) -> str:
+    repeat_count, repeat_window_label = _repeat_context(source, signal, include_signal_fallback=False)
+    repeat_evidence = (
+        f"Repeat issue pattern detected. {_repeat_summary_line(repeat_count=repeat_count, repeat_window_label=repeat_window_label)}"
+        if repeat_count >= 2
+        else ""
+    )
+
+    shift_context = _source_shift_context_line(source, signal)
+
     recent_count = _low_data_recent_count(source, signal)
     if recent_count is not None and recent_count > 1:
-        return f"Based on {recent_count} recent records"
+        base = f"Based on {recent_count} recent records"
+        segments = [base]
+        if repeat_evidence:
+            segments.append(repeat_evidence)
+        if shift_context:
+            segments.append(shift_context)
+        return " · ".join(segments)
 
     observed = getattr(signal, "observed_date", None)
     if observed is not None:
-        return "Latest snapshot only"
+        base = "Latest snapshot only"
+        segments = [base]
+        if repeat_evidence:
+            segments.append(repeat_evidence)
+        if shift_context:
+            segments.append(shift_context)
+        return " · ".join(segments)
 
-    return ""
+    if repeat_evidence and shift_context:
+        return f"{repeat_evidence} · {shift_context}"
+    return repeat_evidence or shift_context
 
 
 def _low_data_recent_count(source: Any, signal: DisplaySignal) -> int | None:
@@ -733,6 +886,9 @@ def _merge_ranked_cards(preferred: _RankedCard, incoming: _RankedCard) -> _Ranke
             collapsed_hint=preferred.card.collapsed_hint or incoming.card.collapsed_hint,
             collapsed_evidence=preferred.card.collapsed_evidence or incoming.card.collapsed_evidence,
             collapsed_issue=preferred.card.collapsed_issue or incoming.card.collapsed_issue,
+            signal_key=preferred.card.signal_key or incoming.card.signal_key,
+            repeat_count=max(int(preferred.card.repeat_count or 0), int(incoming.card.repeat_count or 0)),
+            repeat_window_label=preferred.card.repeat_window_label or incoming.card.repeat_window_label,
         ),
         bucket_rank=preferred.bucket_rank,
         status_rank=preferred.status_rank,
@@ -842,14 +998,22 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
     line_3 = _why_surfaced_line(item, signal)
     line_4 = _evidence_basis_line(item, signal)
     line_5 = format_confidence_line(signal)
+    employee_id = str(getattr(item, "employee_id", "") or "")
+    process_id = str(getattr(item, "process_name", "") or "")
+    signal_key = _build_signal_instance_key(
+        employee_id=employee_id,
+        process_name=process_id or process_name,
+        signal=signal,
+    )
+    repeat_count, repeat_window_label = _repeat_context(item, signal)
 
     if low_data_state:
         collapsed = format_low_data_collapsed_lines(signal)
         line_2 = collapsed[0] if collapsed else signal_wording("not_enough_history_yet")
         expanded = format_low_data_expanded_lines(signal, recent_record_count=_low_data_recent_count(item, signal))
         return TodayQueueCardViewModel(
-            employee_id=str(getattr(item, "employee_id", "") or ""),
-            process_id=str(getattr(item, "process_name", "") or ""),
+            employee_id=employee_id,
+            process_id=process_id,
             state=str(signal.state.value),
             line_1=line_1,
             line_2=line_2,
@@ -860,13 +1024,16 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             collapsed_hint=_ranking_hint(item, signal),
             collapsed_evidence=_collapsed_evidence_line(item, signal),
             collapsed_issue="Active issue linked" if _has_open_exception(item, signal) else "",
+            signal_key=signal_key,
+            repeat_count=repeat_count,
+            repeat_window_label=repeat_window_label,
         )
 
     if current_state_mode:
         line_2 = format_signal_label(signal)
         return TodayQueueCardViewModel(
-            employee_id=str(getattr(item, "employee_id", "") or ""),
-            process_id=str(getattr(item, "process_name", "") or ""),
+            employee_id=employee_id,
+            process_id=process_id,
             state=str(signal.state.value),
             line_1=line_1,
             line_2=line_2,
@@ -878,6 +1045,9 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             collapsed_hint=_ranking_hint(item, signal),
             collapsed_evidence=_collapsed_evidence_line(item, signal),
             collapsed_issue="Active issue linked" if _has_open_exception(item, signal) else "",
+            signal_key=signal_key,
+            repeat_count=repeat_count,
+            repeat_window_label=repeat_window_label,
         )
 
     if _is_follow_up_signal(signal):
@@ -897,8 +1067,8 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
         )
 
     return TodayQueueCardViewModel(
-        employee_id=str(getattr(item, "employee_id", "") or ""),
-        process_id=str(getattr(item, "process_name", "") or ""),
+        employee_id=employee_id,
+        process_id=process_id,
         state=str(signal.state.value),
         line_1=line_1,
         line_2=line_2,
@@ -910,6 +1080,9 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
         collapsed_hint=_ranking_hint(item, signal),
         collapsed_evidence=_collapsed_evidence_line(item, signal),
         collapsed_issue="Active issue linked" if _has_open_exception(item, signal) else "",
+        signal_key=signal_key,
+        repeat_count=repeat_count,
+        repeat_window_label=repeat_window_label,
     )
 
 
@@ -924,13 +1097,20 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
     line_3 = _why_surfaced_line(card, signal)
     line_4 = _evidence_basis_line(card, signal)
     line_5 = format_confidence_line(signal)
+    employee_id = str(card.drill_down.entity_id or "")
+    signal_key = _build_signal_instance_key(
+        employee_id=employee_id,
+        process_name=process_name,
+        signal=signal,
+    )
+    repeat_count, repeat_window_label = _repeat_context(card, signal)
 
     if low_data_state:
         collapsed = format_low_data_collapsed_lines(signal)
         line_2 = collapsed[0] if collapsed else signal_wording("not_enough_history_yet")
         expanded = format_low_data_expanded_lines(signal, recent_record_count=_low_data_recent_count(card, signal))
         return TodayQueueCardViewModel(
-            employee_id=str(card.drill_down.entity_id or ""),
+            employee_id=employee_id,
             process_id=process_name,
             state=str(signal.state.value),
             line_1=line_1,
@@ -939,12 +1119,15 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             line_4=line_4,
             line_5=line_5,
             expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, excluded=[line_3, line_4], max_lines=3),
+            signal_key=signal_key,
+            repeat_count=repeat_count,
+            repeat_window_label=repeat_window_label,
         )
 
     if current_state_mode:
         line_2 = format_signal_label(signal)
         return TodayQueueCardViewModel(
-            employee_id=str(card.drill_down.entity_id or ""),
+            employee_id=employee_id,
             process_id=process_name,
             state=str(signal.state.value),
             line_1=line_1,
@@ -954,6 +1137,9 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             line_5=format_confidence_line(signal),
             expanded_lines=[],
             freshness_line=_freshness_line(signal),
+            signal_key=signal_key,
+            repeat_count=repeat_count,
+            repeat_window_label=repeat_window_label,
         )
 
     expanded = _dedupe_expanded(
@@ -964,7 +1150,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
     )
 
     return TodayQueueCardViewModel(
-        employee_id=str(card.drill_down.entity_id or ""),
+        employee_id=employee_id,
         process_id=process_name,
         state=str(signal.state.value),
         line_1=line_1,
@@ -974,6 +1160,9 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
         line_5=line_5,
         expanded_lines=expanded,
         freshness_line=_freshness_line(signal),
+        signal_key=signal_key,
+        repeat_count=repeat_count,
+        repeat_window_label=repeat_window_label,
     )
 
 

@@ -31,6 +31,7 @@ def parse_sessions_to_rows(sessions: list[dict], fallback_date: date) -> list[di
     """
     out: list[dict] = []
     fallback_date_str = fallback_date.isoformat()
+    date_parse_cache: dict[str, str] = {}
 
     for session in sessions or []:
         mapping = session.get("mapping") or {}
@@ -50,11 +51,16 @@ def parse_sessions_to_rows(sessions: list[dict], fallback_date: date) -> list[di
             if date_col:
                 raw_date = _safe_str(row.get(date_col, ""))[:10]
                 if raw_date:
-                    try:
-                        datetime.strptime(raw_date, "%Y-%m-%d")
-                        work_date = raw_date
-                    except Exception:
-                        pass
+                    cached_date = date_parse_cache.get(raw_date)
+                    if cached_date is None:
+                        try:
+                            datetime.strptime(raw_date, "%Y-%m-%d")
+                            cached_date = raw_date
+                        except Exception:
+                            cached_date = ""
+                        date_parse_cache[raw_date] = cached_date
+                    if cached_date:
+                        work_date = cached_date
 
             out.append(
                 {

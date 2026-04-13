@@ -52,6 +52,7 @@ def _build_archived_productivity(session_state: dict, force: bool = False) -> bo
     week_dept_agg  = defaultdict(lambda: defaultdict(lambda: {"units": 0.0, "uph_sum": 0.0, "uph_count": 0}))
     emp_daily      = defaultdict(list)   # eid -> [(date, uph)]
     emp_week_uph   = defaultdict(lambda: defaultdict(list))  # emp_id -> week_str -> [uph values]
+    week_key_cache: dict[str, str] = {}
 
     page_size  = 1000
     offset     = 0
@@ -89,16 +90,20 @@ def _build_archived_productivity(session_state: dict, force: bool = False) -> bo
                 month_dept_agg[month][dept]["uph_count"] += 1
                 month_dept_agg[month][dept]["units"]     += units
             if wd:
-                try:
-                    d  = _dt.strptime(wd, "%Y-%m-%d")
-                    wk = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
+                wk = week_key_cache.get(wd)
+                if wk is None:
+                    try:
+                        d = _dt.strptime(wd, "%Y-%m-%d")
+                        wk = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
+                    except Exception:
+                        wk = ""
+                    week_key_cache[wd] = wk
+                if wk:
                     week_dept_agg[wk][dept]["units"] += units
                     if uph > 0:
-                        week_dept_agg[wk][dept]["uph_sum"]   += uph
+                        week_dept_agg[wk][dept]["uph_sum"] += uph
                         week_dept_agg[wk][dept]["uph_count"] += 1
                         emp_week_uph[eid][wk].append(uph)
-                except Exception:
-                    pass
         total_rows += len(batch)
         if len(batch) < page_size:
             break
@@ -134,15 +139,19 @@ def _build_archived_productivity(session_state: dict, force: bool = False) -> bo
                     month_dept_agg[month][dept]["uph_count"] += 1
                     month_dept_agg[month][dept]["units"]     += units
                 if wd:
-                    try:
-                        d  = _dt.strptime(wd, "%Y-%m-%d")
-                        wk = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
-                        week_dept_agg[wk][dept]["units"]     += units
+                    wk = week_key_cache.get(wd)
+                    if wk is None:
+                        try:
+                            d = _dt.strptime(wd, "%Y-%m-%d")
+                            wk = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
+                        except Exception:
+                            wk = ""
+                        week_key_cache[wd] = wk
+                    if wk:
+                        week_dept_agg[wk][dept]["units"] += units
                         if uph > 0:
-                            week_dept_agg[wk][dept]["uph_sum"]   += uph
+                            week_dept_agg[wk][dept]["uph_sum"] += uph
                             week_dept_agg[wk][dept]["uph_count"] += 1
-                    except Exception:
-                        pass
             total_rows += len(batch)
             if len(batch) < page_size:
                 break
@@ -163,13 +172,15 @@ def _build_archived_productivity(session_state: dict, force: bool = False) -> bo
         df["7DayRollingAvg"]  = df["UPH"].rolling("7D",  min_periods=7).mean()
         df["14DayRollingAvg"] = df["UPH"].rolling("14D", min_periods=14).mean()
         df = df.reset_index()
-        for _, row in df.iterrows():
+        for row in df.to_dict("records"):
+            row_date = row.get("Date")
+            uph_value = row.get("UPH")
             employee_rolling_avg.append({
-                "Date":           row["Date"].strftime("%Y-%m-%d"),
+                "Date":           row_date.strftime("%Y-%m-%d") if hasattr(row_date, "strftime") else "",
                 "Employee":       emp_name.get(eid, eid),
-                "UPH":            round(row["UPH"], 2) if pd.notna(row["UPH"]) else None,
-                "7DayRollingAvg": round(row["7DayRollingAvg"], 2),
-                "14DayRollingAvg": round(row["14DayRollingAvg"], 2),
+                "UPH":            round(uph_value, 2) if pd.notna(uph_value) else None,
+                "7DayRollingAvg": round(row.get("7DayRollingAvg"), 2),
+                "14DayRollingAvg": round(row.get("14DayRollingAvg"), 2),
             })
     employee_rolling_avg.sort(key=lambda r: (r["Employee"], r["Date"]))
 

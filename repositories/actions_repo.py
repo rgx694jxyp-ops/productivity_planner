@@ -100,6 +100,33 @@ def list_actions(tenant_id: str = "", statuses: list[str] | None = None, employe
     if not tid:
         return []
 
+
+def get_action(action_id: str, tenant_id: str = "", columns: str = "*") -> dict:
+    tid = tenant_id or get_tenant_id()
+    if not tid or not str(action_id or "").strip():
+        return {}
+
+    try:
+        sb = get_client()
+        result = (
+            sb.table("actions")
+            .select(columns or "*")
+            .eq("tenant_id", tid)
+            .eq("id", action_id)
+            .limit(1)
+            .execute()
+        )
+        return (result.data or [{}])[0] if (result.data or []) else {}
+    except Exception as error:
+        log_warn(
+            "repo_actions_get_failed",
+            "Repository action lookup failed.",
+            tenant_id=tid,
+            context={"action_id": str(action_id)},
+            error=error,
+        )
+        return {}
+
     try:
         sb = get_client()
         query = sb.table("actions").select("*").eq("tenant_id", tid).order("last_event_at", desc=True)
@@ -139,8 +166,11 @@ def update_action(action_id: str, updates: dict, tenant_id: str = "") -> dict:
         patch["escalated_at"] = now
 
     try:
-        current_rows = list_actions(tenant_id=tid)
-        current = next((row for row in current_rows if str(row.get("id")) == str(action_id)), {})
+        current = get_action(
+            action_id,
+            tenant_id=tid,
+            columns="id, employee_id, employee_name, department, issue_type, action_type, status, trigger_summary, follow_up_due_at",
+        )
 
         sb = get_client()
         result = (

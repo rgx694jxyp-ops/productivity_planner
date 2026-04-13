@@ -56,6 +56,7 @@ from cache import (
     raw_cached_active_flags as _raw_cached_active_flags,
     raw_cached_all_coaching_notes as _raw_cached_all_coaching_notes,
     raw_cached_coaching_notes_for as _raw_cached_coaching_notes_for,
+    raw_cached_open_coaching_note_counts as _raw_cached_open_coaching_note_counts,
 )
 from ui.components import (
     _render_breadcrumb,
@@ -186,11 +187,11 @@ def _cached_team_process_contexts(*, goal_status_rows: list[dict[str, Any]], his
     return dict(build_team_process_contexts(goal_status_rows=goal_status_rows, history_rows=history_rows) or {})
 
 
-def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: str, emp_dept: str) -> None:
+def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: str, emp_dept: str, recent_rows: list[dict[str, Any]] | None = None) -> None:
     st.subheader("Operational Exceptions")
     st.caption("Operational context linked to this employee that may help explain recent performance.")
 
-    recent_rows = _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=20)
+    recent_rows = list(recent_rows or _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=20) or [])
     open_rows = [row for row in recent_rows if str(row.get("status") or "") == "open"]
 
     with st.expander("Log linked exception", expanded=False):
@@ -270,11 +271,11 @@ def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: s
                         show_error_state("Operational exception could not be resolved right now.")
 
 
-def _render_employee_follow_through_panel(*, tenant_id: str, emp_id: str, emp_name: str) -> None:
+def _render_employee_follow_through_panel(*, tenant_id: str, emp_id: str, emp_name: str, exception_rows: list[dict[str, Any]] | None = None) -> None:
     st.subheader("Follow-through Log")
     st.caption("Quick log of what was checked, scheduled, or observed. New entries are stored in the lightweight follow-through log.")
 
-    exception_rows = _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=12)
+    exception_rows = list(exception_rows or _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=12) or [])
     exception_lookup = {str(row.get("id") or ""): row for row in exception_rows}
     summary = _cached_follow_through_summary(tenant_id=tenant_id, employee_id=emp_id, limit=20)
     rows = summary.get("rows") or []
@@ -908,6 +909,7 @@ def _emp_coaching():
 
     # ── Build employee list — all employees, annotate who has notes / is flagged
     emp_ids_with_notes = _cached_all_coaching_notes()
+    note_counts_by_emp = _raw_cached_open_coaching_note_counts(str(tenant_id or "")) or {}
     all_depts = sorted({e.get("department","") for e in emps if e.get("department")})
     dept_sel = st.session_state.get("cn_dept", "All departments")
     if dept_sel not in ["All departments", *all_depts]:
@@ -917,6 +919,11 @@ def _emp_coaching():
     # ── Manager signal list ───────────────────────────────────────────────────
     # Auto-surfaces employees with below-goal/trending-down signals.
     gs = st.session_state.get("goal_status", [])
+    gs_by_emp = {
+        str(row.get("EmployeeID", "") or ""): row
+        for row in gs
+        if str(row.get("EmployeeID", "") or "").strip()
+    }
     if "dismissed_actions" not in st.session_state:
         st.session_state.dismissed_actions = set()
 
@@ -991,10 +998,10 @@ def _emp_coaching():
             indicators = ""
             if e["emp_id"] in flags:           indicators += "🚩 "
             if e["emp_id"] in emp_ids_with_notes:
-                _nc = len(_cached_coaching_notes_for(e["emp_id"]))
+                _nc = int(note_counts_by_emp.get(str(e["emp_id"]), 0) or 0)
                 indicators += f"📝{_nc}" if _nc else "📝"
             # Add trend indicator from goal_status
-            _gs_match = next((r for r in gs if str(r.get("EmployeeID","")) == e["emp_id"]), None)
+            _gs_match = gs_by_emp.get(str(e["emp_id"]), None)
             if _gs_match:
                 _t = normalize_trend_state(_gs_match.get("trend",""))
                 if _t == "declining": indicators += " ↓"
@@ -1026,18 +1033,35 @@ def _emp_coaching():
 
     with col_detail:
         if not selected_emp:
-            _render_team_process_view(
-                history_rows=history_rows,
-                goal_status=gs,
-                filtered_emps=filtered_emps,
-            )
-            st.divider()
-            _render_team_activity_comparisons(
-                tenant_id=tenant_id,
-                history_rows=history_rows,
-                goal_status=gs,
-            )
-            st.divider()
+            _team_analysis_flag_key = "_employees_show_team_analysis"
+            _last_team_analysis_dept = str(st.session_state.get("_employees_team_analysis_dept", "") or "")
+            if _last_team_analysis_dept != str(dept_sel or ""):
+                st.session_state[_team_analysis_flag_key] = False
+                st.session_state["_employees_team_analysis_dept"] = str(dept_sel or "")
+
+            _show_team_analysis = bool(st.session_state.get(_team_analysis_flag_key, False))
+            if not _show_team_analysis:
+                st.info("Team-level process analysis is available on demand to keep this view responsive during rapid interactions.")
+                if st.button("Load team-level analysis", key="employees_load_team_analysis", type="secondary"):
+                    st.session_state[_team_analysis_flag_key] = True
+                    st.rerun()
+            else:
+                _render_team_process_view(
+                    history_rows=history_rows,
+                    goal_status=gs,
+                    filtered_emps=filtered_emps,
+                )
+                st.divider()
+                _render_team_activity_comparisons(
+                    tenant_id=tenant_id,
+                    history_rows=history_rows,
+                    goal_status=gs,
+                )
+                st.divider()
+                if st.button("Hide team-level analysis", key="employees_hide_team_analysis", type="secondary"):
+                    st.session_state[_team_analysis_flag_key] = False
+                    st.rerun()
+
             show_partial_data_state("Select an employee from the roster to open employee detail and record-level drill-down.")
         else:
             emp_id   = selected_emp["emp_id"]
@@ -1113,7 +1137,7 @@ def _emp_coaching():
                 history_rows=history_rows,
             )
             _timeline = _cached_employee_action_timeline(emp_id=emp_id, tenant_id=tenant_id)
-            _recent_exception_rows = _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=6)
+            _recent_exception_rows = _cached_recent_operational_exceptions(tenant_id=tenant_id, employee_id=emp_id, limit=20)
             _follow_through_summary = _cached_follow_through_summary(tenant_id=tenant_id, employee_id=emp_id, limit=6)
             if _emp_gs:
                 _trend_icon = {"up": "↑", "down": "↓", "flat": "→"}.get(_emp_gs.get("trend",""), "—")
@@ -1211,6 +1235,7 @@ def _emp_coaching():
                 tenant_id=tenant_id,
                 emp_id=emp_id,
                 emp_name=emp_name,
+                exception_rows=_recent_exception_rows,
             )
 
             st.divider()
@@ -1220,129 +1245,142 @@ def _emp_coaching():
                 emp_id=emp_id,
                 emp_name=emp_name,
                 emp_dept=emp_dept,
+                recent_rows=_recent_exception_rows,
             )
 
             st.divider()
 
             # ── Action decision history (new primary profile context) ─────────
             st.subheader("🧭 Action Decision History")
-            _emp_actions = get_employee_actions(emp_id, tenant_id=tenant_id)
-            _open_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"new", "in_progress", "follow_up_due", "overdue", "escalated"}]
-            _closed_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"resolved", "deprioritized", "transferred"}]
-
-            _improved_actions = sum(1 for a in _emp_actions if str(a.get("resolution_type") or "").startswith("improved"))
-            _recognition_actions = [
-                a for a in _emp_actions
-                if str(a.get("issue_type") or "") == "high_performer_ignored"
-                or str(a.get("action_type") or "") in {"development_touchpoint", "recognition"}
-            ]
-
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Open Actions", len(_open_emp_actions))
-            m2.metric("Total Action History", len(_emp_actions))
-            m3.metric("Improved Outcomes", _improved_actions)
-            m4.metric("Recognition/Development", len(_recognition_actions))
-
-            if _open_emp_actions:
-                with st.expander(f"Open actions ({len(_open_emp_actions)})", expanded=True):
-                    for _a in _open_emp_actions:
-                        _rid = str(_a.get("id") or "")
-                        _due = str(_a.get("follow_up_due_at") or "")[:10]
-                        _status = str(_a.get("_runtime_status") or _a.get("status") or "new").replace("_", " ").title()
-                        _next_step = str(_a.get("action_type") or "").replace("_", " ").title() or "Follow up"
-                        st.markdown(f"**#{_rid}** · {_status}")
-                        st.caption(
-                            f"Issue: {str(_a.get('issue_type') or '').replace('_', ' ')} | "
-                            f"Trigger: {str(_a.get('trigger_summary') or '')[:120]}"
-                        )
-                        st.caption(
-                            f"Due: {_due or '—'} | Logged intervention type: {_next_step}"
-                        )
-                        st.divider()
+            _action_history_key = f"_employees_show_action_history_{emp_id}"
+            _show_action_history = bool(st.session_state.get(_action_history_key, False))
+            if not _show_action_history:
+                st.info("Action decision history is available on demand to keep employee detail reruns responsive.")
+                if st.button("Load action decision history", key=f"employees_load_action_history_{emp_id}", type="secondary"):
+                    st.session_state[_action_history_key] = True
+                    st.rerun()
             else:
-                st.caption("No open actions for this employee.")
+                _emp_actions = get_employee_actions(emp_id, tenant_id=tenant_id)
+                _open_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"new", "in_progress", "follow_up_due", "overdue", "escalated"}]
+                _closed_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"resolved", "deprioritized", "transferred"}]
 
-            # What has been tried (interventions + events)
-            _tried_interventions = sorted({
-                str(a.get("action_type") or "").replace("_", " ").title()
-                for a in _emp_actions if str(a.get("action_type") or "").strip()
-            })
-            _tried_events = sorted({
-                str(ev.get("event_type") or "").replace("_", " ").title()
-                for ev in _timeline if str(ev.get("event_type") or "").strip()
-            })
+                _improved_actions = sum(1 for a in _emp_actions if str(a.get("resolution_type") or "").startswith("improved"))
+                _recognition_actions = [
+                    a for a in _emp_actions
+                    if str(a.get("issue_type") or "") == "high_performer_ignored"
+                    or str(a.get("action_type") or "") in {"development_touchpoint", "recognition"}
+                ]
 
-            with st.expander("What has been tried", expanded=False):
-                if not _tried_interventions and not _tried_events:
-                    st.caption("No prior interventions recorded yet.")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Open Actions", len(_open_emp_actions))
+                m2.metric("Total Action History", len(_emp_actions))
+                m3.metric("Improved Outcomes", _improved_actions)
+                m4.metric("Recognition/Development", len(_recognition_actions))
+
+                if _open_emp_actions:
+                    with st.expander(f"Open actions ({len(_open_emp_actions)})", expanded=True):
+                        for _a in _open_emp_actions:
+                            _rid = str(_a.get("id") or "")
+                            _due = str(_a.get("follow_up_due_at") or "")[:10]
+                            _status = str(_a.get("_runtime_status") or _a.get("status") or "new").replace("_", " ").title()
+                            _next_step = str(_a.get("action_type") or "").replace("_", " ").title() or "Follow up"
+                            st.markdown(f"**#{_rid}** · {_status}")
+                            st.caption(
+                                f"Issue: {str(_a.get('issue_type') or '').replace('_', ' ')} | "
+                                f"Trigger: {str(_a.get('trigger_summary') or '')[:120]}"
+                            )
+                            st.caption(
+                                f"Due: {_due or '—'} | Logged intervention type: {_next_step}"
+                            )
+                            st.divider()
                 else:
-                    if _tried_interventions:
-                        st.markdown("**Interventions used**")
-                        st.caption(" · ".join(_tried_interventions))
-                    if _tried_events:
-                        st.markdown("**Actions/events logged**")
-                        st.caption(" · ".join(_tried_events))
+                    st.caption("No open actions for this employee.")
 
-            # Outcomes over time
-            with st.expander("Outcomes over time", expanded=False):
-                _outcome_rows = []
-                for _a in _closed_emp_actions:
-                    _resolved_at = str(_a.get("resolved_at") or _a.get("last_event_at") or "")[:10]
-                    _outcome_rows.append(
-                        {
-                            "Date": _resolved_at,
-                            "Outcome": str(_a.get("resolution_type") or "").replace("_", " ").title() or "Unknown",
-                            "Delta UPH": float(_a.get("improvement_delta") or 0.0),
-                            "Status": str(_a.get("status") or "").replace("_", " ").title(),
-                        }
-                    )
-                if _outcome_rows:
-                    _outcome_df = pd.DataFrame(_outcome_rows)
-                    st.dataframe(_outcome_df, use_container_width=True, hide_index=True)
-                else:
-                    st.caption("No completed outcomes yet.")
+                # What has been tried (interventions + events)
+                _tried_interventions = sorted({
+                    str(a.get("action_type") or "").replace("_", " ").title()
+                    for a in _emp_actions if str(a.get("action_type") or "").strip()
+                })
+                _tried_events = sorted({
+                    str(ev.get("event_type") or "").replace("_", " ").title()
+                    for ev in _timeline if str(ev.get("event_type") or "").strip()
+                })
 
-            # Recognition/development history
-            with st.expander("Recognition / development history", expanded=False):
-                if not _recognition_actions:
-                    st.caption("No recognition/development actions recorded yet.")
-                else:
-                    for _a in _recognition_actions:
-                        st.markdown(
-                            f"**{str(_a.get('action_type') or '').replace('_', ' ').title()}** · "
-                            f"{str(_a.get('status') or '').replace('_', ' ').title()}"
+                with st.expander("What has been tried", expanded=False):
+                    if not _tried_interventions and not _tried_events:
+                        st.caption("No prior interventions recorded yet.")
+                    else:
+                        if _tried_interventions:
+                            st.markdown("**Interventions used**")
+                            st.caption(" · ".join(_tried_interventions))
+                        if _tried_events:
+                            st.markdown("**Actions/events logged**")
+                            st.caption(" · ".join(_tried_events))
+
+                # Outcomes over time
+                with st.expander("Outcomes over time", expanded=False):
+                    _outcome_rows = []
+                    for _a in _closed_emp_actions:
+                        _resolved_at = str(_a.get("resolved_at") or _a.get("last_event_at") or "")[:10]
+                        _outcome_rows.append(
+                            {
+                                "Date": _resolved_at,
+                                "Outcome": str(_a.get("resolution_type") or "").replace("_", " ").title() or "Unknown",
+                                "Delta UPH": float(_a.get("improvement_delta") or 0.0),
+                                "Status": str(_a.get("status") or "").replace("_", " ").title(),
+                            }
                         )
-                        st.caption(str(_a.get("trigger_summary") or ""))
+                    if _outcome_rows:
+                        _outcome_df = pd.DataFrame(_outcome_rows)
+                        st.dataframe(_outcome_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No completed outcomes yet.")
 
-            # Full follow-through timeline
-            with st.expander(f"Follow-through timeline ({len(_timeline)})", expanded=False):
-                if not _timeline:
-                    st.caption("No timeline events yet.")
-                else:
-                    for _ev in _timeline[:40]:
-                        _ev_label = str(_ev.get("event_type") or "event").replace("_", " ").title()
-                        _ev_ts = str(_ev.get("event_at") or "")[:16].replace("T", " ")
-                        _ev_outcome = str(_ev.get("outcome") or "")
-                        _ev_note = str(_ev.get("notes") or "")
-                        _ev_trigger = str(_ev.get("trigger_summary") or "")
-                        st.markdown(f"**{_ev_label}** · {_ev_ts}")
-                        _context_bits = []
-                        if str(_ev.get("action_id") or "").strip():
-                            _context_bits.append(f"Action #{_ev.get('action_id')}")
-                        else:
-                            _context_bits.append("Standalone log")
-                        if str(_ev.get("linked_exception_id") or "").strip():
-                            _context_bits.append(f"Exception #{_ev.get('linked_exception_id')}")
-                        if str(_ev.get("action_type") or "").strip():
-                            _context_bits.append(str(_ev.get("action_type") or "").replace("_", " "))
-                        if _ev_trigger:
-                            _context_bits.append(_ev_trigger[:100])
-                        st.caption(" | ".join(_context_bits))
-                        if _ev_outcome:
-                            st.caption(f"Outcome: {_ev_outcome}")
-                        if _ev_note:
-                            st.caption(_ev_note[:240])
-                        st.divider()
+                # Recognition/development history
+                with st.expander("Recognition / development history", expanded=False):
+                    if not _recognition_actions:
+                        st.caption("No recognition/development actions recorded yet.")
+                    else:
+                        for _a in _recognition_actions:
+                            st.markdown(
+                                f"**{str(_a.get('action_type') or '').replace('_', ' ').title()}** · "
+                                f"{str(_a.get('status') or '').replace('_', ' ').title()}"
+                            )
+                            st.caption(str(_a.get("trigger_summary") or ""))
+
+                # Full follow-through timeline
+                with st.expander(f"Follow-through timeline ({len(_timeline)})", expanded=False):
+                    if not _timeline:
+                        st.caption("No timeline events yet.")
+                    else:
+                        for _ev in _timeline[:40]:
+                            _ev_label = str(_ev.get("event_type") or "event").replace("_", " ").title()
+                            _ev_ts = str(_ev.get("event_at") or "")[:16].replace("T", " ")
+                            _ev_outcome = str(_ev.get("outcome") or "")
+                            _ev_note = str(_ev.get("notes") or "")
+                            _ev_trigger = str(_ev.get("trigger_summary") or "")
+                            st.markdown(f"**{_ev_label}** · {_ev_ts}")
+                            _context_bits = []
+                            if str(_ev.get("action_id") or "").strip():
+                                _context_bits.append(f"Action #{_ev.get('action_id')}")
+                            else:
+                                _context_bits.append("Standalone log")
+                            if str(_ev.get("linked_exception_id") or "").strip():
+                                _context_bits.append(f"Exception #{_ev.get('linked_exception_id')}")
+                            if str(_ev.get("action_type") or "").strip():
+                                _context_bits.append(str(_ev.get("action_type") or "").replace("_", " "))
+                            if _ev_trigger:
+                                _context_bits.append(_ev_trigger[:100])
+                            st.caption(" | ".join(_context_bits))
+                            if _ev_outcome:
+                                st.caption(f"Outcome: {_ev_outcome}")
+                            if _ev_note:
+                                st.caption(_ev_note[:240])
+                            st.divider()
+
+                if st.button("Hide action decision history", key=f"employees_hide_action_history_{emp_id}", type="secondary"):
+                    st.session_state[_action_history_key] = False
+                    st.rerun()
 
             st.divider()
 

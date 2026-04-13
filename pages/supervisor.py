@@ -8,8 +8,12 @@ from core.runtime import _html_mod, date, st, init_runtime
 import re
 
 init_runtime()
-from domain.risk import _get_all_risk_levels
-from pages.common import load_goal_status_history
+from pages.common import (
+    get_below_goal_employees,
+    get_departments_from_goal_status,
+    load_goal_status_history,
+    load_risk_levels,
+)
 from services.coaching_service import summarize_coaching_activity
 from services.recommendation_service import _render_adaptive_action_suggestion
 from ui.components import (
@@ -96,8 +100,8 @@ def page_supervisor():
         st.session_state["_welcome_shown"] = True
         _user   = st.session_state.get("user_name", "").split("@")[0].split(" ")[0]
         _greet  = f"Welcome back{', ' + _user if _user else ''}"
-        _below  = len([r for r in gs if r.get("goal_status") == "below_goal"])
-        _risk_c = _get_all_risk_levels(gs, history)
+        _below  = len(get_below_goal_employees(gs))
+        _risk_c = load_risk_levels(gs, history)
         _high   = sum(1 for v in _risk_c.values() if v[0].startswith("🔴"))
         _coached_yesterday = int(st.session_state.get("_coached_yesterday", 0))
         _lines  = []
@@ -133,12 +137,11 @@ def page_supervisor():
         for emp_id, notes in (_notes_by_emp or {}).items()
     }
     _op_status = build_operation_status(gs)
-    _patterns = detect_department_patterns(gs)
     _coaching_activity = summarize_coaching_activity(_notes_by_emp, history)
 
-    _risk_cache_all = _get_all_risk_levels(gs, history)
+    _risk_cache_all = load_risk_levels(gs, history)
     risk_summary = []
-    for row in [r for r in gs if r.get("goal_status") == "below_goal"]:
+    for row in get_below_goal_employees(gs):
         _eid = str(row.get("EmployeeID", row.get("Employee Name", "")))
         _level, _score, _details = _risk_cache_all.get(_eid, ("🟢 Low", 0, {}))
         risk_summary.append({"level": _level, "score": _score})
@@ -183,6 +186,8 @@ def page_supervisor():
         simplified_supervisor_view(gs)
         show_coaching_activity_summary(_coaching_activity)
         return
+
+    _patterns = detect_department_patterns(gs)
     
     # ────────────────────────────────────────────────────────────────────────────
     # SECTION 1: DEPARTMENT HEALTH SUMMARY (Exception-Only By Default)
@@ -196,7 +201,7 @@ def page_supervisor():
         show_pattern_detection_panel(_patterns)
         st.divider()
 
-    depts = sorted(set(r.get("Department", "") for r in gs if r.get("Department")))
+    depts = get_departments_from_goal_status(gs)
     
     dept_summary = {}
     for dept in depts:
@@ -269,13 +274,13 @@ def page_supervisor():
     st.subheader("🔴 Top Risks — Action Required Today")
     
     # Filter for below_goal and calculate risk
-    below_goal = [r for r in gs if r.get("goal_status") == "below_goal"]
+    below_goal = get_below_goal_employees(gs)
     
     if not below_goal:
         st.success("✅ All employees meeting goals!")
     else:
         risk_list = []
-        _risk_cache_all = _get_all_risk_levels(gs, history)
+        _risk_cache_all = load_risk_levels(gs, history)
 
         # Pull context tags from active flags cache (dict keyed by emp_id).
         _flags_dict = _cached_active_flags() or {}

@@ -102,6 +102,14 @@ def traceability_payload_from_card(item: InsightCardContract) -> dict:
 
     observed_label = str(item.time_context.observed_window_label or "").strip()
     compared_label = str(item.time_context.compared_window_label or "").strip()
+    process_context_label = str(item.metadata.get("process_name") or item.workload_context.impacted_group_label or "").strip()
+    shift_context_label = str(
+        item.metadata.get("shift_name")
+        or item.metadata.get("shift_label")
+        or item.metadata.get("shift")
+        or ""
+    ).strip()
+    is_shift_level = bool(item.metadata.get("is_shift_level") or False)
     freshness_text = observed_label or "Latest snapshot"
     if item.time_context.last_updated_at:
         try:
@@ -128,6 +136,9 @@ def traceability_payload_from_card(item: InsightCardContract) -> dict:
             "freshness_statement": freshness_text,
             "observed_window_label": observed_label,
             "compared_window_label": compared_label,
+            "process_context_label": process_context_label,
+            "shift_context_label": shift_context_label,
+            "is_shift_level": is_shift_level,
             "signal_maturity_label": maturity_label,
             "signal_maturity_reason": maturity_reason,
         }

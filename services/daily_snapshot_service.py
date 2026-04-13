@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any
@@ -12,6 +13,18 @@ from services.signal_interpretation_service import derive_confidence_from_covera
 from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
 from services.target_service import normalize_process_name, resolve_target_context
 from services.trend_classification_service import classify_trend_state, normalize_trend_state
+
+
+_SNAPSHOT_READ_CACHE_TTL_SECONDS = 30
+_LATEST_SNAPSHOT_CACHE: dict[tuple[str, int], tuple[float, tuple[list[dict], list[dict], str]]] = {}
+
+
+def _latest_snapshot_cache_key(*, tenant_id: str, days: int) -> tuple[str, int]:
+    return (str(tenant_id or "").strip(), int(days or 30))
+
+
+def _clear_latest_snapshot_cache() -> None:
+    _LATEST_SNAPSHOT_CACHE.clear()
 
 
 def _safe_float(value: Any) -> float:
@@ -292,6 +305,7 @@ def recompute_daily_employee_snapshots(
         )
     if filtered_snapshots:
         daily_employee_snapshots_repo.batch_upsert_daily_employee_snapshots(filtered_snapshots)
+    _clear_latest_snapshot_cache()
 
     return {
         "inserted": len(filtered_snapshots),
@@ -373,17 +387,27 @@ def snapshots_to_history_rows(snapshot_rows: list[dict]) -> list[dict]:
 
 
 def get_latest_snapshot_goal_status(*, tenant_id: str = "", days: int = 30, rebuild_if_missing: bool = True) -> tuple[list[dict], list[dict], str]:
+    cache_key = _latest_snapshot_cache_key(tenant_id=tenant_id, days=days)
+    now_ts = time.time()
+    cached = _LATEST_SNAPSHOT_CACHE.get(cache_key)
+    if cached and (now_ts - cached[0]) < _SNAPSHOT_READ_CACHE_TTL_SECONDS:
+        return cached[1]
+
     snapshot_rows = daily_employee_snapshots_repo.list_daily_employee_snapshots(tenant_id=tenant_id, days=days, limit=5000)
     if not snapshot_rows and rebuild_if_missing:
         recompute_daily_employee_snapshots(tenant_id=tenant_id, days=days)
         snapshot_rows = daily_employee_snapshots_repo.list_daily_employee_snapshots(tenant_id=tenant_id, days=days, limit=5000)
 
     if not snapshot_rows:
-        return [], [], ""
+        result: tuple[list[dict], list[dict], str] = ([], [], "")
+        _LATEST_SNAPSHOT_CACHE[cache_key] = (now_ts, result)
+        return result
 
     latest_date = max(str(row.get("snapshot_date") or "")[:10] for row in snapshot_rows if str(row.get("snapshot_date") or "").strip())
     latest_rows = [row for row in snapshot_rows if str(row.get("snapshot_date") or "")[:10] == latest_date]
-    return snapshots_to_goal_status_rows(latest_rows), snapshots_to_history_rows(snapshot_rows), latest_date
+    result = (snapshots_to_goal_status_rows(latest_rows), snapshots_to_history_rows(snapshot_rows), latest_date)
+    _LATEST_SNAPSHOT_CACHE[cache_key] = (now_ts, result)
+    return result
 
 
 def get_employee_snapshot_history(*, tenant_id: str = "", employee_id: str, days: int = 30) -> list[dict]:

@@ -54,6 +54,24 @@ def raw_cached_all_coaching_notes(_tid_key: str = ""):
         return set()
 
 
+@st.cache_data(ttl=180, show_spinner=False)
+def raw_cached_open_coaching_note_counts(_tid_key: str = "") -> dict:
+    try:
+        from database import get_client as _get_sb, _tq
+
+        sb = _get_sb()
+        r = _tq(sb.table("coaching_notes").select("emp_id").eq("archived", False)).execute()
+        counts: dict[str, int] = {}
+        for row in (r.data or []):
+            emp_id = str(row.get("emp_id") or "").strip()
+            if not emp_id:
+                continue
+            counts[emp_id] = int(counts.get(emp_id, 0) or 0) + 1
+        return counts
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def raw_cached_coaching_notes_for(emp_id: str, _tid_key: str = "") -> list:
     try:
@@ -82,6 +100,10 @@ def cached_all_coaching_notes():
     return raw_cached_all_coaching_notes(tenant_id())
 
 
+def cached_open_coaching_note_counts():
+    return raw_cached_open_coaching_note_counts(tenant_id())
+
+
 def cached_coaching_notes_for(emp_id: str):
     return raw_cached_coaching_notes_for(emp_id, tenant_id())
 
@@ -91,6 +113,7 @@ def bust_cache():
     raw_cached_targets.clear()
     raw_cached_uph_history.clear()
     raw_cached_all_coaching_notes.clear()
+    raw_cached_open_coaching_note_counts.clear()
     raw_cached_active_flags.clear()
     raw_cached_coaching_notes_for.clear()
     st.session_state.pop("_current_plan", None)

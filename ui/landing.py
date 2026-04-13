@@ -104,7 +104,7 @@ def show_landing_page() -> None:
 
     st.markdown(
         '<div class="lp-sticky">'
-        '<a class="lp-primary" href="?start=1">Get Started</a>'
+            '<a class="lp-primary" href="?start=1">Try the app</a>'
         '<a class="lp-ghost" href="?demo=1">See Demo</a>'
         '</div>',
         unsafe_allow_html=True,
@@ -112,21 +112,21 @@ def show_landing_page() -> None:
 
     st.markdown('<div class="lp-hero">', unsafe_allow_html=True)
     st.markdown('<div class="lp-eyebrow">Built for small warehouses</div>', unsafe_allow_html=True)
-    st.markdown('<div class="lp-title">Run your warehouse without guesswork</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-title">Know what needs attention on the floor right now — and why.</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="lp-sub">Know who needs coaching, what to say, and what to do next — using data you already have.</div>',
+        '<div class="lp-sub">Upload messy warehouse data and get a prioritized Today queue that shows what changed, why it surfaced, and how much trust to put in it.</div>',
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="lp-note">No setup required. Works with spreadsheets or manual entry.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lp-note">Works with spreadsheets or manual entry. No setup required.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
-    if c1.button("Get Started", type="primary", use_container_width=True, key="lp_get_started_top"):
-        track_landing_event("cta_click", "hero_get_started")
+    if c1.button("Try sample data", type="primary", use_container_width=True, key="lp_get_started_top"):
+        track_landing_event("cta_click", "hero_try_sample_data")
         st.session_state["show_login"] = True
         st.rerun()
-    if c2.button("See How It Works", use_container_width=True, key="lp_how_it_works"):
-        track_landing_event("cta_click", "hero_see_how")
+    if c2.button("Upload a CSV", use_container_width=True, key="lp_how_it_works"):
+        track_landing_event("cta_click", "hero_upload_csv")
         st.session_state["lp_show_demo"] = True
         st.rerun()
 
@@ -144,7 +144,7 @@ def show_landing_page() -> None:
         st.image(shot, use_container_width=True)
     else:
         st.info("Add a screenshot at assets/landing-supervisor-screenshot.png to boost conversions.")
-    st.caption("Start your shift with a clear view of where signals are surfacing.")
+    st.caption("A prioritized view of where signals are surfacing — with the context behind each one.")
 
     demo_url = os.getenv("LANDING_DEMO_URL", "").strip()
     try:
@@ -162,9 +162,9 @@ def show_landing_page() -> None:
     st.markdown("### The problem")
     st.markdown(
         """
-        - Teams rely on spreadsheets and memory
-        - Coaching is inconsistent shift to shift
-        - Priorities are unclear when things get busy
+            - Signals are scattered across spreadsheets, people, and memory
+            - It's unclear what changed between shifts or why
+            - Priorities are hard to assess objectively when volume shifts
         """
     )
 
@@ -189,9 +189,9 @@ def show_landing_page() -> None:
     st.markdown("### What changes after using this")
     b1, b2 = st.columns(2)
     with b1:
-        st.markdown('<div class="lp-card"><strong>Before</strong><ul class="lp-list"><li>Guess who needs help</li><li>React too late</li><li>No consistent tracking</li></ul></div>', unsafe_allow_html=True)
+           st.markdown('<div class="lp-card"><strong>Before</strong><ul class="lp-list"><li>Signals unclear without data context</li><li>Problems surface after the fact</li><li>No consistent cross-shift view</li></ul></div>', unsafe_allow_html=True)
     with b2:
-        st.markdown('<div class="lp-card"><strong>After</strong><ul class="lp-list"><li>Clear daily priorities</li><li>Faster coaching conversations</li><li>Measurable improvement</li></ul></div>', unsafe_allow_html=True)
+           st.markdown('<div class="lp-card"><strong>After</strong><ul class="lp-list"><li>Prioritized queue each day, with evidence</li><li>Signal context surfaced before each shift</li><li>Trend visibility across shifts</li></ul></div>', unsafe_allow_html=True)
 
     st.markdown("### Simple pricing")
     p1, p2, p3 = st.columns(3)
@@ -213,7 +213,7 @@ def show_landing_page() -> None:
     st.info("Not sure if it will fit your team? Reach out and we can help you get set up quickly.")
 
     st.markdown("---")
-    st.markdown("### Start running your warehouse with clarity")
+    st.markdown("### See what's surfacing on your floor today")
     if st.button("Get Started", type="primary", use_container_width=True, key="lp_get_started_bottom"):
         track_landing_event("cta_click", "bottom_get_started")
         st.session_state["show_login"] = True

@@ -78,6 +78,7 @@ def list_action_events(
     linked_exception_id: str = "",
     limit: int = 200,
     newest_first: bool = False,
+    columns: str = "*",
 ) -> list[dict]:
     """Return events filtered by action, employee, and/or linked exception."""
     tid = tenant_id or get_tenant_id()
@@ -86,7 +87,7 @@ def list_action_events(
 
     try:
         sb = get_client()
-        query = sb.table("action_events").select("*").eq("tenant_id", tid)
+        query = sb.table("action_events").select(columns or "*").eq("tenant_id", tid)
         if str(action_id or "").strip():
             query = query.eq("action_id", action_id)
         if str(employee_id or "").strip():
@@ -106,6 +107,47 @@ def list_action_events(
                 "employee_id": str(employee_id or ""),
                 "linked_exception_id": str(linked_exception_id or ""),
             },
+            error=error,
+        )
+        return []
+
+
+def list_action_events_for_action_ids(
+    *,
+    action_ids: list[str],
+    tenant_id: str = "",
+    limit: int = 500,
+    newest_first: bool = False,
+    columns: str = "*",
+) -> list[dict]:
+    """Return events for many action IDs in one query.
+
+    This avoids N+1 patterns where callers fetch events per action.
+    """
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return []
+
+    normalized_ids = [str(action_id or "").strip() for action_id in (action_ids or []) if str(action_id or "").strip()]
+    if not normalized_ids:
+        return []
+
+    try:
+        sb = get_client()
+        query = (
+            sb.table("action_events")
+            .select(columns or "*")
+            .eq("tenant_id", tid)
+            .in_("action_id", normalized_ids)
+        )
+        result = query.order("event_at", desc=newest_first).limit(max(1, int(limit or 500))).execute()
+        return result.data or []
+    except Exception as error:
+        log_warn(
+            "repo_action_events_batch_list_failed",
+            "Repository action events batch listing failed.",
+            tenant_id=tid,
+            context={"action_id_count": len(normalized_ids), "limit": int(limit or 500)},
             error=error,
         )
         return []

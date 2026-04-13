@@ -4,6 +4,46 @@ from core.dependencies import require_db
 from services.trend_classification_service import normalize_trend_state
 
 
+def get_below_goal_employees(goal_status_rows: list[dict]) -> list[dict]:
+    """Return rows currently below goal."""
+    return [row for row in (goal_status_rows or []) if row.get("goal_status") == "below_goal"]
+
+
+def get_departments_from_goal_status(goal_status_rows: list[dict]) -> list[str]:
+    """Return sorted unique non-empty departments from goal status rows."""
+    return sorted(
+        {
+            str(row.get("Department", "") or "").strip()
+            for row in (goal_status_rows or [])
+            if str(row.get("Department", "") or "").strip()
+        }
+    )
+
+
+def load_risk_levels(goal_status_rows: list[dict], history_rows: list[dict]) -> dict:
+    """Session-memoized risk levels reused across pages during the same data snapshot."""
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
+    snapshot_date = str(st.session_state.get("_latest_snapshot_date", "") or "")
+    loaded_at = float(st.session_state.get("_goal_history_loaded_at", 0.0) or 0.0)
+    key = (
+        tenant_id,
+        snapshot_date,
+        loaded_at,
+        len(goal_status_rows or []),
+        len(history_rows or []),
+    )
+
+    if st.session_state.get("_risk_cache_key") == key and isinstance(st.session_state.get("_risk_cache_all"), dict):
+        return st.session_state.get("_risk_cache_all") or {}
+
+    from domain.risk import _get_all_risk_levels
+
+    cache = _get_all_risk_levels(goal_status_rows or [], history_rows or [])
+    st.session_state["_risk_cache_key"] = key
+    st.session_state["_risk_cache_all"] = cache
+    return cache
+
+
 def get_user_timezone_now(tenant_id: str = ""):
     """Get current datetime in user's configured timezone.
     
@@ -25,15 +65,31 @@ def load_goal_status_history(spinner_text: str = "Loading data…"):
     if not require_db():
         return None, None
 
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
+    now_ts = datetime.now().timestamp()
+    cached_tenant = str(st.session_state.get("_goal_history_tenant", "") or "")
+    cached_ts = float(st.session_state.get("_goal_history_loaded_at", 0.0) or 0.0)
+    cached_goal_status = st.session_state.get("goal_status", [])
+    cached_history = st.session_state.get("history", [])
+    # Avoid repeated snapshot reads on rapid reruns when session data is already fresh.
+    if (
+        cached_tenant == tenant_id
+        and (now_ts - cached_ts) < 20
+        and cached_goal_status
+        and cached_history
+    ):
+        return cached_goal_status, cached_history
+
     try:
         from services.daily_snapshot_service import get_latest_snapshot_goal_status
 
-        tenant_id = str(st.session_state.get("tenant_id", "") or "")
         snapshot_goal_status, snapshot_history, snapshot_date = get_latest_snapshot_goal_status(tenant_id=tenant_id, days=30)
         if snapshot_goal_status:
             st.session_state["goal_status"] = snapshot_goal_status
             st.session_state["history"] = snapshot_history
             st.session_state["_latest_snapshot_date"] = snapshot_date
+            st.session_state["_goal_history_tenant"] = tenant_id
+            st.session_state["_goal_history_loaded_at"] = now_ts
             return snapshot_goal_status, snapshot_history
     except Exception:
         pass
@@ -44,6 +100,8 @@ def load_goal_status_history(spinner_text: str = "Loading data…"):
                 from pages.employees import _build_archived_productivity
 
                 _build_archived_productivity(st.session_state)
+                st.session_state["_goal_history_tenant"] = tenant_id
+                st.session_state["_goal_history_loaded_at"] = datetime.now().timestamp()
             except Exception:
                 pass
 

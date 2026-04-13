@@ -1,7 +1,11 @@
 from datetime import date
 
 from services.attention_scoring_service import AttentionSummary
-from services.today_page_meaning_service import build_today_queue_render_plan, build_today_surface_meaning
+from services.today_page_meaning_service import (
+    TodaySurfaceState,
+    build_today_queue_render_plan,
+    build_today_surface_meaning,
+)
 
 
 def test_surface_meaning_builds_stale_status_banner_and_freshness():
@@ -33,6 +37,33 @@ def test_surface_meaning_weak_data_mode_for_partial_trust():
     assert meaning.weak_data_mode is True
     assert meaning.state_flags["partial_data"] is True
     assert meaning.status_line == "Early-signal mode: limited history, directional evidence only."
+    assert meaning.surface_state == TodaySurfaceState.EARLY_SIGNAL
+
+
+def test_surface_meaning_classifies_no_usable_data_state():
+    meaning = build_today_surface_meaning(
+        goal_status=[],
+        import_summary={"days": 0, "trust": {"status": "invalid", "confidence_score": 0}},
+        home_sections={},
+        has_queue_items=False,
+        as_of_date="",
+        today_value=date(2026, 4, 12),
+    )
+
+    assert meaning.surface_state == TodaySurfaceState.NO_USABLE_DATA
+
+
+def test_surface_meaning_classifies_no_strong_signals_state_with_usable_data():
+    meaning = build_today_surface_meaning(
+        goal_status=[{"EmployeeID": "E1", "goal_status": "on_goal", "trend": "steady", "Average UPH": 55}],
+        import_summary={"days": 5, "trust": {"status": "valid", "confidence_score": 88}},
+        home_sections={},
+        has_queue_items=False,
+        as_of_date="2026-04-12",
+        today_value=date(2026, 4, 12),
+    )
+
+    assert meaning.surface_state == TodaySurfaceState.NO_STRONG_SIGNALS
 
 
 def test_queue_render_plan_promotes_secondary_when_weak_data(monkeypatch):
@@ -71,5 +102,6 @@ def test_queue_render_plan_promotes_secondary_when_weak_data(monkeypatch):
 
     assert len(plan.primary_cards) == 1
     assert len(plan.secondary_cards) == 0
-    assert plan.weak_data_note == "Early signals are shown below. Confidence is limited until more history is available."
+    assert plan.weak_data_note == ""
+    assert plan.start_note.startswith("Early signal mode:")
     assert plan.primary_placeholder == ""
