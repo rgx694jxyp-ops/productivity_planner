@@ -716,11 +716,11 @@ def store_uph_history(emp_id: str, work_date: str, uph: float,
     }, on_conflict="tenant_id,emp_id,work_date,department").execute()
 
 
-def batch_store_uph_history(records: list[dict]):
+def batch_store_uph_history(records: list[dict], *, progress_callback=None):
     """Compatibility wrapper: delegated to repositories.import_repo.batch_store_uph_history."""
     from repositories.import_repo import batch_store_uph_history as _repo_batch_store_uph_history
 
-    return _repo_batch_store_uph_history(records)
+    return _repo_batch_store_uph_history(records, progress_callback=progress_callback)
 
 
 def delete_duplicate_uph_history():

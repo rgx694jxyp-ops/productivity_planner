@@ -2009,7 +2009,21 @@ def _import_step3(tenant_id: str):
                 if _bg_tid:
                     uph_batch = [{**r, "tenant_id": _bg_tid} for r in uph_batch]
                 from database import batch_store_uph_history as _batch_store_uph_history
-                _batch_store_uph_history(uph_batch)
+
+                def _on_uph_store_progress(*, completed_rows: int, total_rows: int, chunk_index: int, chunk_count: int) -> None:
+                    if total_rows <= 0:
+                        return
+                    _ratio = min(1.0, max(0.0, completed_rows / total_rows))
+                    _pct = 60 + int(round(_ratio * 28))
+                    bar.progress(
+                        min(88, max(60, _pct)),
+                        text=(
+                            f"Storing UPH history… ({completed_rows:,}/{total_rows:,} rows, "
+                            f"chunk {chunk_index}/{chunk_count})"
+                        ),
+                    )
+
+                _batch_store_uph_history(uph_batch, progress_callback=_on_uph_store_progress)
 
                 # Keep rollback metadata lightweight for speed. We rely on
                 # touched_keys + previous_rows for undo without an extra PK scan.

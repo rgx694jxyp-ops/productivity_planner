@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, timedelta
+from typing import Callable
 
 from repositories._common import get_client, get_tenant_id, log_error, tenant_fields, tenant_query
 from repositories.employees_repo import get_employees
@@ -37,54 +38,65 @@ def get_all_uph_history(days: int = 30) -> list[dict]:
     return all_rows
 
 
-def batch_store_uph_history(records: list[dict]):
+def batch_store_uph_history(
+    records: list[dict],
+    *,
+    progress_callback: Callable[..., None] | None = None,
+):
     """Insert UPH history records in chunks after resolving employee FK values."""
     if not records:
         return
 
     tenant_id = get_tenant_id()
 
-    resolver_available = True
-    try:
-        employee_rows = get_employees() or []
-    except Exception as error:
-        employee_rows = []
-        resolver_available = False
-        log_warn(
-            "repo_uph_employee_resolution_unavailable",
-            "Employee resolution lookup failed before UPH batch store.",
-            tenant_id=tenant_id,
-            context={"record_count": len(records)},
-            error=error,
-        )
+    def _to_int_or_none(value) -> int | None:
+        try:
+            return int(str(value).strip())
+        except Exception:
+            return None
+
+    all_emp_ids_numeric = all(_to_int_or_none(row.get("emp_id")) is not None for row in records)
 
     emp_code_to_id: dict[str, int] = {}
     emp_id_to_id: dict[str, int] = {}
-    for employee in employee_rows:
-        row_id = employee.get("id")
-        code = employee.get("emp_id")
-        if row_id is None:
-            continue
+    resolver_available = all_emp_ids_numeric
+    if not all_emp_ids_numeric:
+        resolver_available = True
         try:
-            row_id_int = int(row_id)
-        except Exception:
-            continue
-        emp_id_to_id[str(row_id_int)] = row_id_int
-        if code not in (None, ""):
-            emp_code_to_id[str(code).strip()] = row_id_int
+            employee_rows = get_employees() or []
+        except Exception as error:
+            employee_rows = []
+            resolver_available = False
+            log_warn(
+                "repo_uph_employee_resolution_unavailable",
+                "Employee resolution lookup failed before UPH batch store.",
+                tenant_id=tenant_id,
+                context={"record_count": len(records)},
+                error=error,
+            )
+
+        for employee in employee_rows:
+            row_id = employee.get("id")
+            code = employee.get("emp_id")
+            if row_id is None:
+                continue
+            try:
+                row_id_int = int(row_id)
+            except Exception:
+                continue
+            emp_id_to_id[str(row_id_int)] = row_id_int
+            if code not in (None, ""):
+                emp_code_to_id[str(code).strip()] = row_id_int
 
     normalized_records = []
     skipped_unresolved = 0
     unresolved_examples = []
     for row in records:
         raw_emp = row.get("emp_id")
-        emp_fk = None
-        if raw_emp not in (None, ""):
+        emp_fk = _to_int_or_none(raw_emp)
+        if emp_fk is None and raw_emp not in (None, ""):
             raw_emp_str = str(raw_emp).strip()
-            try:
-                emp_fk = int(raw_emp_str)
-            except Exception:
-                emp_fk = emp_code_to_id.get(raw_emp_str) or emp_id_to_id.get(raw_emp_str)
+            emp_fk = emp_code_to_id.get(raw_emp_str) or emp_id_to_id.get(raw_emp_str)
 
         if emp_fk is None:
             if resolver_available:
@@ -140,6 +152,8 @@ def batch_store_uph_history(records: list[dict]):
             records = [{**record, **fields} for record in records]
 
     chunk_size = 2000
+    total_records = len(records)
+    chunk_count = max(1, (total_records + chunk_size - 1) // chunk_size)
     for index in range(0, len(records), chunk_size):
         chunk = records[index : index + chunk_size]
         safe_chunk = []
@@ -177,6 +191,16 @@ def batch_store_uph_history(records: list[dict]):
                 safe_chunk,
                 on_conflict="tenant_id,emp_id,work_date,department",
             ).execute()
+            if progress_callback:
+                try:
+                    progress_callback(
+                        completed_rows=min(index + len(chunk), total_records),
+                        total_rows=total_records,
+                        chunk_index=(index // chunk_size) + 1,
+                        chunk_count=chunk_count,
+                    )
+                except Exception:
+                    pass
         except Exception as error:
             log_error(
                 "uph_history",
