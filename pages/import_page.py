@@ -2219,9 +2219,9 @@ def _import_step3(tenant_id: str):
             # work so "Run pipeline" completes quickly instead of appearing stuck.
             try:
                 _batch_size = int(len(uph_batch or []))
-                # Defer heavy signal/action refresh at a lower threshold so imports
-                # complete faster for medium-size files as well.
-                _should_defer_refresh = _batch_size >= 100
+                # Always defer heavy signal/action refresh so pipeline completion
+                # stays fast; Today recovers precomputed payload on entry.
+                _should_defer_refresh = True
                 bar.progress(95, text="Finalizing import…")
 
                 if _should_defer_refresh:
