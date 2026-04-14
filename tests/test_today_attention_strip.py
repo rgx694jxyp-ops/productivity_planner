@@ -113,6 +113,24 @@ def test_reviewed_today_is_none_when_not_in_payload():
         today=TODAY,
     )
     assert strip.reviewed_today is None
+    assert strip.touchpoints_logged_today is None
+    assert strip.follow_ups_scheduled_today is None
+
+
+def test_same_day_metrics_use_precomputed_activity_payload():
+    strip = build_today_attention_strip(
+        attention=_summary([_item()]),
+        queue_items=[_queue_item()],
+        today=TODAY,
+        same_day_activity={
+            "reviewed_today": 2,
+            "touchpoints_logged_today": 3,
+            "follow_ups_scheduled_today": 1,
+        },
+    )
+    assert strip.reviewed_today == 2
+    assert strip.touchpoints_logged_today == 3
+    assert strip.follow_ups_scheduled_today == 1
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +148,8 @@ def test_empty_attention_and_no_queue_returns_zero_counts():
     assert strip.new_today == 0
     assert strip.overdue_follow_ups == 0
     assert strip.reviewed_today is None
+    assert strip.touchpoints_logged_today is None
+    assert strip.follow_ups_scheduled_today is None
 
 
 def test_queue_items_with_missing_fields_do_not_raise():

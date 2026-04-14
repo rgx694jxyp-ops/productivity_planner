@@ -1,5 +1,6 @@
 from datetime import date
 
+from domain.display_signal import DisplaySignal, SignalConfidence, SignalLabel
 from services.attention_scoring_service import AttentionFactor, AttentionItem, AttentionSummary
 from services.decision_engine_service import DecisionItem
 from services.today_view_model_service import build_today_queue_view_model
@@ -60,3 +61,58 @@ def test_today_queue_view_model_prefers_decision_items(monkeypatch):
     assert vm.primary_cards[0].employee_id == "E1"
     assert vm.primary_cards[0].normalized_action_state == "overdue_follow_up"
     assert any("configured target context" in line for line in vm.primary_cards[0].expanded_lines)
+
+
+def test_today_queue_view_model_does_not_use_attention_fallback_when_disabled(monkeypatch):
+    attention_item = AttentionItem(
+        employee_id="E2",
+        process_name="Receiving",
+        attention_score=78,
+        attention_tier="high",
+        attention_reasons=["Decline compared to recent baseline performance"],
+        attention_summary="E2 (Receiving) - ranked highly.",
+        factors_applied=[
+            AttentionFactor(
+                key="trend_declining",
+                weight=25,
+                plain_reason="Decline compared to recent baseline performance",
+            )
+        ],
+        snapshot={
+            "employee_id": "E2",
+            "Department": "Receiving",
+            "trend": "declining",
+            "confidence_label": "high",
+            "data_completeness_status": "complete",
+            "Average UPH": 35,
+            "Target UPH": 50,
+            "snapshot_date": "2026-04-13",
+        },
+    )
+
+    monkeypatch.setattr(
+        "services.today_view_model_service.build_display_signal_from_attention_item",
+        lambda **kwargs: DisplaySignal(
+            employee_name="E2",
+            process="Receiving",
+            signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+            observed_date=date(2026, 4, 13),
+            observed_value=35.0,
+            comparison_start_date=date(2026, 4, 10),
+            comparison_end_date=date(2026, 4, 12),
+            comparison_value=50.0,
+            confidence=SignalConfidence.HIGH,
+            data_completeness=None,
+            flags={},
+        ),
+    )
+
+    vm = build_today_queue_view_model(
+        attention=AttentionSummary(ranked_items=[attention_item], is_healthy=False, healthy_message="", suppressed_count=0, total_evaluated=1),
+        decision_items=[],
+        allow_legacy_attention_fallback=False,
+        suppressed_cards=[],
+        today=date(2026, 4, 13),
+    )
+
+    assert vm.primary_cards == []

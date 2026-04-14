@@ -12,6 +12,7 @@ from domain.display_signal import DisplaySignal, SignalLabel
 from domain.insight_card_contract import InsightCardContract
 from services.attention_scoring_service import AttentionSummary
 from services.decision_engine_service import DecisionItem
+from services.decision_surfacing_policy_service import DecisionSurfacingPolicy
 from services.display_signal_factory import build_display_signal_from_attention_item, build_display_signal_from_insight_card
 from services.plain_language_service import signal_wording
 from services.signal_formatting_service import (
@@ -93,6 +94,15 @@ class TodayWeeklySummaryViewModel:
 
 
 @dataclass(frozen=True)
+class TodayReturnTriggerViewModel:
+    headline: str
+    messages: list[str]
+    comparison_basis: str
+    show_cue: bool = False
+    cue_label: str = ""
+
+
+@dataclass(frozen=True)
 class _RankedCard:
     card: TodayQueueCardViewModel
     bucket_rank: int
@@ -128,6 +138,109 @@ def _days_ago_label(iso_date: str, today: date) -> str:
         return f"Last action: {delta} days ago"
     except Exception:
         return ""
+
+
+def _iso_prefix(value: Any) -> str:
+    return str(value or "").strip()[:10]
+
+
+def _count_with_noun(count: int, singular: str, plural: str | None = None) -> str:
+    noun = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {noun}"
+
+
+def build_today_return_trigger(
+    *,
+    queue_items: list[dict[str, Any]],
+    today: date,
+    previous_queue_items: list[dict[str, Any]] | None = None,
+    previous_as_of_date: str = "",
+) -> TodayReturnTriggerViewModel | None:
+    """Build a compact 'what changed' trigger for the top of Today.
+
+    The trigger stays factual and only uses current queue data plus a prior
+    precomputed queue snapshot when available.
+    """
+    today_iso = today.isoformat()
+    current_items = [item for item in list(queue_items or []) if isinstance(item, dict)]
+
+    new_today_count = sum(1 for item in current_items if _iso_prefix(item.get("created_at")) == today_iso)
+    due_today_count = sum(1 for item in current_items if str(item.get("_queue_status") or "") == "due_today")
+
+    prev_items = [item for item in list(previous_queue_items or []) if isinstance(item, dict)]
+    if _iso_prefix(previous_as_of_date) == "":
+        if new_today_count <= 0 and due_today_count <= 0:
+            return None
+
+        messages: list[str] = []
+        if new_today_count > 0:
+            messages.append(f"{_count_with_noun(new_today_count, 'new item')} entered today's queue")
+        if due_today_count > 0:
+            verb = "is" if due_today_count == 1 else "are"
+            messages.append(f"{_count_with_noun(due_today_count, 'follow-up')} {verb} due today")
+        return TodayReturnTriggerViewModel(
+            headline="Today at a glance",
+            messages=messages[:2],
+            comparison_basis="based on today's queue",
+            show_cue=False,
+            cue_label="",
+        )
+
+    current_urgent_ids = {
+        str(item.get("employee_id") or "").strip()
+        for item in current_items
+        if str(item.get("employee_id") or "").strip()
+        and str(item.get("_queue_status") or "") in {"overdue", "due_today"}
+    }
+    previous_urgent_ids = {
+        str(item.get("employee_id") or "").strip()
+        for item in prev_items
+        if str(item.get("employee_id") or "").strip()
+        and str(item.get("_queue_status") or "") in {"overdue", "due_today"}
+    }
+    current_overdue_ids = {
+        str(item.get("employee_id") or "").strip()
+        for item in current_items
+        if str(item.get("employee_id") or "").strip()
+        and str(item.get("_queue_status") or "") == "overdue"
+    }
+    previous_overdue_ids = {
+        str(item.get("employee_id") or "").strip()
+        for item in prev_items
+        if str(item.get("employee_id") or "").strip()
+        and str(item.get("_queue_status") or "") == "overdue"
+    }
+
+    new_urgent_count = len(current_urgent_ids - previous_urgent_ids)
+    unchanged_overdue_count = len(current_overdue_ids & previous_overdue_ids)
+
+    messages = []
+    if new_urgent_count > 0:
+        messages.append(f"{_count_with_noun(new_urgent_count, 'new urgent item')} surfaced since yesterday")
+    else:
+        messages.append("No new urgent issues since yesterday")
+
+    if due_today_count > 0:
+        verb = "is" if due_today_count == 1 else "are"
+        messages.append(f"{_count_with_noun(due_today_count, 'follow-up')} {verb} due today")
+    elif unchanged_overdue_count > 0:
+        verb = "remains" if unchanged_overdue_count == 1 else "remain"
+        messages.append(
+            f"{_count_with_noun(unchanged_overdue_count, 'overdue follow-up')} {verb} unchanged since yesterday"
+        )
+
+    if not messages:
+        return None
+
+    has_meaningful_change = new_urgent_count > 0 or due_today_count > 0 or unchanged_overdue_count > 0
+
+    return TodayReturnTriggerViewModel(
+        headline="What changed since yesterday",
+        messages=messages[:2],
+        comparison_basis=f"compared with {str(previous_as_of_date)[:10]}",
+        show_cue=has_meaningful_change,
+        cue_label="Update" if has_meaningful_change else "",
+    )
 
 
 def _safe_float(value: Any) -> float | None:
@@ -1350,6 +1463,8 @@ def build_today_queue_view_model(
     attention: AttentionSummary,
     *,
     decision_items: list[DecisionItem] | None = None,
+    decision_policy: DecisionSurfacingPolicy | None = None,
+    allow_legacy_attention_fallback: bool = True,
     suppressed_cards: list[InsightCardContract] | None = None,
     today: date,
     last_action_lookup: dict[str, str] | None = None,
@@ -1372,7 +1487,9 @@ def build_today_queue_view_model(
             expanded_lines = _merge_lines([decision.primary_reason, confidence_basis], list(card_vm.expanded_lines or []), max_lines=3)
             card_vm = dataclasses.replace(card_vm, expanded_lines=expanded_lines)
             ranked_sources.append((item, signal, card_vm))
-    else:
+    elif allow_legacy_attention_fallback:
+        # Legacy fallback retained for emergency rollback only.
+        # Active Today runtime should pass allow_legacy_attention_fallback=False.
         for item in list(attention.ranked_items or []):
             signal = build_display_signal_from_attention_item(item=item, today=today)
             ranked_sources.append((item, signal, _card_from_pair(item, signal)))
@@ -1417,6 +1534,16 @@ def build_today_queue_view_model(
             recency_rank=_recency_rank(signal),
             tie_breaker=_tie_breaker(item, signal),
         )
+
+        employee_id = str(getattr(item, "employee_id", "") or "").strip()
+        if decision_policy and employee_id:
+            if employee_id in set(decision_policy.primary_employee_ids):
+                primary_ranked.append(ranked)
+                continue
+            if employee_id in set(decision_policy.secondary_employee_ids):
+                secondary_ranked.append(ranked)
+                continue
+
         mode = get_signal_display_mode(signal)
         force_primary = _should_force_primary(item, signal)
         if ((not eligible_primary) and (not force_primary)) or mode == SignalDisplayMode.CURRENT_STATE or (_confidence_level_value(signal) == "low" and (not force_primary)) or (str(getattr(item, "attention_tier", "")) == "low" and (not force_primary)):
@@ -1497,12 +1624,28 @@ class TodayAttentionStripViewModel:
     reviewed_today
         Count of items resolved or reviewed today.  Set to ``None`` when this
         information is not available from the precomputed payload.
+    touchpoints_logged_today
+        Count of coaching/follow-up touchpoints logged today.  Hidden when zero
+        to keep the strip compact in no-activity states.
+    follow_ups_scheduled_today
+        Count of today's touchpoints that explicitly set a next follow-up date.
+        Hidden when zero to avoid implying planning activity that did not occur.
     """
 
     total_needing_attention: int
     new_today: int
     overdue_follow_ups: int
     reviewed_today: int | None
+    touchpoints_logged_today: int | None
+    follow_ups_scheduled_today: int | None
+
+
+def _positive_metric_or_none(value: Any) -> int | None:
+    try:
+        resolved = int(value or 0)
+    except Exception:
+        return None
+    return resolved if resolved > 0 else None
 
 
 def build_today_attention_strip(
@@ -1510,6 +1653,7 @@ def build_today_attention_strip(
     attention: AttentionSummary,
     queue_items: list[dict[str, Any]],
     today: date,
+    same_day_activity: dict[str, Any] | None = None,
 ) -> TodayAttentionStripViewModel:
     """Derive the attention summary strip values from already-computed data.
 
@@ -1536,8 +1680,9 @@ def build_today_attention_strip(
         total_needing_attention=total,
         new_today=new_today,
         overdue_follow_ups=overdue,
-        # Not available from precomputed payload — omitted to avoid false precision.
-        reviewed_today=None,
+        reviewed_today=_positive_metric_or_none((same_day_activity or {}).get("reviewed_today")),
+        touchpoints_logged_today=_positive_metric_or_none((same_day_activity or {}).get("touchpoints_logged_today")),
+        follow_ups_scheduled_today=_positive_metric_or_none((same_day_activity or {}).get("follow_ups_scheduled_today")),
     )
 
 

@@ -8,11 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
+import os
 from typing import Any
 
 from domain.insight_card_contract import InsightCardContract
 from services.attention_scoring_service import AttentionSummary
 from services.decision_engine_service import DecisionItem
+from services.decision_surfacing_policy_service import build_decision_surfacing_policy
 from services.today_snapshot_signal_service import (
     SignalMode,
     classify_signal_mode,
@@ -225,9 +227,13 @@ def build_today_queue_render_plan(
     last_action_lookup: dict[str, str] | None = None,
     action_state_lookup: dict[str, dict[str, object]] | None = None,
 ) -> TodayQueueRenderPlan:
+    legacy_fallback_enabled = str(os.getenv("DPD_TODAY_ENABLE_LEGACY_RANKING_FALLBACK", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    decision_policy = build_decision_surfacing_policy(list(decision_items or []), primary_cap=8) if decision_items else None
     queue_vm = build_today_queue_view_model(
         attention=attention,
         decision_items=decision_items,
+        decision_policy=decision_policy,
+        allow_legacy_attention_fallback=legacy_fallback_enabled,
         suppressed_cards=suppressed_cards,
         today=today_value,
         last_action_lookup=last_action_lookup,
@@ -282,6 +288,11 @@ def build_today_queue_render_plan(
             "Early signal mode: limited history means directional evidence only. "
             "Signals are ranked by current evidence strength and recency."
         )
+    elif decision_policy is not None:
+        weak_data_note = ""
+        start_note = (
+            "Primary queue shows urgent items first. Secondary queue keeps follow-through and watchlist context visible."
+        )
     else:
         weak_data_note = ""
         start_note = "Signals are ranked by current evidence strength and recency."
@@ -293,7 +304,7 @@ def build_today_queue_render_plan(
         primary_cards=primary_cards_to_render,
         secondary_cards=secondary_cards_to_render,
         primary_placeholder=primary_placeholder,
-        secondary_caption="Other early signals" if secondary_cards_to_render else "",
+        secondary_caption=("Follow-through and watchlist" if decision_policy is not None else "Other early signals") if secondary_cards_to_render else "",
         secondary_expanded=bool(show_secondary_open),
         suppressed_debug_rows=suppressed_debug_rows,
     )

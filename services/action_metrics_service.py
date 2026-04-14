@@ -48,33 +48,47 @@ def get_weekly_manager_activity_summary(
     - follow_up_touchpoints: coaching/follow-up events logged this week
     - closed_issues: resolved/deprioritized actions closed this week
     - improved_outcomes: explicit improved outcomes logged this week
+    - reviewed_today: distinct Today signal keys marked looked-at today
+    - touchpoints_logged_today: coaching/follow-up touchpoints logged today
+    - follow_ups_scheduled_today: today's touchpoints that explicitly set a follow-up date
     """
     today = today or date.today()
     cutoff = today - timedelta(days=lookback_days)
 
     try:
         reviewed_signal_keys: set[str] = set()
+        reviewed_today_signal_keys: set[str] = set()
         follow_up_touchpoints = 0
+        touchpoints_logged_today = 0
+        follow_ups_scheduled_today = 0
 
         all_events = action_events_repo.list_action_events(
             action_id="",
             tenant_id=tenant_id,
             limit=5000,
             newest_first=True,
-            columns="event_type, event_at, details",
+            columns="event_type, event_at, details, next_follow_up_at, due_date",
         )
         for event in all_events or []:
             event_date = _parse_date(event.get("event_at"))
             if event_date is None or event_date < cutoff:
                 continue
+            is_today_event = event_date == today
 
             event_type = str(event.get("event_type") or "").strip()
             if event_type == _TODAY_SIGNAL_STATUS_EVENT_TYPE:
                 signal_key, signal_status = _parse_today_signal_status(event.get("details"))
                 if signal_key and signal_status == _TODAY_SIGNAL_STATUS_LOOKED_AT:
                     reviewed_signal_keys.add(signal_key)
+                    if is_today_event:
+                        reviewed_today_signal_keys.add(signal_key)
             elif event_type in {"coached", "follow_up_logged", "follow_through_logged"}:
                 follow_up_touchpoints += 1
+                if is_today_event:
+                    touchpoints_logged_today += 1
+                    next_follow_up_at = str(event.get("next_follow_up_at") or event.get("due_date") or "").strip()
+                    if next_follow_up_at:
+                        follow_ups_scheduled_today += 1
 
         manager_outcomes = get_manager_outcome_stats(
             tenant_id=tenant_id,
@@ -88,6 +102,9 @@ def get_weekly_manager_activity_summary(
             "follow_up_touchpoints": int(follow_up_touchpoints),
             "closed_issues": len(list(recent_closed or [])),
             "improved_outcomes": int((manager_outcomes.get("outcomes") or {}).get("improved", 0) or 0),
+            "reviewed_today": len(reviewed_today_signal_keys),
+            "touchpoints_logged_today": int(touchpoints_logged_today),
+            "follow_ups_scheduled_today": int(follow_ups_scheduled_today),
         }
     except Exception as e:
         print(f"[Error] get_weekly_manager_activity_summary failed: {e}")
@@ -96,6 +113,9 @@ def get_weekly_manager_activity_summary(
             "follow_up_touchpoints": 0,
             "closed_issues": 0,
             "improved_outcomes": 0,
+            "reviewed_today": 0,
+            "touchpoints_logged_today": 0,
+            "follow_ups_scheduled_today": 0,
         }
 
 def get_manager_outcome_stats(

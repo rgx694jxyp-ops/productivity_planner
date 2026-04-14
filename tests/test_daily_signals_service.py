@@ -234,3 +234,73 @@ def test_transient_payload_matches_precomputed_round_trip(monkeypatch):
     assert [item.employee_id for item in precomputed["decision_items"]] == [item.employee_id for item in transient["decision_items"]]
     assert [item.final_score for item in precomputed["decision_items"]] == [item.final_score for item in transient["decision_items"]]
     assert precomputed["decision_summary"].total_evaluated == transient["decision_summary"].total_evaluated
+
+
+def test_read_precomputed_rebuilds_missing_decision_items(monkeypatch):
+    signal_date = date(2026, 4, 13)
+    attention_summary = {
+        "ranked_items": [],
+        "is_healthy": True,
+        "healthy_message": "",
+        "suppressed_count": 0,
+        "total_evaluated": 1,
+    }
+
+    payload_row = {
+        "payload": {
+            "queue_items": [{"employee_id": "E1", "_queue_status": "overdue"}],
+            "goal_status": [
+                {
+                    "EmployeeID": "E1",
+                    "Department": "Packing",
+                    "Average UPH": 40,
+                    "Target UPH": 50,
+                    "trend": "declining",
+                    "goal_status": "below_goal",
+                    "confidence_label": "high",
+                    "repeat_count": 1,
+                }
+            ],
+            "import_summary": {"days": 5, "trust": {"status": "valid", "confidence_score": 88}},
+            "home_sections": {},
+            "attention_summary": attention_summary,
+            "decision_items": [],
+        }
+    }
+
+    rebuilt_item = DecisionItem(
+        employee_id="E1",
+        process_name="Packing",
+        final_score=91,
+        final_tier="high",
+        attention_score=79,
+        action_score=12,
+        action_priority="high",
+        action_queue_status="overdue",
+        primary_reason="Decline compared to recent baseline performance",
+        confidence_label="High",
+        confidence_basis="Based on 3 included day(s) with configured target context.",
+        normalized_action_state="overdue_follow_up",
+        normalized_action_state_detail="Overdue",
+        attention_item=AttentionItem(
+            employee_id="E1",
+            process_name="Packing",
+            attention_score=79,
+            attention_tier="high",
+            attention_reasons=["Decline compared to recent baseline performance"],
+            attention_summary="E1 (Packing) - ranked highly.",
+            factors_applied=[],
+            snapshot={"employee_id": "E1", "Department": "Packing"},
+        ),
+        source_snapshot={"employee_id": "E1", "Department": "Packing"},
+    )
+
+    monkeypatch.setattr(dss, "list_daily_signals", lambda **kwargs: [payload_row])
+    monkeypatch.setattr(dss, "list_open_operational_exceptions", lambda **kwargs: [])
+    monkeypatch.setattr(dss, "build_decision_items", lambda **kwargs: [rebuilt_item])
+
+    precomputed = dss.read_precomputed_today_signals(tenant_id="tenant-1", signal_date=signal_date)
+
+    assert precomputed is not None
+    assert [item.employee_id for item in precomputed["decision_items"]] == ["E1"]
+    assert precomputed["decision_summary"].total_evaluated == 1

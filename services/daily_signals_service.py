@@ -522,6 +522,23 @@ def read_precomputed_today_signals(*, tenant_id: str, signal_date: date) -> dict
         total_evaluated=int(attention_payload.get("total_evaluated") or 0),
     )
     decision_items = [_deserialize_decision_item(item) for item in (payload.get("decision_items") or [])]
+    if not decision_items:
+        goal_status = list(payload.get("goal_status") or [])
+        queue_items = list(payload.get("queue_items") or [])
+        import_summary = dict(payload.get("import_summary") or {})
+        weak_data_mode = _is_weak_data_mode(import_summary)
+        try:
+            open_exception_rows = list_open_operational_exceptions(tenant_id=tenant_id, limit=200)
+        except Exception:
+            open_exception_rows = []
+        decision_items = build_decision_items(
+            goal_status=goal_status,
+            queue_items=queue_items,
+            open_exception_rows=open_exception_rows,
+            tenant_id=tenant_id,
+            today=signal_date,
+            weak_data_mode=weak_data_mode,
+        )
 
     return {
         "tenant_id": tenant_id,

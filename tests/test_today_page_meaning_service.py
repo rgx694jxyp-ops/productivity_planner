@@ -105,3 +105,61 @@ def test_queue_render_plan_promotes_secondary_when_weak_data(monkeypatch):
     assert plan.weak_data_note == ""
     assert plan.start_note.startswith("Early signal mode:")
     assert plan.primary_placeholder == ""
+
+
+def test_queue_render_plan_disables_legacy_ranking_fallback_by_default(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _QueueVm:
+        main_section_title = "What needs attention today"
+        primary_cards = []
+        secondary_cards = []
+        suppressed = []
+
+    def _fake_build_today_queue_view_model(**kwargs):
+        captured.update(kwargs)
+        return _QueueVm()
+
+    monkeypatch.delenv("DPD_TODAY_ENABLE_LEGACY_RANKING_FALLBACK", raising=False)
+    monkeypatch.setattr("services.today_page_meaning_service.build_today_queue_view_model", _fake_build_today_queue_view_model)
+
+    build_today_queue_render_plan(
+        attention=AttentionSummary(ranked_items=[], is_healthy=True, healthy_message="", suppressed_count=0, total_evaluated=0),
+        decision_items=[],
+        suppressed_cards=[],
+        today_value=date(2026, 4, 12),
+        is_stale=False,
+        weak_data_mode=False,
+        show_secondary_open=False,
+    )
+
+    assert captured.get("allow_legacy_attention_fallback") is False
+
+
+def test_queue_render_plan_enables_legacy_ranking_fallback_with_env_flag(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _QueueVm:
+        main_section_title = "What needs attention today"
+        primary_cards = []
+        secondary_cards = []
+        suppressed = []
+
+    def _fake_build_today_queue_view_model(**kwargs):
+        captured.update(kwargs)
+        return _QueueVm()
+
+    monkeypatch.setenv("DPD_TODAY_ENABLE_LEGACY_RANKING_FALLBACK", "1")
+    monkeypatch.setattr("services.today_page_meaning_service.build_today_queue_view_model", _fake_build_today_queue_view_model)
+
+    build_today_queue_render_plan(
+        attention=AttentionSummary(ranked_items=[], is_healthy=True, healthy_message="", suppressed_count=0, total_evaluated=0),
+        decision_items=[],
+        suppressed_cards=[],
+        today_value=date(2026, 4, 12),
+        is_stale=False,
+        weak_data_mode=False,
+        show_secondary_open=False,
+    )
+
+    assert captured.get("allow_legacy_attention_fallback") is True

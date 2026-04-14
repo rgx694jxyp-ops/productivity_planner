@@ -5,17 +5,18 @@ Queue-first supervisor workflow focused on daily follow-through.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
+from database import add_coaching_note
 from core.dependencies import _bust_cache, _cached_employees, _log_app_error
 from domain.display_signal import DisplaySignal, SignalLabel
 from domain.insight_card_contract import InsightCardContract
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
-from services.action_state_service import build_employee_action_state_lookup, log_follow_through_event
+from services.action_state_service import build_employee_action_state_lookup, log_coaching_lifecycle_entry, log_follow_through_event
 from services.action_metrics_service import (
     _recent_action_outcomes,
     get_manager_outcome_stats,
@@ -64,10 +65,12 @@ from services.today_signal_status_service import (
 from services.today_view_model_service import (
     TodayAttentionStripViewModel,
     TodayQueueCardViewModel,
+    TodayReturnTriggerViewModel,
     TodayValueStripViewModel,
     TodayWeeklySummaryViewModel,
     build_today_attention_strip,
     build_today_queue_card_from_insight_card,
+    build_today_return_trigger,
     build_today_value_strip_view_model,
     build_today_weekly_summary_view_model,
     enrich_today_queue_card_action_context,
@@ -695,6 +698,46 @@ def _render_top_status_area(*, meaning: TodaySurfaceMeaning) -> None:
     )
 
 
+def _render_return_trigger(trigger: TodayReturnTriggerViewModel | None) -> None:
+    if trigger is None or not list(trigger.messages or []):
+        return
+
+    cue_html = ""
+    block_style = ""
+    if bool(trigger.show_cue):
+        cue_label = str(trigger.cue_label or "Update").strip() or "Update"
+        cue_html = f'<span class="today-queue-chip" aria-label="Update available">{cue_label}</span>'
+        block_style = (
+            ' style="border-left:3px solid #1f4f87;'
+            'background:linear-gradient(90deg, rgba(31,79,135,0.08) 0%, rgba(31,79,135,0.03) 100%);"'
+        )
+
+    message_html = "".join(
+        f'<span class="today-queue-chip">{message}</span>'
+        for message in list(trigger.messages or [])[:3]
+    )
+    basis_html = ""
+    if str(trigger.comparison_basis or "").strip():
+        basis_html = (
+            f'<div style="color:#7b90a7;font-size:0.79rem;margin-top:6px;">{trigger.comparison_basis}</div>'
+        )
+
+    cue_block = f'<div class="today-queue-orientation-chips">{cue_html}</div>' if cue_html else ""
+    message_block = f'<div class="today-queue-orientation-chips">{message_html}</div>'
+
+    st.markdown(
+        (
+            f'<div class="today-queue-orientation"{block_style}>'
+            f'<strong>{trigger.headline}</strong>'
+            f'{cue_block}'
+            f'{message_block}'
+            f'{basis_html}'
+            '</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bool:
     """Try to rebuild today's payload once when it is missing or deferred."""
     try:
@@ -956,22 +999,27 @@ def _render_queue_orientation_block(
 
 
 def _render_attention_summary_strip(strip: TodayAttentionStripViewModel) -> None:
-    """Render 3–4 compact metric tiles above the queue.
+    """Render compact metric tiles above the queue.
 
-    Uses st.metric for operational density.  Shows "Reviewed today" only when
-    the value is available from the precomputed payload (not None).
+    Uses st.metric for operational density. Same-day reinforcement metrics are
+    only shown when precomputed values are positive so quiet states stay quiet.
     """
-    n_cols = 4 if strip.reviewed_today is not None else 3
-    cols = st.columns(n_cols)
-    with cols[0]:
-        st.metric("Needing attention", strip.total_needing_attention)
-    with cols[1]:
-        st.metric("New today", strip.new_today)
-    with cols[2]:
-        st.metric("Overdue follow-ups", strip.overdue_follow_ups)
+    metric_tiles: list[tuple[str, int]] = [
+        ("Needing attention", strip.total_needing_attention),
+        ("New today", strip.new_today),
+        ("Overdue follow-ups", strip.overdue_follow_ups),
+    ]
     if strip.reviewed_today is not None:
-        with cols[3]:
-            st.metric("Reviewed today", strip.reviewed_today)
+        metric_tiles.append(("Reviewed today", strip.reviewed_today))
+    if strip.touchpoints_logged_today is not None:
+        metric_tiles.append(("Touchpoints logged", strip.touchpoints_logged_today))
+    if strip.follow_ups_scheduled_today is not None:
+        metric_tiles.append(("Follow-ups set", strip.follow_ups_scheduled_today))
+
+    cols = st.columns(len(metric_tiles))
+    for idx, (label, value) in enumerate(metric_tiles):
+        with cols[idx]:
+            st.metric(label, value)
 
 
 def _render_weekly_summary_block(summary: TodayWeeklySummaryViewModel) -> None:
@@ -1363,6 +1411,19 @@ def _confidence_chip(line_5_text: str) -> str:
     return ""
 
 
+def _is_low_confidence_overdue_card(card: TodayQueueCardViewModel, line_5_text: str) -> bool:
+    lowered_confidence = str(line_5_text or "").strip().lower()
+    is_low_confidence = "low confidence" in lowered_confidence or "confidence: low" in lowered_confidence
+    if not is_low_confidence:
+        return False
+
+    state = str(getattr(card, "normalized_action_state", "") or "").strip().lower()
+    state_detail = str(getattr(card, "normalized_action_state_detail", "") or "").strip().lower()
+    line_3 = str(getattr(card, "line_3", "") or "").strip().lower()
+    line_4 = str(getattr(card, "line_4", "") or "").strip().lower()
+    return any("overdue" in value for value in (state, state_detail, line_3, line_4))
+
+
 def _format_signal_status_label(signal_status: str) -> str:
     normalized = str(signal_status or "").strip().lower()
     if normalized == SIGNAL_STATUS_LOOKED_AT:
@@ -1437,6 +1498,72 @@ def _render_signal_status_controls(*, card: TodayQueueCardViewModel, key_prefix:
         st.rerun()
 
 
+def _save_today_quick_note(*, card: TodayQueueCardViewModel, note_text: str) -> bool:
+    clean_note = str(note_text or "").strip()
+    employee_id = str(card.employee_id or "").strip()
+    if not clean_note or not employee_id:
+        return False
+
+    name_parts = str(card.line_1 or "").split(" · ")
+    employee_name = str(name_parts[0] or employee_id).strip() if name_parts else employee_id
+    department = str(card.process_id or (name_parts[1] if len(name_parts) > 1 else "")).strip()
+    performed_by = str(st.session_state.get("user_name") or st.session_state.get("user_email") or "").strip()
+    tenant_id = str(st.session_state.get("tenant_id") or "").strip()
+    expected_follow_up_date = (date.today() + timedelta(days=7)).isoformat()
+
+    write_result = log_coaching_lifecycle_entry(
+        employee_id=employee_id,
+        employee_name=employee_name,
+        department=department,
+        reason="Today queue quick note",
+        action_taken=clean_note,
+        expected_follow_up_date=expected_follow_up_date,
+        performed_by=performed_by,
+        later_outcome="pending",
+        existing_action_id="",
+        tenant_id=tenant_id,
+        user_role=str(st.session_state.get("user_role") or ""),
+    )
+    if not write_result:
+        return False
+
+    # Preserve existing coaching journal flow while action lifecycle remains canonical.
+    journal_note = (
+        "reason=Today queue quick note\n"
+        f"expected_follow_up_date={expected_follow_up_date}\n"
+        "later_outcome=pending\n"
+        f"{clean_note}"
+    )
+    add_coaching_note(employee_id, journal_note, performed_by)
+    return True
+
+
+def _render_today_quick_note(*, card: TodayQueueCardViewModel, key_prefix: str) -> None:
+    employee_id = str(card.employee_id or "").strip()
+    if not employee_id:
+        return
+
+    note_key = f"{key_prefix}_{employee_id}_{card.process_id}_quick_note_text"
+    save_key = f"{key_prefix}_{employee_id}_{card.process_id}_quick_note_save"
+    with st.expander("Quick note", expanded=False):
+        note_text = st.text_area(
+            "Action note",
+            value=str(st.session_state.get(note_key) or ""),
+            key=note_key,
+            height=90,
+            placeholder="Log what you reviewed or changed.",
+        )
+        if st.button("Save quick note", key=save_key, use_container_width=True, type="secondary"):
+            if not str(note_text or "").strip():
+                st.warning("Write a quick note before saving.")
+            elif _save_today_quick_note(card=card, note_text=note_text):
+                st.session_state[note_key] = ""
+                set_flash_message("Quick note saved.")
+                st.rerun()
+            else:
+                show_error_state("Quick note could not be saved right now.")
+
+
 def _render_attention_card(
     *,
     card: TodayQueueCardViewModel,
@@ -1461,6 +1588,11 @@ def _render_attention_card(
             st.markdown(chip_html, unsafe_allow_html=True)
         if line_5_text.lower() == "low confidence":
             st.markdown(f'<div class="today-confidence-badge-low">{line_5_text}</div>', unsafe_allow_html=True)
+            if _is_low_confidence_overdue_card(card, line_5_text):
+                st.markdown(
+                    '<div class="today-freshness-meta">Overdue follow-up shown with limited confidence.</div>',
+                    unsafe_allow_html=True,
+                )
             if freshness_text:
                 st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
         else:
@@ -1496,6 +1628,9 @@ def _render_attention_card(
                 key_prefix=f"{key_prefix}_status",
                 status_map=signal_status_map,
             )
+
+        if not compact:
+            _render_today_quick_note(card=card, key_prefix=f"{key_prefix}_quick_note")
 
         if show_action:
             if st.button(
@@ -1672,6 +1807,11 @@ def _render_insight_card(
             st.markdown(chip_html, unsafe_allow_html=True)
         if line_5_text.lower() == "low confidence":
             st.markdown(f'<div class="today-confidence-badge-low">{line_5_text}</div>', unsafe_allow_html=True)
+            if _is_low_confidence_overdue_card(card_vm, line_5_text):
+                st.markdown(
+                    '<div class="today-freshness-meta">Overdue follow-up shown with limited confidence.</div>',
+                    unsafe_allow_html=True,
+                )
             if freshness_text:
                 st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
         elif line_5_text:
@@ -1918,6 +2058,18 @@ def page_today() -> None:
 
         _render_top_status_area(meaning=meaning)
 
+        previous_precomputed = get_today_signals(
+            tenant_id=tenant_id,
+            as_of_date=(today_value - timedelta(days=1)).isoformat(),
+        )
+        return_trigger = build_today_return_trigger(
+            queue_items=queue_items,
+            today=today_value,
+            previous_queue_items=list((previous_precomputed or {}).get("queue_items") or []),
+            previous_as_of_date=str((previous_precomputed or {}).get("as_of_date") or ""),
+        )
+        _render_return_trigger(return_trigger)
+
         # Build snapshot fallback cards when trend history is too thin.
         signal_mode = meaning.signal_mode
         snapshot_cards = None
@@ -1979,10 +2131,16 @@ def page_today() -> None:
             signal_mode=signal_mode,
         )
 
+        weekly_activity = _cached_weekly_manager_activity_summary(
+            tenant_id=tenant_id,
+            lookback_days=7,
+            today_iso=today_value.isoformat(),
+        )
         attention_strip = build_today_attention_strip(
             attention=decision_summary,
             queue_items=queue_items,
             today=today_value,
+            same_day_activity=weekly_activity,
         )
         _render_attention_summary_strip(attention_strip)
 
@@ -1998,11 +2156,6 @@ def page_today() -> None:
             action_state_lookup=action_state_lookup,
         )
 
-        weekly_activity = _cached_weekly_manager_activity_summary(
-            tenant_id=tenant_id,
-            lookback_days=7,
-            today_iso=today_value.isoformat(),
-        )
         weekly_summary = build_today_weekly_summary_view_model(
             reviewed_issues=int(weekly_activity.get("reviewed_issues", 0) or 0),
             follow_up_touchpoints=int(weekly_activity.get("follow_up_touchpoints", 0) or 0),

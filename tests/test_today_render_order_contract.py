@@ -9,7 +9,13 @@ def _noop_container(*args, **kwargs):
     yield
 
 
-def _build_card(*, line_5: str, freshness: str) -> TodayQueueCardViewModel:
+def _build_card(
+    *,
+    line_5: str,
+    freshness: str,
+    normalized_action_state: str = "",
+    normalized_action_state_detail: str = "",
+) -> TodayQueueCardViewModel:
     return TodayQueueCardViewModel(
         employee_id="E-1",
         process_id="P-1",
@@ -21,6 +27,8 @@ def _build_card(*, line_5: str, freshness: str) -> TodayQueueCardViewModel:
         line_5=line_5,
         freshness_line=freshness,
         expanded_lines=[],
+        normalized_action_state=normalized_action_state,
+        normalized_action_state_detail=normalized_action_state_detail,
     )
 
 
@@ -79,3 +87,24 @@ def test_today_card_low_confidence_renders_single_confidence_marker(monkeypatch)
 
     payload = "\n".join(rendered).lower()
     assert payload.count("low confidence") == 1
+
+
+def test_today_card_overdue_low_confidence_renders_subtle_indicator(monkeypatch):
+    rendered: list[str] = []
+    monkeypatch.setattr("pages.today.st.container", _noop_container)
+    monkeypatch.setattr("pages.today.st.markdown", lambda text, **kwargs: rendered.append(str(text)))
+
+    _render_attention_card(
+        card=_build_card(
+            line_5="Low confidence",
+            freshness="Freshness: Updated 1h ago",
+            normalized_action_state="overdue_follow_up",
+            normalized_action_state_detail="Overdue",
+        ),
+        key_prefix="overdue_low_conf_indicator",
+        compact=True,
+        show_action=False,
+    )
+
+    payload = "\n".join(rendered)
+    assert "Overdue follow-up shown with limited confidence." in payload
