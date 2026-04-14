@@ -9,8 +9,43 @@ from core.dependencies import (
     verify_checkout_and_activate,
 )
 from core.billing_cache import BILLING_CACHE_TTL_SECONDS, clear_billing_cache
+from core.onboarding_intent import (
+    SAMPLE_DATA_POST_AUTH_INTENT,
+    begin_onboarding_correlation_id,
+    build_onboarding_event_context,
+    clear_post_auth_intent,
+    ensure_onboarding_correlation_id,
+    get_post_auth_intent,
+)
 from core.runtime import st, time, traceback
-from ui.landing import show_landing_page, track_landing_event
+from ui.landing import (
+    show_landing_page,
+    track_landing_event,
+)
+
+
+def _apply_post_auth_redirect_intent() -> None:
+    intent = get_post_auth_intent()
+    if intent != SAMPLE_DATA_POST_AUTH_INTENT:
+        return
+
+    clear_post_auth_intent()
+    st.session_state["import_entry_mode"] = "Try sample data"
+    st.session_state["_auto_load_sample_on_import_once"] = True
+    st.session_state["goto_page"] = "import"
+    log_operational_event(
+        "onboarding_sample_intent_consumed",
+        status="success",
+        tenant_id=str(st.session_state.get("tenant_id", "") or ""),
+        user_email=str(st.session_state.get("user_email", "") or ""),
+        context=build_onboarding_event_context(
+            {
+                "destination": "import",
+                "entry_mode": "Try sample data",
+                "auto_load_once": True,
+            }
+        ),
+    )
 
 
 def handle_logout_request() -> bool:
@@ -33,6 +68,8 @@ def handle_logout_request() -> bool:
 
 def handle_public_query_actions() -> None:
     if st.query_params.get("start") == "1":
+        begin_onboarding_correlation_id()
+        clear_post_auth_intent()
         st.session_state["show_login"] = True
         track_landing_event("cta_click", "sticky_get_started")
         try:
@@ -53,12 +90,28 @@ def handle_public_query_actions() -> None:
         st.session_state["_pending_invite"] = invite.strip().lower()
         st.query_params.clear()
 
+    if get_post_auth_intent() == SAMPLE_DATA_POST_AUTH_INTENT:
+        ensure_onboarding_correlation_id()
+        st.session_state["show_login"] = True
+        if not bool(st.session_state.get("_sample_intent_preserved_logged", False)):
+            log_operational_event(
+                "onboarding_sample_intent_preserved",
+                status="success",
+                tenant_id=str(st.session_state.get("tenant_id", "") or ""),
+                user_email=str(st.session_state.get("user_email", "") or ""),
+                context=build_onboarding_event_context(
+                    {"mechanism": "query_param", "source": "public_query"}
+                ),
+            )
+            st.session_state["_sample_intent_preserved_logged"] = True
+
 
 def ensure_authenticated_session() -> bool:
     force_login_after_logout = st.query_params.get("logged_out") == "1"
     restored_from_cookie = False if force_login_after_logout else restore_session_from_cookies()
 
     if "supabase_session" in st.session_state or restored_from_cookie:
+        _apply_post_auth_redirect_intent()
         if st.query_params.get("logged_out") == "1":
             try:
                 del st.query_params["logged_out"]
@@ -71,6 +124,8 @@ def ensure_authenticated_session() -> bool:
         return False
 
     if st.button("← Back", key="lp_back_to_landing"):
+        if get_post_auth_intent() == SAMPLE_DATA_POST_AUTH_INTENT:
+            clear_post_auth_intent()
         st.session_state["show_login"] = False
         st.rerun()
 

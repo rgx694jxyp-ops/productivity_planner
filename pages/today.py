@@ -12,7 +12,8 @@ import pandas as pd
 import streamlit as st
 
 from database import add_coaching_note
-from core.dependencies import _bust_cache, _cached_employees, _log_app_error
+from core.dependencies import _bust_cache, _cached_employees, _log_app_error, _log_operational_event
+from core.onboarding_intent import build_onboarding_event_context
 from domain.display_signal import DisplaySignal, SignalLabel
 from domain.insight_card_contract import InsightCardContract
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
@@ -631,6 +632,71 @@ def _render_demo_reset_controls(*, import_summary: dict[str, Any], tenant_id: st
                 show_error_state(f"Demo reset failed: {exc}")
 
 
+def _has_today_data(
+    *,
+    queue_items: list[dict[str, Any]],
+    goal_status: list[dict[str, Any]],
+    home_sections: dict[str, Any],
+    import_summary: dict[str, Any],
+) -> bool:
+    tenant_id = str(st.session_state.get("tenant_id", "") or "")
+    employee_rows = []
+    for row in list(_cached_employees() or []):
+        if not isinstance(row, dict):
+            continue
+        row_tenant_id = str(row.get("tenant_id") or "")
+        if tenant_id and row_tenant_id and row_tenant_id != tenant_id:
+            continue
+        employee_rows.append(row)
+
+    has_employees = any(
+        str(row.get("emp_id") or row.get("employee_id") or row.get("EmployeeID") or "").strip()
+        for row in employee_rows
+    )
+    has_history = bool(goal_status) or int((import_summary or {}).get("days") or 0) > 0
+    has_signals = bool(queue_items) or any(
+        bool(cards)
+        for section_key, cards in dict(home_sections or {}).items()
+        if section_key != "suppressed_signals"
+    )
+    return bool(has_employees or has_history or has_signals)
+
+
+def _render_first_value_screen() -> None:
+    if not bool(st.session_state.get("_first_value_screen_shown_logged", False)):
+        _log_operational_event(
+            "first_value_screen_shown",
+            status="success",
+            tenant_id=str(st.session_state.get("tenant_id", "") or ""),
+            user_email=str(st.session_state.get("user_email", "") or ""),
+            context=build_onboarding_event_context({"entry": "today", "import_path": "upload"}),
+        )
+        st.session_state["_first_value_screen_shown_logged"] = True
+
+    with st.container(border=True):
+        st.markdown("### Get to your first value")
+        st.write(
+            "Today becomes useful after the app has roster or shift history to compare. "
+            "This workspace does not have usable operating data yet."
+        )
+        st.info(
+            "Load sample data to see the full workflow in demo mode, or upload a file to start from your own history. "
+            "After import, Today returns to the normal queue automatically."
+        )
+
+        sample_col, upload_col = st.columns(2)
+        with sample_col:
+            if st.button("Use sample data", type="primary", use_container_width=True, key="today_first_value_sample"):
+                st.session_state["import_entry_mode"] = "Try sample data"
+                st.session_state["goto_page"] = "import"
+                st.rerun()
+        with upload_col:
+            if st.button("Upload your file", type="secondary", use_container_width=True, key="today_first_value_upload"):
+                st.session_state["import_entry_mode"] = "Upload file"
+                st.session_state["goto_page"] = "import"
+                st.rerun()
+
+
 def _render_today_interpretation_strip() -> None:
     with st.container(border=True):
         st.markdown('<div class="today-section-label">What you are seeing</div>', unsafe_allow_html=True)
@@ -696,6 +762,29 @@ def _render_top_status_area(*, meaning: TodaySurfaceMeaning) -> None:
         ),
         unsafe_allow_html=True,
     )
+
+
+def _emit_today_loaded_with_data_once(*, tenant_id: str, import_summary: dict, queue_count: int) -> None:
+    source_mode = str((import_summary or {}).get("source_mode") or "").strip().lower()
+    path = "sample" if source_mode == "demo" else "upload"
+    marker = f"{str(tenant_id or '')}:{path}:{int(queue_count)}"
+    if str(st.session_state.get("_today_loaded_with_data_marker", "") or "") == marker:
+        return
+
+    _log_operational_event(
+        "today_loaded_with_data",
+        status="success",
+        tenant_id=str(tenant_id or ""),
+        user_email=str(st.session_state.get("user_email", "") or ""),
+        context=build_onboarding_event_context(
+            {
+                "import_path": path,
+                "queue_items": int(queue_count),
+                "source_mode": source_mode or "upload",
+            }
+        ),
+    )
+    st.session_state["_today_loaded_with_data_marker"] = marker
 
 
 def _render_return_trigger(trigger: TodayReturnTriggerViewModel | None) -> None:
@@ -2056,6 +2145,21 @@ def page_today() -> None:
             today_value=today_value,
         )
 
+        if not _has_today_data(
+            queue_items=queue_items,
+            goal_status=goal_status,
+            home_sections=home_sections,
+            import_summary=import_summary,
+        ):
+            _render_first_value_screen()
+            return
+
+        _emit_today_loaded_with_data_once(
+            tenant_id=tenant_id,
+            import_summary=import_summary,
+            queue_count=int(counts.get("all", 0) or 0),
+        )
+
         _render_top_status_area(meaning=meaning)
 
         previous_precomputed = get_today_signals(
@@ -2080,8 +2184,8 @@ def page_today() -> None:
             ) or None
 
         last_action_lookup = _build_last_action_lookup(queue_items)
-        decision_items = list(payload.get("decision_items") or [])
-        decision_summary = payload.get("decision_summary") or attention_summary
+        decision_items = list(precomputed.get("decision_items") or [])
+        decision_summary = precomputed.get("decision_summary") or attention_summary
         action_state_lookup = _cached_today_action_state_lookup(
             tenant_id=tenant_id,
             employee_ids=_today_action_state_employee_ids(

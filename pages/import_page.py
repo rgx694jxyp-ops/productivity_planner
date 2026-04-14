@@ -59,6 +59,7 @@ from ui.traceability_panel import render_traceability_panel
 from models.import_quality_models import LatestImportSummary
 from services.trend_classification_service import normalize_trend_state
 from services.onboarding_service import build_first_import_insight
+from core.onboarding_intent import build_onboarding_event_context
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,9 @@ _DEMO_SAMPLE_FILES = [
 _DEMO_ACTIONS_FILE = "demo_actions_seed.json"
 _DEMO_ACTION_EVENTS_FILE = "demo_action_events_seed.json"
 _DEMO_SEED_OWNER = "demo.supervisor@example.com"
+_AUTO_LOAD_SAMPLE_ONBOARDING_FLAG = "_auto_load_sample_on_import_once"
+_AUTO_RUN_SAMPLE_PIPELINE_ONCE_FLAG = "_sample_onboarding_auto_run_pipeline_once"
+_FOCUS_FIRST_INSIGHT_ONCE_FLAG = "_sample_onboarding_focus_first_insight_once"
 
 
 def _build_step3_preview_cache_key(*, sessions: list[dict], work_date: date, tenant_id: str, user_role: str) -> str:
@@ -154,6 +158,135 @@ def _build_sample_demo_sessions(*, tenant_id: str) -> list[dict]:
     return sessions
 
 
+def _infer_import_path(*, sessions: list[dict] | None = None) -> str:
+    mode = str(st.session_state.get("import_entry_mode", "") or "").strip().lower()
+    source_modes = {
+        str(item.get("source_mode", "") or "").strip().lower()
+        for item in list(sessions or [])
+        if isinstance(item, dict)
+    }
+    if "demo" in source_modes or mode == "try sample data":
+        return "sample"
+    if mode == "manual entry":
+        return "manual"
+    if mode == "upload file":
+        return "upload"
+    return "unknown"
+
+
+def _emit_import_funnel_event(event_type: str, *, tenant_id: str, context: dict | None = None) -> None:
+    _log_operational_event(
+        event_type,
+        status="success",
+        tenant_id=str(tenant_id or ""),
+        user_email=str(st.session_state.get("user_email", "") or ""),
+        context=build_onboarding_event_context(
+            {
+                "import_path": _infer_import_path(),
+                "entry_mode": str(st.session_state.get("import_entry_mode", "") or ""),
+                **(context or {}),
+            }
+        ),
+    )
+
+
+def _build_import_started_marker(*, sessions: list[dict] | None = None) -> str:
+    compact_sessions = []
+    for session in list(sessions or st.session_state.get("uploaded_sessions") or []):
+        if not isinstance(session, dict):
+            continue
+        compact_sessions.append(
+            {
+                "filename": str(session.get("filename", "") or ""),
+                "row_count": int(session.get("row_count", 0) or 0),
+                "source_mode": str(session.get("source_mode", "") or ""),
+                "timestamp": str(session.get("timestamp", "") or ""),
+            }
+        )
+
+    raw = json.dumps(compact_sessions, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _emit_import_started_once(
+    *,
+    tenant_id: str,
+    trigger: str,
+    context: dict | None = None,
+    sessions: list[dict] | None = None,
+) -> bool:
+    marker = _build_import_started_marker(sessions=sessions)
+    dedupe_key = f"_import_started_logged:{marker}:{str(trigger or '')}"
+    if bool(st.session_state.get(dedupe_key, False)):
+        return False
+
+    _emit_import_funnel_event(
+        "import_started",
+        tenant_id=tenant_id,
+        context={"trigger": str(trigger or "manual"), **(context or {})},
+    )
+    st.session_state[dedupe_key] = True
+    return True
+
+
+def _emit_first_insight_rendered_once(*, tenant_id: str, summary: dict) -> None:
+    import_job = dict(summary.get("import_job") or {})
+    marker = str(import_job.get("job_id") or summary.get("import_file") or "")
+    if not marker:
+        return
+    key = f"_first_insight_rendered:{marker}"
+    if bool(st.session_state.get(key, False)):
+        return
+
+    _emit_import_funnel_event(
+        "first_insight_rendered",
+        tenant_id=tenant_id,
+        context={
+            "source_mode": str(summary.get("source_mode", "") or ""),
+            "rows_processed": int(summary.get("rows_processed", 0) or 0),
+        },
+    )
+    st.session_state[key] = True
+
+
+def _load_sample_demo_into_import_state(*, tenant_id: str, trigger: str = "manual") -> bool:
+    sessions = _build_sample_demo_sessions(tenant_id=tenant_id)
+    if not sessions:
+        st.error("Sample files are not available. Ensure demo_data files are present in this workspace.")
+        return False
+    st.session_state.uploaded_sessions = sessions
+    st.session_state.submission_plan = None
+    st.session_state.split_overrides = {}
+    st.session_state.import_step = 3
+    if trigger == "auto_onboarding":
+        st.session_state[_AUTO_RUN_SAMPLE_PIPELINE_ONCE_FLAG] = True
+    _emit_import_started_once(
+        tenant_id=tenant_id,
+        trigger=str(trigger or "manual"),
+        sessions=sessions,
+        context={"source_mode": "demo"},
+    )
+    return True
+
+
+def _consume_sample_onboarding_auto_load(*, mode: str, tenant_id: str) -> bool:
+    if mode != "Try sample data":
+        return False
+
+    should_auto_load = bool(st.session_state.pop(_AUTO_LOAD_SAMPLE_ONBOARDING_FLAG, False))
+    if not should_auto_load:
+        return False
+
+    return _load_sample_demo_into_import_state(tenant_id=tenant_id, trigger="auto_onboarding")
+
+
+def _consume_auto_run_sample_pipeline_once() -> bool:
+    auto_run = bool(st.session_state.pop(_AUTO_RUN_SAMPLE_PIPELINE_ONCE_FLAG, False))
+    if auto_run:
+        st.session_state["confirm_import_preview"] = True
+    return auto_run
+
+
 def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
     """Seed curated demo actions/events for one tenant.
 
@@ -221,7 +354,7 @@ def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
 # First-insight renderer (post-import completion screen)
 # ---------------------------------------------------------------------------
 
-def _render_first_import_insight(insight: dict) -> None:
+def _render_first_import_insight(insight: dict, *, highlight: bool = False) -> None:
     """Render the trust-first first-insight section on the completion screen."""
     conf_label = str(insight.get("confidence_label") or "Low")
     conf_score = int(insight.get("confidence_score") or 0)
@@ -229,10 +362,14 @@ def _render_first_import_insight(insight: dict) -> None:
     conf_colors = {"High": "#1f6f2a", "Medium": "#8a5a00", "Low": "#c0392b"}
     conf_color = conf_colors.get(conf_label, "#555")
 
+    label_style = (
+        "margin-top:14px;margin-bottom:4px;font-size:0.75rem;font-weight:700;"
+        "letter-spacing:0.08em;text-transform:uppercase;color:#5d7693;"
+    )
+    if highlight:
+        label_style += "background:#eef7ff;padding:6px 8px;border-radius:8px;border:1px solid #d8e7fb;"
     st.markdown(
-        '<div style="margin-top:14px;margin-bottom:4px;font-size:0.75rem;font-weight:700;'
-        'letter-spacing:0.08em;text-transform:uppercase;color:#5d7693;">'
-        'Your first look</div>',
+        f'<div id="first-insight-anchor" style="{label_style}">Your first look</div>',
         unsafe_allow_html=True,
     )
     with st.container(border=True):
@@ -786,6 +923,11 @@ def _import_step1(tenant_id: str):
             st.session_state.submission_plan = None
             st.session_state.split_overrides = {}
             st.session_state.import_step = 3
+            _emit_import_funnel_event(
+                "import_started",
+                tenant_id=tenant_id,
+                context={"trigger": "manual_entry", "source_mode": "manual", "rows": len(manual_rows)},
+            )
             st.rerun()
         return
 
@@ -798,17 +940,13 @@ def _import_step1(tenant_id: str):
             st.markdown("- Runs through the same import pipeline and quality checks as uploaded files.")
             st.caption("Demo mode remains clearly labeled downstream so sample history is distinct from live uploaded operations data.")
 
+        if _consume_sample_onboarding_auto_load(mode=mode, tenant_id=tenant_id):
+            st.rerun()
+
         if st.button("Load sample warehouse data", type="primary", use_container_width=True, key="import_load_sample_history"):
             try:
-                sessions = _build_sample_demo_sessions(tenant_id=tenant_id)
-                if not sessions:
-                    st.error("Sample files are not available. Ensure demo_data files are present in this workspace.")
-                    return
-                st.session_state.uploaded_sessions = sessions
-                st.session_state.submission_plan = None
-                st.session_state.split_overrides = {}
-                st.session_state.import_step = 3
-                st.rerun()
+                if _load_sample_demo_into_import_state(tenant_id=tenant_id, trigger="manual"):
+                    st.rerun()
             except Exception as sample_err:
                 _show_user_error(
                     "Could not load sample data right now.",
@@ -1056,6 +1194,17 @@ def _import_step1(tenant_id: str):
                 st.session_state.import_step = 3
             else:
                 st.session_state.import_step = 2
+            _emit_import_funnel_event(
+                "import_started",
+                tenant_id=tenant_id,
+                context={
+                    "trigger": "upload_continue",
+                    "source_mode": "upload",
+                    "files": len(sessions),
+                    "rows": int(sum(int(s.get("row_count", 0) or 0) for s in sessions)),
+                    "auto_mapped": bool(all_auto),
+                },
+            )
             st.rerun()
 
 
@@ -1317,6 +1466,9 @@ def _import_step3(tenant_id: str):
         _ic_below = _sm.get("below", 0)
         _ic_risks = _sm.get("risks", 0)
         _ic_trust = _sm.get("trust") or {}
+        _focus_first_insight = bool(st.session_state.pop(_FOCUS_FIRST_INSIGHT_ONCE_FLAG, False))
+        if _focus_first_insight:
+            st.success("Sample data is ready. Showing your first insight now.")
         _render_import_ready_message(_sm)
 
         # ── First interpreted insight ─────────────────────────────────────────
@@ -1326,9 +1478,29 @@ def _import_step3(tenant_id: str):
                 import_summary=_sm,
                 goal_status=_goal_status_for_insight,
             )
-            _render_first_import_insight(_first_insight)
+            _render_first_import_insight(_first_insight, highlight=_focus_first_insight)
+            _emit_first_insight_rendered_once(
+                tenant_id=tenant_id,
+                summary=_sm,
+            )
         except Exception:
             pass
+
+        if _focus_first_insight:
+            st.components.v1.html(
+                """
+                <script>
+                const scrollToInsight = () => {
+                  const anchor = window.parent.document.getElementById('first-insight-anchor');
+                  if (anchor) {
+                    anchor.scrollIntoView({behavior: 'smooth', block: 'start'});
+                  }
+                };
+                setTimeout(scrollToInsight, 120);
+                </script>
+                """,
+                height=0,
+            )
 
         if _ic_trust:
             _render_import_trust_summary(_ic_trust, heading="Import trust indicators")
@@ -1752,12 +1924,39 @@ def _import_step3(tenant_id: str):
             label_visibility="collapsed",
         )
 
+    _auto_run_sample_pipeline = _consume_auto_run_sample_pipeline_once()
     _confirm_preview = st.checkbox(
         "I reviewed the preview and want to write this data to history",
         key="confirm_import_preview",
     )
+    if _auto_run_sample_pipeline:
+        _emit_import_started_once(
+            tenant_id=tenant_id,
+            trigger="auto_onboarding_resume",
+            sessions=sessions,
+            context={"source_mode": "demo", "resume": True},
+        )
+        _confirm_preview = True
+        st.info("Loading sample data and preparing your first insight. This can take a few seconds.")
 
-    if st.button("▶  Run pipeline now", type="primary", use_container_width=True, disabled=not _confirm_preview):
+    if _auto_run_sample_pipeline or st.button("▶  Run pipeline now", type="primary", use_container_width=True, disabled=not _confirm_preview):
+        _emit_import_funnel_event(
+            "import_preview_completed",
+            tenant_id=tenant_id,
+            context={
+                "candidate_rows": int(len(_candidate_preview_rows or [])),
+                "duplicates": int(_preview_dup_count or 0),
+                "continue_path": str(st.session_state.get("import_preview_continue_path") or ""),
+            },
+        )
+        _emit_import_funnel_event(
+            "import_pipeline_started",
+            tenant_id=tenant_id,
+            context={
+                "candidate_rows": int(len(_candidate_preview_rows or [])),
+                "files": len(sessions),
+            },
+        )
         all_rows    = []
         all_mapping = {}
         for s in sessions:
@@ -2564,6 +2763,9 @@ def _import_step3(tenant_id: str):
                 "below":     _below_final,
                 "risks":     _risks_final,
                 "days":      _estimated_days,
+                "source_mode": "demo"
+                if sessions and all(str(s.get("source_mode") or "").strip().lower() == "demo" for s in sessions)
+                else "upload",
                 "trust":     _final_trust_summary,
                 "rows_processed": int(_candidate_count),
                 "valid_rows": int((_final_trust_summary or {}).get("accepted_rows", 0) or len(uph_batch)),
@@ -2576,6 +2778,8 @@ def _import_step3(tenant_id: str):
                 "import_job": _serialize_import_job(_import_job),
                 "import_file": _upload_name,
             }
+            if _auto_run_sample_pipeline:
+                st.session_state[_FOCUS_FIRST_INSIGHT_ONCE_FLAG] = True
             _mark_import_stage_in_progress(_import_job, "summarize")
             _mark_import_stage_completed(
                 _import_job,

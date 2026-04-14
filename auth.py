@@ -3,6 +3,7 @@ import time
 
 import streamlit as st
 
+from core.onboarding_intent import attach_post_auth_intent
 from services.app_logging import log_error, log_warn, sanitize_text
 
 
@@ -38,16 +39,16 @@ def _auth_redirect_url() -> str:
             except Exception:
                 v = ""
         if v.startswith("http://") or v.startswith("https://"):
-            return v.rstrip("/")
+            return attach_post_auth_intent(v.rstrip("/"))
 
     try:
         origin = str(st.context.headers.get("Origin", "") or "").strip()
         if origin.startswith("http://") or origin.startswith("https://"):
-            return origin.rstrip("/")
+            return attach_post_auth_intent(origin.rstrip("/"))
     except Exception:
         pass
 
-    return "http://localhost:8501"
+    return attach_post_auth_intent("http://localhost:8501")
 
 
 def render_sign_out_button(key_prefix: str, *, type: str = "secondary", use_container_width: bool = False) -> bool:

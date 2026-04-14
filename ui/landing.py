@@ -1,10 +1,32 @@
 import os
 
-from core.dependencies import audit
+from core.dependencies import audit, log_operational_event
+from core.onboarding_intent import (
+    SAMPLE_DATA_POST_AUTH_INTENT,
+    begin_onboarding_correlation_id,
+    build_onboarding_event_context,
+    clear_post_auth_intent,
+    queue_sample_data_post_auth_intent,
+)
 from core.runtime import st
 
 
 def track_landing_event(event: str, detail: str = "") -> None:
+    if event == "cta_click" and detail == "hero_try_sample_data":
+        log_operational_event(
+            "landing_sample_cta_clicked",
+            status="success",
+            detail=detail,
+            context=build_onboarding_event_context({"surface": "landing", "cta": detail}),
+        )
+    elif event == "cta_click" and detail in {"bottom_get_started", "sticky_get_started"}:
+        log_operational_event(
+            "landing_generic_cta_clicked",
+            status="success",
+            detail=detail,
+            context=build_onboarding_event_context({"surface": "landing", "cta": detail}),
+        )
+
     try:
         audit(f"landing:{event}", detail)
     except Exception:
@@ -122,11 +144,23 @@ def show_landing_page() -> None:
 
     c1, c2 = st.columns(2)
     if c1.button("Try sample data", type="primary", use_container_width=True, key="lp_get_started_top"):
+        correlation_id = begin_onboarding_correlation_id()
         track_landing_event("cta_click", "hero_try_sample_data")
+        queue_sample_data_post_auth_intent(correlation_id=correlation_id)
+        log_operational_event(
+            "onboarding_sample_intent_preserved",
+            status="success",
+            detail="landing_sample_cta",
+            context=build_onboarding_event_context(
+                {"mechanism": "query_param", "source": "landing_sample_cta"},
+                correlation_id=correlation_id,
+            ),
+        )
         st.session_state["show_login"] = True
         st.rerun()
     if c2.button("Upload a CSV", use_container_width=True, key="lp_how_it_works"):
         track_landing_event("cta_click", "hero_upload_csv")
+        clear_post_auth_intent()
         st.session_state["lp_show_demo"] = True
         st.rerun()
 
@@ -215,6 +249,8 @@ def show_landing_page() -> None:
     st.markdown("---")
     st.markdown("### See what's surfacing on your floor today")
     if st.button("Get Started", type="primary", use_container_width=True, key="lp_get_started_bottom"):
+        begin_onboarding_correlation_id()
         track_landing_event("cta_click", "bottom_get_started")
+        clear_post_auth_intent()
         st.session_state["show_login"] = True
         st.rerun()
