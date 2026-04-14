@@ -14,6 +14,7 @@ from services.settings_service import (
     format_error_timestamp,
     summarize_error_counts,
 )
+from services.upgrade_telemetry_service import log_upgrade_event
 
 init_runtime()
 
@@ -70,6 +71,28 @@ def page_settings():
 
             _bill_data = _bill_result.get("data") or {}
             sub = _bill_data.get("sub") if _bill_data.get("has_subscription") else None
+            _user_id = str(st.session_state.get("user_id", "") or "")
+            _user_email = str(st.session_state.get("user_email", "") or "")
+
+            def _queue_billing_portal_continue(*, label: str, launch_key: str, url: str, feature_context: str, current_plan: str, employee_count: int, employee_limit: int) -> None:
+                if not url:
+                    return
+                if st.button(label, key=f"{launch_key}_button", use_container_width=True, type="primary"):
+                    log_upgrade_event(
+                        "billing_portal_opened",
+                        prompt_location="",
+                        prompt_type="",
+                        current_plan=current_plan,
+                        employee_count=employee_count,
+                        employee_limit=employee_limit,
+                        feature_context=feature_context,
+                        tenant_id=_tid_local,
+                        user_id=_user_id,
+                        user_email=_user_email,
+                    )
+                    st.session_state[f"_{launch_key}_url"] = url
+                if st.session_state.get(f"_{launch_key}_url") == url:
+                    st.link_button("Continue to Billing Portal →", url, use_container_width=True, type="secondary")
 
             if sub:
                 _plan_raw = _bill_data.get("plan_raw", "unknown")
@@ -77,6 +100,10 @@ def page_settings():
                 _status = _bill_data.get("status", "unknown")
                 _limit_str = _bill_data.get("limit_str", "0")
                 _emp_count = _bill_data.get("emp_count", 0)
+                try:
+                    _employee_limit = int(sub.get("employee_limit", 0) or 0)
+                except Exception:
+                    _employee_limit = 0
                 _renew_str = _bill_data.get("renew_str", "")
                 _pending_plan = _bill_data.get("pending_plan", "")
                 _pending_date = _bill_data.get("pending_date", "period end")
@@ -129,21 +156,27 @@ def page_settings():
                 _price_map = _bill_data.get("price_map", {})
 
                 if _manage_plan_url:
-                    st.link_button(
-                        "Manage Subscription (billing portal)",
-                        _manage_plan_url,
-                        use_container_width=True,
-                        type="primary",
+                    _queue_billing_portal_continue(
+                        label="Manage Subscription (billing portal)",
+                        launch_key="settings_manage_subscription",
+                        url=_manage_plan_url,
+                        feature_context="settings_manage_subscription",
+                        current_plan=_plan_raw,
+                        employee_count=int(_emp_count or 0),
+                        employee_limit=_employee_limit,
                     )
                 else:
                     st.info("Billing portal not available. Contact support.")
 
                 if _portal_url:
-                    st.link_button(
-                        "Open Billing Portal (card, invoices, cancel)",
-                        _portal_url,
-                        use_container_width=True,
-                        type="primary",
+                    _queue_billing_portal_continue(
+                        label="Open Billing Portal (card, invoices, cancel)",
+                        launch_key="settings_open_billing_portal",
+                        url=_portal_url,
+                        feature_context="settings_billing_portal",
+                        current_plan=_plan_raw,
+                        employee_count=int(_emp_count or 0),
+                        employee_limit=_employee_limit,
                     )
                     st.caption("Use the in-app Change Plan cards below for plan upgrades.")
 
@@ -292,7 +325,15 @@ def page_settings():
                 try:
                     _portal_url = create_billing_portal_url(return_url=_app_url + "/?portal=return")
                     if _portal_url:
-                        st.link_button("Manage Subscription", _portal_url, use_container_width=True, type="primary")
+                        _queue_billing_portal_continue(
+                            label="Manage Subscription",
+                            launch_key="settings_manage_subscription_no_sub",
+                            url=_portal_url,
+                            feature_context="settings_manage_subscription_no_subscription",
+                            current_plan="starter",
+                            employee_count=0,
+                            employee_limit=0,
+                        )
                 except Exception:
                     pass
         except Exception as _sub_err:

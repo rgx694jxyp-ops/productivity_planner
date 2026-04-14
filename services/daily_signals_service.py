@@ -25,6 +25,7 @@ from services.action_query_service import get_open_actions
 from services.action_recommendation_service import get_ignored_high_performers, get_repeat_offenders
 from services.attention_scoring_service import AttentionFactor, AttentionItem, AttentionSummary
 from services.daily_snapshot_service import get_latest_snapshot_goal_status
+from services.decision_engine_service import DecisionItem, build_decision_items, build_decision_summary
 from services.exception_tracking_service import list_open_operational_exceptions
 from services.today_home_service import build_today_attention_summary, build_today_home_sections
 from services.today_page_meaning_service import is_weak_data_mode as _canonical_is_weak_data_mode
@@ -223,6 +224,46 @@ def _deserialize_attention_item(payload: dict[str, Any]) -> AttentionItem:
     )
 
 
+def _serialize_decision_item(item: DecisionItem) -> dict[str, Any]:
+    return {
+        "employee_id": item.employee_id,
+        "process_name": item.process_name,
+        "final_score": int(item.final_score),
+        "final_tier": item.final_tier,
+        "attention_score": int(item.attention_score),
+        "action_score": int(item.action_score),
+        "action_priority": item.action_priority,
+        "action_queue_status": item.action_queue_status,
+        "primary_reason": item.primary_reason,
+        "confidence_label": item.confidence_label,
+        "confidence_basis": item.confidence_basis,
+        "normalized_action_state": item.normalized_action_state,
+        "normalized_action_state_detail": item.normalized_action_state_detail,
+        "attention_item": _serialize_attention_item(item.attention_item),
+        "source_snapshot": dict(item.source_snapshot or {}),
+    }
+
+
+def _deserialize_decision_item(payload: dict[str, Any]) -> DecisionItem:
+    return DecisionItem(
+        employee_id=str(payload.get("employee_id") or ""),
+        process_name=str(payload.get("process_name") or ""),
+        final_score=int(payload.get("final_score") or 0),
+        final_tier=str(payload.get("final_tier") or "suppressed"),
+        attention_score=int(payload.get("attention_score") or 0),
+        action_score=int(payload.get("action_score") or 0),
+        action_priority=str(payload.get("action_priority") or ""),
+        action_queue_status=str(payload.get("action_queue_status") or ""),
+        primary_reason=str(payload.get("primary_reason") or ""),
+        confidence_label=str(payload.get("confidence_label") or "Low"),
+        confidence_basis=str(payload.get("confidence_basis") or ""),
+        normalized_action_state=str(payload.get("normalized_action_state") or ""),
+        normalized_action_state_detail=str(payload.get("normalized_action_state_detail") or ""),
+        attention_item=_deserialize_attention_item(dict(payload.get("attention_item") or {})),
+        source_snapshot=dict(payload.get("source_snapshot") or {}),
+    )
+
+
 def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any]:
     """Compute and persist all Today signals for a single date.
 
@@ -274,6 +315,15 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
         eligible_employee_ids=eligible_employee_ids,
         weak_data_mode=_is_weak_data_mode(import_summary),
     )
+    decision_items = build_decision_items(
+        goal_status=goal_status,
+        queue_items=queue_items,
+        open_exception_rows=open_exception_rows,
+        tenant_id=tenant_id,
+        today=signal_date,
+        weak_data_mode=_is_weak_data_mode(import_summary),
+    )
+    decision_summary = build_decision_summary(decision_items)
 
     rows: list[dict[str, Any]] = []
     for section_key in ("needs_attention", "changed_from_normal", "unresolved_items", "data_warnings", "suppressed_signals"):
@@ -354,6 +404,7 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
                     "suppressed_count": int(attention_summary.suppressed_count or 0),
                     "total_evaluated": int(attention_summary.total_evaluated or 0),
                 },
+                "decision_items": [_serialize_decision_item(item) for item in decision_items],
             },
         }
     )
@@ -423,6 +474,15 @@ def build_transient_today_payload(*, signal_date: date, tenant_id: str) -> dict[
         eligible_employee_ids=eligible_employee_ids,
         weak_data_mode=_is_weak_data_mode(import_summary),
     )
+    decision_items = build_decision_items(
+        goal_status=goal_status,
+        queue_items=queue_items,
+        open_exception_rows=open_exception_rows,
+        tenant_id=tenant_id,
+        today=signal_date,
+        weak_data_mode=_is_weak_data_mode(import_summary),
+    )
+    decision_summary = build_decision_summary(decision_items)
 
     return {
         "tenant_id": tenant_id,
@@ -432,6 +492,8 @@ def build_transient_today_payload(*, signal_date: date, tenant_id: str) -> dict[
         "import_summary": import_summary,
         "home_sections": home_sections,
         "attention_summary": attention_summary,
+        "decision_items": decision_items,
+        "decision_summary": decision_summary,
     }
 
 
@@ -459,6 +521,7 @@ def read_precomputed_today_signals(*, tenant_id: str, signal_date: date) -> dict
         suppressed_count=int(attention_payload.get("suppressed_count") or 0),
         total_evaluated=int(attention_payload.get("total_evaluated") or 0),
     )
+    decision_items = [_deserialize_decision_item(item) for item in (payload.get("decision_items") or [])]
 
     return {
         "tenant_id": tenant_id,
@@ -468,4 +531,6 @@ def read_precomputed_today_signals(*, tenant_id: str, signal_date: date) -> dict
         "import_summary": dict(payload.get("import_summary") or {}),
         "home_sections": home_sections,
         "attention_summary": attention_summary,
+        "decision_items": decision_items,
+        "decision_summary": build_decision_summary(decision_items) if decision_items else attention_summary,
     }

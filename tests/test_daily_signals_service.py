@@ -12,6 +12,7 @@ from domain.insight_card_contract import (
 from services.attention_scoring_service import AttentionSummary
 from services.attention_scoring_service import AttentionFactor, AttentionItem
 from services import daily_signals_service as dss
+from services.decision_engine_service import DecisionItem, build_decision_summary
 from services.today_page_meaning_service import is_weak_data_mode
 
 
@@ -64,6 +65,7 @@ def test_empty_eligible_employee_ids_aligns_between_persistent_and_transient(mon
         )
 
     monkeypatch.setattr(dss, "build_today_attention_summary", _fake_build_today_attention_summary)
+    monkeypatch.setattr(dss, "build_decision_items", lambda **kwargs: [])
     monkeypatch.setattr(dss, "delete_daily_signals", lambda **kwargs: None)
     monkeypatch.setattr(dss, "batch_upsert_daily_signals", lambda rows: None)
 
@@ -113,13 +115,13 @@ def test_transient_payload_matches_precomputed_round_trip(monkeypatch):
                 process_name="Packing",
                 attention_score=78,
                 attention_tier="high",
-                attention_reasons=["Trend has been declining"],
-                attention_summary="E1 (Packing) — ranked highly: trend has been declining.",
+                attention_reasons=["Decline compared to recent baseline performance"],
+                attention_summary="E1 (Packing) — ranked highly: decline compared to recent baseline performance.",
                 factors_applied=[
                     AttentionFactor(
                         key="trend_declining",
                         weight=25,
-                        plain_reason="Trend has been declining",
+                        plain_reason="Decline compared to recent baseline performance",
                     )
                 ],
                 snapshot={
@@ -182,6 +184,26 @@ def test_transient_payload_matches_precomputed_round_trip(monkeypatch):
     )
     monkeypatch.setattr(dss, "list_open_operational_exceptions", lambda **kwargs: [])
     monkeypatch.setattr(dss, "build_today_attention_summary", lambda **kwargs: attention_summary)
+    decision_items = [
+        DecisionItem(
+            employee_id="E1",
+            process_name="Packing",
+            final_score=90,
+            final_tier="high",
+            attention_score=78,
+            action_score=12,
+            action_priority="high",
+            action_queue_status="overdue",
+            primary_reason="Decline compared to recent baseline performance",
+            confidence_label="High",
+            confidence_basis="Based on 3 included day(s) with configured target context.",
+            normalized_action_state="overdue_follow_up",
+            normalized_action_state_detail="Overdue",
+            attention_item=attention_summary.ranked_items[0],
+            source_snapshot=dict(attention_summary.ranked_items[0].snapshot or {}),
+        )
+    ]
+    monkeypatch.setattr(dss, "build_decision_items", lambda **kwargs: decision_items)
     monkeypatch.setattr(dss, "delete_daily_signals", lambda **kwargs: None)
     monkeypatch.setattr(dss, "batch_upsert_daily_signals", lambda rows: captured_rows.extend(rows))
 
@@ -209,3 +231,6 @@ def test_transient_payload_matches_precomputed_round_trip(monkeypatch):
     ]
     assert precomputed["attention_summary"].suppressed_count == transient["attention_summary"].suppressed_count
     assert precomputed["attention_summary"].total_evaluated == transient["attention_summary"].total_evaluated
+    assert [item.employee_id for item in precomputed["decision_items"]] == [item.employee_id for item in transient["decision_items"]]
+    assert [item.final_score for item in precomputed["decision_items"]] == [item.final_score for item in transient["decision_items"]]
+    assert precomputed["decision_summary"].total_evaluated == transient["decision_summary"].total_evaluated

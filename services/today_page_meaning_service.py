@@ -12,6 +12,7 @@ from typing import Any
 
 from domain.insight_card_contract import InsightCardContract
 from services.attention_scoring_service import AttentionSummary
+from services.decision_engine_service import DecisionItem
 from services.today_snapshot_signal_service import (
     SignalMode,
     classify_signal_mode,
@@ -214,17 +215,23 @@ def build_today_surface_meaning(
 def build_today_queue_render_plan(
     *,
     attention: AttentionSummary,
+    decision_items: list[DecisionItem] | None = None,
     suppressed_cards: list[InsightCardContract] | None,
     today_value: date,
     is_stale: bool,
     weak_data_mode: bool,
     show_secondary_open: bool,
     snapshot_cards: list[TodayQueueCardViewModel] | None = None,
+    last_action_lookup: dict[str, str] | None = None,
+    action_state_lookup: dict[str, dict[str, object]] | None = None,
 ) -> TodayQueueRenderPlan:
     queue_vm = build_today_queue_view_model(
         attention=attention,
+        decision_items=decision_items,
         suppressed_cards=suppressed_cards,
         today=today_value,
+        last_action_lookup=last_action_lookup,
+        action_state_lookup=action_state_lookup,
     )
 
     section_title = str(queue_vm.main_section_title or "")

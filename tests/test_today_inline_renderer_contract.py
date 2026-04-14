@@ -21,7 +21,7 @@ def _insight_card(*, confidence_level: str = "high", sample_size: int = 4, inclu
         title="Lower than recent pace",
         what_happened="Lower than recent pace",
         compared_to_what="Compared with the latest 3-day window versus prior 3-day window",
-        why_flagged="Surfaced because recent output is below the recent baseline (prior comparable days and target context when available).",
+        why_flagged="Below recent baseline vs comparable days.",
         confidence=ConfidenceInfo(
             level=confidence_level,
             score=0.6,
@@ -72,7 +72,7 @@ def test_inline_adapter_uses_normalized_today_contract(monkeypatch):
     assert card is not None
     assert " · " in card.line_1
     assert card.line_2
-    assert card.line_3.startswith("Surfaced because")
+    assert card.line_3
     assert card.line_5.lower().startswith("confidence") or card.line_5.lower() == "low confidence"
     assert str(card.freshness_line or "").startswith("Freshness:")
     assert card.line_4.startswith("Based on") or card.line_4 == "Latest snapshot only"
@@ -98,6 +98,6 @@ def test_inline_adapter_low_data_keeps_non_stable_wording(monkeypatch):
     card = build_today_queue_card_from_insight_card(card=_insight_card(confidence_level="low", sample_size=2, included_rows=2), today=date(2026, 4, 12))
 
     assert card is not None
-    assert card.line_3.startswith("Surfaced because")
+    assert card.line_3
     assert card.line_4 in {"Latest snapshot only", "Based on 2 recent records", "Based on 2 usable records"}
     assert "stable" not in str(card.line_3 or "").lower()

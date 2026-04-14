@@ -8,6 +8,8 @@ from core.dependencies import (
     require_db,
 )
 from services.plan_service import evaluate_import_limit
+from services.upgrade_telemetry_service import log_upgrade_event, log_upgrade_event_once, log_upgrade_prompt_impression_once
+from services.upgrade_prompt_service import build_employee_capacity_upgrade_prompt
 from core.runtime import _html_mod, date, datetime, io, math, pd, st, tempfile, time, traceback, init_runtime
 
 init_runtime()
@@ -44,7 +46,7 @@ from services.import_pipeline.mapping_profiles import (
     build_mapping_profile_payload as _build_mapping_profile_payload,
     get_recent_mapping_profile as _get_recent_mapping_profile,
 )
-from services.import_trust_service import build_import_trust_summary
+from services.import_trust_service import build_import_trust_summary, build_import_warning_summary
 from jobs.entrypoints import run_import_postprocess_job, run_import_preview_job
 from services.import_quality_service import (
     ISSUE_HANDLING_CHOICES,
@@ -448,12 +450,16 @@ def _render_import_trust_summary(trust: dict, *, heading: str) -> None:
     _missing_required = int(trust.get("missing_required_fields", 0) or 0)
     _inconsistent = int(trust.get("inconsistent_names", 0) or 0)
     _suspicious = int(trust.get("suspicious_values", 0) or 0)
+    _warning_summary = str(trust.get("warning_summary", "") or "").strip()
 
     st.markdown(f"**{heading}**")
     st.caption(
         f"Status: {_TRUST_STATUS_LABELS.get(_status, _status.title())} · "
         f"Confidence score: {_score}/100"
     )
+    if _warning_summary:
+        st.info(_warning_summary)
+        st.caption("See row-level validation issues for details.")
     _m1, _m2, _m3, _m4 = st.columns(4)
     _m1.metric("Accepted rows", f"{_accepted:,}")
     _m2.metric("Rejected rows", f"{_rejected:,}")
@@ -585,6 +591,59 @@ def _import_step1(tenant_id: str):
     """Step 1 — upload files or enter lightweight production data manually."""
     st.subheader("Bring in whatever you have")
     st.caption("Upload a CSV or Excel export, or type a few rows in manually. We will help make it usable.")
+
+    try:
+        from services.billing_service import get_subscription_entitlement
+
+        _ent = get_subscription_entitlement(
+            tenant_id=tenant_id,
+            user_email=st.session_state.get("user_email", ""),
+        )
+        _capacity_prompt = build_employee_capacity_upgrade_prompt(
+            plan=str(_ent.get("plan") or "starter"),
+            employee_count=int(_ent.get("employee_count") or 0),
+            employee_limit=int(_ent.get("employee_limit") or 0),
+        )
+        if _capacity_prompt:
+            _prompt_plan = str(_ent.get("plan") or "starter")
+            _prompt_employee_count = int(_ent.get("employee_count") or 0)
+            _prompt_employee_limit = int(_ent.get("employee_limit") or 0)
+            _prompt_feature_context = f"import_entry:{_capacity_prompt.get('level', 'info')}"
+            log_upgrade_prompt_impression_once(
+                st.session_state,
+                event_key="import_capacity_prompt_entry",
+                prompt_location="import",
+                prompt_type="capacity",
+                current_plan=_prompt_plan,
+                employee_count=_prompt_employee_count,
+                employee_limit=_prompt_employee_limit,
+                feature_context=_prompt_feature_context,
+                tenant_id=tenant_id,
+                user_id=st.session_state.get("user_id", ""),
+                user_email=st.session_state.get("user_email", ""),
+            )
+            if _capacity_prompt.get("level") == "error":
+                st.warning(f"{_capacity_prompt['headline']} {_capacity_prompt['body']}")
+            else:
+                st.info(f"{_capacity_prompt['headline']} {_capacity_prompt['body']}")
+            st.caption("Plan details are available in Settings -> Billing.")
+            if st.button("View upgrade options", key="import_capacity_prompt_cta"):
+                log_upgrade_event(
+                    "upgrade_prompt_click",
+                    prompt_location="import",
+                    prompt_type="capacity",
+                    current_plan=_prompt_plan,
+                    employee_count=_prompt_employee_count,
+                    employee_limit=_prompt_employee_limit,
+                    feature_context=_prompt_feature_context,
+                    tenant_id=tenant_id,
+                    user_id=st.session_state.get("user_id", ""),
+                    user_email=st.session_state.get("user_email", ""),
+                )
+                st.session_state["goto_page"] = "settings"
+                st.rerun()
+    except Exception:
+        pass
 
     def _render_recent_uploads_panel():
         _recent_uploads = _list_recent_uploads(st.session_state.get("tenant_id", ""), days=7)
@@ -926,6 +985,36 @@ def _import_step1(tenant_id: str):
                 )
                 _limit = int(_limit_check.get("employee_limit", 0) or 0)
                 if not _limit_check.get("allowed", True) and _limit not in (-1, 0):
+                    _prompt_plan = str(_limit_check.get("plan") or "starter")
+                    _prompt_employee_count = int(_existing or 0)
+                    _prompt_feature_context = "import_file_limit_check"
+                    log_upgrade_prompt_impression_once(
+                        st.session_state,
+                        event_key=f"import_limit_prompt_pre_mapping:{_prompt_employee_count}:{len(_new_ids)}:{_limit}",
+                        prompt_location="import",
+                        prompt_type="capacity",
+                        current_plan=_prompt_plan,
+                        employee_count=_prompt_employee_count,
+                        employee_limit=_limit,
+                        feature_context=_prompt_feature_context,
+                        tenant_id=st.session_state.get("tenant_id", ""),
+                        user_id=st.session_state.get("user_id", ""),
+                        user_email=st.session_state.get("user_email", ""),
+                    )
+                    log_upgrade_event_once(
+                        st.session_state,
+                        "plan_limit_reached",
+                        event_key=f"import_plan_limit_reached_pre_mapping:{_prompt_employee_count}:{len(_new_ids)}:{_limit}",
+                        prompt_location="import",
+                        prompt_type="capacity",
+                        current_plan=_prompt_plan,
+                        employee_count=_prompt_employee_count,
+                        employee_limit=_limit,
+                        feature_context=_prompt_feature_context,
+                        tenant_id=st.session_state.get("tenant_id", ""),
+                        user_id=st.session_state.get("user_id", ""),
+                        user_email=st.session_state.get("user_email", ""),
+                    )
                     _slots_left = max(0, int(_limit_check.get("slots_left", 0) or 0))
                     _overflow_ids = _new_ids[_slots_left:]
                     _overflow_names = [
@@ -940,6 +1029,21 @@ def _import_step1(tenant_id: str):
                         st.caption("Employees over your limit:")
                         st.code("\n".join(_overflow_names))
                     st.info("Upgrade your plan in Settings → Billing or reduce the file employee list.")
+                    if st.button("View upgrade options", key="import_limit_block_pre_mapping_cta"):
+                        log_upgrade_event(
+                            "upgrade_prompt_click",
+                            prompt_location="import",
+                            prompt_type="capacity",
+                            current_plan=_prompt_plan,
+                            employee_count=_prompt_employee_count,
+                            employee_limit=_limit,
+                            feature_context=_prompt_feature_context,
+                            tenant_id=st.session_state.get("tenant_id", ""),
+                            user_id=st.session_state.get("user_id", ""),
+                            user_email=st.session_state.get("user_email", ""),
+                        )
+                        st.session_state["goto_page"] = "settings"
+                        st.rerun()
                     return
             except Exception:
                 pass
@@ -1423,6 +1527,7 @@ def _import_step3(tenant_id: str):
                     "missing_required_fields": _preview_result_obj.trust_summary.missing_required_fields,
                     "inconsistent_names": _preview_result_obj.trust_summary.inconsistent_names,
                     "suspicious_values": _preview_result_obj.trust_summary.suspicious_values,
+                    "warning_summary": _preview_result_obj.trust_summary.warning_summary,
                 }
                 _preview_row_issues = [
                     {
@@ -1740,6 +1845,35 @@ def _import_step3(tenant_id: str):
                 _el = int(_limit_check.get("employee_limit", 0) or 0)
                 if not _limit_check.get("allowed", True) and _el > 0:
                     _plan = str(_limit_check.get("plan") or "starter").lower()
+                    _prompt_employee_count = int(_existing or 0)
+                    _prompt_feature_context = "import_employee_sync_limit_check"
+                    log_upgrade_prompt_impression_once(
+                        st.session_state,
+                        event_key=f"import_limit_prompt_employee_sync:{_prompt_employee_count}:{_new_unique}:{_el}",
+                        prompt_location="import",
+                        prompt_type="capacity",
+                        current_plan=_plan,
+                        employee_count=_prompt_employee_count,
+                        employee_limit=_el,
+                        feature_context=_prompt_feature_context,
+                        tenant_id=st.session_state.get("tenant_id", ""),
+                        user_id=st.session_state.get("user_id", ""),
+                        user_email=st.session_state.get("user_email", ""),
+                    )
+                    log_upgrade_event_once(
+                        st.session_state,
+                        "plan_limit_reached",
+                        event_key=f"import_plan_limit_reached_employee_sync:{_prompt_employee_count}:{_new_unique}:{_el}",
+                        prompt_location="import",
+                        prompt_type="capacity",
+                        current_plan=_plan,
+                        employee_count=_prompt_employee_count,
+                        employee_limit=_el,
+                        feature_context=_prompt_feature_context,
+                        tenant_id=st.session_state.get("tenant_id", ""),
+                        user_id=st.session_state.get("user_id", ""),
+                        user_email=st.session_state.get("user_email", ""),
+                    )
                     _slots_left = max(0, int(_limit_check.get("slots_left", 0) or 0))
                     _sorted_new_ids = sorted(_new_ids)
                     _overflow_ids = _sorted_new_ids[_slots_left:]
@@ -1756,6 +1890,21 @@ def _import_step3(tenant_id: str):
                     if _overflow_names:
                         st.caption("Employees over your plan limit:")
                         st.code("\n".join(_overflow_names))
+                    if st.button("View upgrade options", key="import_limit_block_employee_sync_cta"):
+                        log_upgrade_event(
+                            "upgrade_prompt_click",
+                            prompt_location="import",
+                            prompt_type="capacity",
+                            current_plan=_plan,
+                            employee_count=_prompt_employee_count,
+                            employee_limit=_el,
+                            feature_context=_prompt_feature_context,
+                            tenant_id=st.session_state.get("tenant_id", ""),
+                            user_id=st.session_state.get("user_id", ""),
+                            user_email=st.session_state.get("user_email", ""),
+                        )
+                        st.session_state["goto_page"] = "settings"
+                        st.rerun()
                     return
             except Exception:
                 pass  # don't block import if limit check fails
@@ -2125,6 +2274,17 @@ def _import_step3(tenant_id: str):
                         inconsistent_names=int(name_fixed_count),
                         suspicious_values=int(uph_rejected_count + neg_value_fixed_count),
                         warnings=int(_quality_warning_count),
+                        warning_summary=build_import_warning_summary(
+                            issues=_preview_row_issues,
+                            trust={
+                                "warnings": int(_quality_warning_count),
+                                "duplicates": int(_dup_skipped),
+                                "rejected_rows": int(max(0, _candidate_count - len(uph_batch))),
+                                "missing_required_fields": int(_preview_missing_required),
+                                "inconsistent_names": int(name_fixed_count),
+                                "suspicious_values": int(uph_rejected_count + neg_value_fixed_count),
+                            },
+                        ),
                     )
                     _final_trust_summary = {
                         "status": str(_final_trust.status),
@@ -2136,6 +2296,7 @@ def _import_step3(tenant_id: str):
                         "missing_required_fields": int(_final_trust.missing_required_fields),
                         "inconsistent_names": int(_final_trust.inconsistent_names),
                         "suspicious_values": int(_final_trust.suspicious_values),
+                        "warning_summary": str(_final_trust.warning_summary or ""),
                     }
                     _profile_headers = []
                     for _sess in sessions:
@@ -2278,6 +2439,17 @@ def _import_step3(tenant_id: str):
                         "missing_required_fields": 0,
                         "inconsistent_names": int(name_fixed_count),
                         "suspicious_values": int(uph_rejected_count + neg_value_fixed_count),
+                        "warning_summary": build_import_warning_summary(
+                            issues=_preview_row_issues,
+                            trust={
+                                "warnings": 0,
+                                "duplicates": int(_dup_skipped),
+                                "rejected_rows": int(max(0, _candidate_count - len(uph_batch))),
+                                "missing_required_fields": 0,
+                                "inconsistent_names": int(name_fixed_count),
+                                "suspicious_values": int(uph_rejected_count + neg_value_fixed_count),
+                            },
+                        ),
                     }
                 _mark_import_stage_completed(
                     _import_job,

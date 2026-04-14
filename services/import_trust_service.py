@@ -9,6 +9,56 @@ def _clamp_score(value: int) -> int:
     return max(0, min(100, int(value)))
 
 
+def _issue_value(issue: ImportIssue | dict, field: str) -> object:
+    if isinstance(issue, dict):
+        return issue.get(field)
+    return getattr(issue, field, None)
+
+
+def build_import_warning_summary(
+    *,
+    issues: list[ImportIssue] | list[dict] | None = None,
+    trust: ImportTrustSummary | dict | None = None,
+) -> str:
+    """Build one plain-language warning sentence for preview/result surfaces.
+
+    Priority:
+    1. Date fallback warnings, because they silently substitute the selected work date.
+    2. Generic quality warning if the import contains other non-fatal issues.
+    3. Empty string for clean imports.
+    """
+    issue_list = list(issues or [])
+    fallback_date_count = sum(
+        1
+        for issue in issue_list
+        if str(_issue_value(issue, "code") or "").strip().lower() == "date_parse_fallback"
+    )
+    if fallback_date_count > 0:
+        if fallback_date_count == 1:
+            return "Some row dates could not be parsed and used the selected work date instead."
+        return "Some row dates could not be parsed and used the selected work date instead."
+
+    trust_obj = trust or {}
+    if isinstance(trust_obj, dict):
+        warnings = int(trust_obj.get("warnings", 0) or 0)
+        duplicates = int(trust_obj.get("duplicates", 0) or 0)
+        rejected = int(trust_obj.get("rejected_rows", 0) or 0)
+        missing = int(trust_obj.get("missing_required_fields", 0) or 0)
+        inconsistent = int(trust_obj.get("inconsistent_names", 0) or 0)
+        suspicious = int(trust_obj.get("suspicious_values", 0) or 0)
+    else:
+        warnings = int(getattr(trust_obj, "warnings", 0) or 0)
+        duplicates = int(getattr(trust_obj, "duplicates", 0) or 0)
+        rejected = int(getattr(trust_obj, "rejected_rows", 0) or 0)
+        missing = int(getattr(trust_obj, "missing_required_fields", 0) or 0)
+        inconsistent = int(getattr(trust_obj, "inconsistent_names", 0) or 0)
+        suspicious = int(getattr(trust_obj, "suspicious_values", 0) or 0)
+
+    if any(value > 0 for value in (warnings, duplicates, rejected, missing, inconsistent, suspicious)):
+        return "Import completed with data quality warnings."
+    return ""
+
+
 def classify_data_quality_status(
     *,
     accepted_rows: int,
@@ -54,6 +104,7 @@ def build_import_trust_summary(
     suspicious_values: int = 0,
     warnings: int = 0,
     extra_rejected_rows: int = 0,
+    warning_summary: str = "",
 ) -> ImportTrustSummary:
     accepted = max(0, int(accepted_rows))
     total = max(0, int(total_rows))
@@ -95,6 +146,7 @@ def build_import_trust_summary(
         inconsistent_names=inconsistent,
         suspicious_values=suspicious,
         confidence_score=_clamp_score(score),
+        warning_summary=str(warning_summary or ""),
     )
 
 
@@ -121,7 +173,7 @@ def trust_summary_from_issues(
         if issue.code in {"invalid_uph", "negative_units", "negative_hours"}
     )
 
-    return build_import_trust_summary(
+    trust = build_import_trust_summary(
         total_rows=total_rows,
         accepted_rows=accepted_rows,
         duplicates=duplicates,
@@ -130,4 +182,8 @@ def trust_summary_from_issues(
         suspicious_values=suspicious_values + suspicious_by_issue,
         warnings=warnings,
         extra_rejected_rows=errors,
+        warning_summary=build_import_warning_summary(issues=issues),
     )
+    if not trust.warning_summary:
+        trust.warning_summary = build_import_warning_summary(issues=issues, trust=trust)
+    return trust

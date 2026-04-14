@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import date
 import re
@@ -10,6 +11,7 @@ from typing import Any
 from domain.display_signal import DisplaySignal, SignalLabel
 from domain.insight_card_contract import InsightCardContract
 from services.attention_scoring_service import AttentionSummary
+from services.decision_engine_service import DecisionItem
 from services.display_signal_factory import build_display_signal_from_attention_item, build_display_signal_from_insight_card
 from services.plain_language_service import signal_wording
 from services.signal_formatting_service import (
@@ -45,6 +47,8 @@ class TodayQueueCardViewModel:
     line_4: str
     line_5: str
     expanded_lines: list[str]
+    normalized_action_state: str = ""
+    normalized_action_state_detail: str = ""
     freshness_line: str = ""
     collapsed_hint: str = ""
     collapsed_evidence: str = ""
@@ -52,6 +56,10 @@ class TodayQueueCardViewModel:
     signal_key: str = ""
     repeat_count: int = 0
     repeat_window_label: str = ""
+    # Last manager action date label, e.g. "Last action: 5 days ago".
+    # Derived from last_event_at on the open action (falls back to created_at).
+    # Empty string when no action data is available for this employee.
+    last_action_date_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -75,6 +83,16 @@ class TodayValueStripViewModel:
 
 
 @dataclass(frozen=True)
+class TodayWeeklySummaryItemViewModel:
+    headline: str
+
+
+@dataclass(frozen=True)
+class TodayWeeklySummaryViewModel:
+    items: list[TodayWeeklySummaryItemViewModel]
+
+
+@dataclass(frozen=True)
 class _RankedCard:
     card: TodayQueueCardViewModel
     bucket_rank: int
@@ -88,6 +106,28 @@ class _RankedCard:
 
 _ATTENTION_STATES = {"EARLY_TREND", "STABLE_TREND", "PATTERN"}
 _REVIEWABLE_STATES = {"CURRENT", *list(_ATTENTION_STATES)}
+
+
+def _days_ago_label(iso_date: str, today: date) -> str:
+    """Return a compact relative-date string, e.g. 'Last action: 5 days ago'.
+
+    Returns an empty string when the date is unparseable or in the future.
+    Uses 'today' for same-day actions so the label is unambiguous.
+    """
+    if not str(iso_date or "").strip():
+        return ""
+    try:
+        action_date = date.fromisoformat(str(iso_date).strip()[:10])
+        delta = (today - action_date).days
+        if delta < 0:
+            return ""
+        if delta == 0:
+            return "Last action: today"
+        if delta == 1:
+            return "Last action: 1 day ago"
+        return f"Last action: {delta} days ago"
+    except Exception:
+        return ""
 
 
 def _safe_float(value: Any) -> float | None:
@@ -423,7 +463,7 @@ def _attention_context_lines(item: Any, signal: DisplaySignal, max_lines: int = 
         signal_wording("lower_than_recent_pace").lower(),
         signal_wording("below_expected_pace").lower(),
     }:
-        lines.append("Trend has declined across recent days")
+        lines.append("Performance has declined compared to recent baseline")
     elif label == signal_wording("inconsistent_performance").lower():
         lines.append("Recent pace has varied day to day")
     elif label == signal_wording("improving_pace").lower():
@@ -495,30 +535,32 @@ def _collapsed_evidence_line(item: Any, signal: DisplaySignal) -> str:
 
 def _ranking_hint(item: Any, signal: DisplaySignal) -> str:
     factor_keys = {str(f.key or "") for f in list(getattr(item, "factors_applied", []) or [])}
-    reasons: list[str] = []
+    flags = dict(signal.flags or {})
 
-    if factor_keys.intersection({"trend_declining", "trend_below_expected", "trend_inconsistent"}):
-        reasons.append("recent drop")
-    if factor_keys.intersection({"repeat_1", "repeat_2", "repeat_3_or_more"}):
-        reasons.append("repeat pattern")
-    if factor_keys.intersection({"overdue_followup", "due_today_followup"}) or bool((signal.flags or {}).get("overdue")) or bool((signal.flags or {}).get("due_today")):
-        reasons.append("follow-up status")
+    # Show one strongest reason only so the collapsed hint stays concise.
+    if factor_keys.intersection({"overdue_followup", "due_today_followup"}) or bool(flags.get("overdue")) or bool(flags.get("due_today")):
+        return "Follow-up still open"
     if "open_exception" in factor_keys:
-        reasons.append("active issue")
+        return "Active operational issue"
+    if factor_keys.intersection({"repeat_1", "repeat_2", "repeat_3_or_more"}):
+        return ""
+    if "trend_below_expected" in factor_keys:
+        return "Below expected range vs peers"
+    if factor_keys.intersection({"trend_declining", "trend_inconsistent"}):
+        return "Declining vs recent baseline"
 
-    if not reasons:
-        label = str(format_signal_label(signal) or "").strip().lower()
-        if label:
-            reasons.append(label)
-
-    if len(reasons) >= 2:
-        return "Flagged due to multiple signal factors."
-    if reasons:
-        if reasons[0] == "follow-up status":
-            return "Flagged due to follow-up status."
-        if reasons[0] == "active issue":
-            return "Flagged due to an active issue."
-        return "Flagged due to a current signal pattern."
+    label = str(format_signal_label(signal) or "").strip().lower()
+    if label == signal_wording("below_expected_pace").lower():
+        return "Below expected range vs peers"
+    if label in {
+        signal_wording("lower_than_recent_pace").lower(),
+        signal_wording("inconsistent_performance").lower(),
+    }:
+        return "Declining vs recent baseline"
+    if label == "repeated pattern":
+        return ""
+    if label == signal_wording("follow_up_not_completed").lower():
+        return "Follow-up still open"
     return ""
 
 
@@ -715,7 +757,7 @@ def _why_surfaced_line(source: Any, signal: DisplaySignal) -> str:
         signal_wording("lower_than_recent_pace").lower(),
         signal_wording("below_expected_pace").lower(),
     }:
-        base = "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available)."
+        base = "Below recent baseline vs comparable days."
         scope_label = _source_scope_label(source)
         return f"{base} Scope: {scope_label}." if scope_label else base
     if label == signal_wording("inconsistent_performance").lower():
@@ -923,6 +965,8 @@ def _merge_ranked_cards(preferred: _RankedCard, incoming: _RankedCard) -> _Ranke
             line_4=preferred.card.line_4,
             line_5=preferred.card.line_5,
             expanded_lines=merged_lines,
+            normalized_action_state=preferred.card.normalized_action_state or incoming.card.normalized_action_state,
+            normalized_action_state_detail=preferred.card.normalized_action_state_detail or incoming.card.normalized_action_state_detail,
             freshness_line=preferred.card.freshness_line or incoming.card.freshness_line,
             collapsed_hint=preferred.card.collapsed_hint or incoming.card.collapsed_hint,
             collapsed_evidence=preferred.card.collapsed_evidence or incoming.card.collapsed_evidence,
@@ -930,6 +974,7 @@ def _merge_ranked_cards(preferred: _RankedCard, incoming: _RankedCard) -> _Ranke
             signal_key=preferred.card.signal_key or incoming.card.signal_key,
             repeat_count=max(int(preferred.card.repeat_count or 0), int(incoming.card.repeat_count or 0)),
             repeat_window_label=preferred.card.repeat_window_label or incoming.card.repeat_window_label,
+            last_action_date_label=preferred.card.last_action_date_label or incoming.card.last_action_date_label,
         ),
         bucket_rank=preferred.bucket_rank,
         status_rank=preferred.status_rank,
@@ -1121,7 +1166,7 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
         expanded = [
             line
             for line in list(expanded or [])
-            if "trend has declined across recent days" not in str(line).lower()
+            if "performance has declined compared to recent baseline" not in str(line).lower()
         ]
 
     if line_2.strip().lower() == "seen multiple times":
@@ -1228,7 +1273,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
         expanded = [
             line
             for line in list(expanded or [])
-            if "trend has declined across recent days" not in str(line).lower()
+            if "performance has declined compared to recent baseline" not in str(line).lower()
         ]
 
     if line_2.strip().lower() == "seen multiple times":
@@ -1255,25 +1300,84 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
     )
 
 
-def build_today_queue_card_from_insight_card(*, card: InsightCardContract, today: date) -> TodayQueueCardViewModel | None:
+def enrich_today_queue_card_action_context(
+    *,
+    card: TodayQueueCardViewModel,
+    today: date,
+    last_action_lookup: dict[str, str] | None = None,
+    action_state_lookup: dict[str, dict[str, Any]] | None = None,
+) -> TodayQueueCardViewModel:
+    employee_id = str(card.employee_id or "").strip()
+    updates: dict[str, Any] = {}
+
+    if employee_id and last_action_lookup and str(last_action_lookup.get(employee_id) or "").strip():
+        label = _days_ago_label(str(last_action_lookup[employee_id]), today)
+        if label:
+            updates["last_action_date_label"] = label
+
+    if employee_id and action_state_lookup:
+        state_payload = dict(action_state_lookup.get(employee_id) or {})
+        state_value = str(state_payload.get("state") or "").strip()
+        if state_value:
+            updates["normalized_action_state"] = state_value
+            updates["normalized_action_state_detail"] = str(state_payload.get("state_detail") or "").strip()
+
+    if not updates:
+        return card
+    return dataclasses.replace(card, **updates)
+
+
+def build_today_queue_card_from_insight_card(
+    *,
+    card: InsightCardContract,
+    today: date,
+    last_action_lookup: dict[str, str] | None = None,
+    action_state_lookup: dict[str, dict[str, Any]] | None = None,
+) -> TodayQueueCardViewModel | None:
     """Public thin adapter so legacy renderers can consume normalized card semantics."""
     signal = build_display_signal_from_insight_card(card=card, today=today)
     if not is_display_signal_eligible(signal, allow_low_data_case=False):
         return None
-    return _card_from_insight_card(card, signal)
+    return enrich_today_queue_card_action_context(
+        card=_card_from_insight_card(card, signal),
+        today=today,
+        last_action_lookup=last_action_lookup,
+        action_state_lookup=action_state_lookup,
+    )
 
 
 def build_today_queue_view_model(
     attention: AttentionSummary,
     *,
+    decision_items: list[DecisionItem] | None = None,
     suppressed_cards: list[InsightCardContract] | None = None,
     today: date,
+    last_action_lookup: dict[str, str] | None = None,
+    action_state_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> TodayQueueViewModel:
+    # last_action_lookup: {employee_id: iso_date_str} where the date is the
+    # most recent last_event_at (or created_at fallback) from open action queue
+    # items.  Absent entries mean no action data exists for that employee.
     primary_ranked: list[_RankedCard] = []
     secondary_ranked: list[_RankedCard] = []
     suppressed: list[SuppressedSignalViewModel] = []
 
-    for item in list(attention.ranked_items or []):
+    ranked_sources: list[tuple[Any, DisplaySignal, TodayQueueCardViewModel]] = []
+    if decision_items:
+        for decision in list(decision_items or []):
+            item = decision.to_attention_item()
+            signal = build_display_signal_from_attention_item(item=item, today=today)
+            card_vm = _card_from_pair(item, signal)
+            confidence_basis = str(decision.confidence_basis or "").strip()
+            expanded_lines = _merge_lines([decision.primary_reason, confidence_basis], list(card_vm.expanded_lines or []), max_lines=3)
+            card_vm = dataclasses.replace(card_vm, expanded_lines=expanded_lines)
+            ranked_sources.append((item, signal, card_vm))
+    else:
+        for item in list(attention.ranked_items or []):
+            signal = build_display_signal_from_attention_item(item=item, today=today)
+            ranked_sources.append((item, signal, _card_from_pair(item, signal)))
+
+    for item, signal, base_card in ranked_sources:
         signal = build_display_signal_from_attention_item(item=item, today=today)
         eligible_primary = is_display_signal_eligible(
             signal,
@@ -1297,7 +1401,12 @@ def build_today_queue_view_model(
             )
             continue
 
-        card_vm = _card_from_pair(item, signal)
+        card_vm = enrich_today_queue_card_action_context(
+            card=base_card,
+            today=today,
+            last_action_lookup=last_action_lookup,
+            action_state_lookup=action_state_lookup,
+        )
         ranked = _RankedCard(
             card=card_vm,
             bucket_rank=_bucket_rank(item, signal),
@@ -1319,7 +1428,12 @@ def build_today_queue_view_model(
         signal = build_display_signal_from_insight_card(card=card, today=today)
         if not is_display_signal_eligible(signal, allow_low_data_case=True):
             continue
-        card_vm = _card_from_insight_card(card, signal)
+        card_vm = enrich_today_queue_card_action_context(
+            card=_card_from_insight_card(card, signal),
+            today=today,
+            last_action_lookup=last_action_lookup,
+            action_state_lookup=action_state_lookup,
+        )
         secondary_ranked.append(
             _RankedCard(
                 card=card_vm,
@@ -1357,3 +1471,109 @@ def build_today_queue_view_model(
         secondary_cards=secondary_cards,
         suppressed=suppressed,
     )
+
+
+# ---------------------------------------------------------------------------
+# Attention summary strip view model
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TodayAttentionStripViewModel:
+    """Compact top-of-queue counts for the Today attention summary strip.
+
+    Fields
+    ------
+    total_needing_attention
+        Count of attention items that passed the display threshold (non-suppressed).
+        Derived from ``AttentionSummary.ranked_items`` so it matches the queue exactly.
+    new_today
+        Count of queue action items whose ``created_at`` date equals *today*.
+        Approximation: reflects newly-opened actions, not every newly-fired signal.
+        Signals whose underlying action predates today are not counted here.
+    overdue_follow_ups
+        Count of queue items with ``_queue_status == "overdue"``.
+        Derived from the same ``queue_items`` list the queue renders.
+    reviewed_today
+        Count of items resolved or reviewed today.  Set to ``None`` when this
+        information is not available from the precomputed payload.
+    """
+
+    total_needing_attention: int
+    new_today: int
+    overdue_follow_ups: int
+    reviewed_today: int | None
+
+
+def build_today_attention_strip(
+    *,
+    attention: AttentionSummary,
+    queue_items: list[dict[str, Any]],
+    today: date,
+) -> TodayAttentionStripViewModel:
+    """Derive the attention summary strip values from already-computed data.
+
+    Does not query any service or database; all inputs must be pre-loaded by
+    the caller (typically from the precomputed Today payload).
+    """
+    total = len(list(attention.ranked_items or []))
+
+    overdue = 0
+    new_today = 0
+    today_iso = today.isoformat()
+
+    for item in list(queue_items or []):
+        if str(item.get("_queue_status") or "") == "overdue":
+            overdue += 1
+        # new_today: action was first created on today's date.
+        # Approximation — actions opened before today whose signal fires fresh
+        # are not counted; only truly new actions are.
+        raw_created = str(item.get("created_at") or "").strip()
+        if raw_created and raw_created[:10] == today_iso:
+            new_today += 1
+
+    return TodayAttentionStripViewModel(
+        total_needing_attention=total,
+        new_today=new_today,
+        overdue_follow_ups=overdue,
+        # Not available from precomputed payload — omitted to avoid false precision.
+        reviewed_today=None,
+    )
+
+
+def build_today_weekly_summary_view_model(
+    *,
+    reviewed_issues: int,
+    follow_up_touchpoints: int,
+    closed_issues: int,
+    improved_outcomes: int,
+) -> TodayWeeklySummaryViewModel:
+    """Build a compact weekly impact summary for the Today page.
+
+    Only includes metrics backed by existing action/signal event logs.
+    Zero-value items are omitted to keep the block quiet when no weekly
+    activity has been recorded.
+    """
+    items: list[TodayWeeklySummaryItemViewModel] = []
+
+    if int(reviewed_issues or 0) > 0:
+        count = int(reviewed_issues)
+        noun = "issue" if count == 1 else "issues"
+        items.append(TodayWeeklySummaryItemViewModel(headline=f"{count} {noun} reviewed this week"))
+
+    if int(follow_up_touchpoints or 0) > 0:
+        count = int(follow_up_touchpoints)
+        noun = "touchpoint" if count == 1 else "touchpoints"
+        items.append(TodayWeeklySummaryItemViewModel(headline=f"{count} follow-up {noun} logged this week"))
+
+    if int(closed_issues or 0) > 0:
+        count = int(closed_issues)
+        noun = "issue" if count == 1 else "issues"
+        items.append(TodayWeeklySummaryItemViewModel(headline=f"{count} {noun} closed this week"))
+
+    if int(improved_outcomes or 0) > 0:
+        count = int(improved_outcomes)
+        noun = "outcome" if count == 1 else "outcomes"
+        items.append(TodayWeeklySummaryItemViewModel(headline=f"{count} improved {noun} logged this week"))
+
+    return TodayWeeklySummaryViewModel(items=items)

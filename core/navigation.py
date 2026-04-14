@@ -12,6 +12,8 @@ def plan_gate(min_plan: str, feature_name: str) -> bool:
 from core.billing_cache import BILLING_CACHE_TTL_SECONDS
 from core.dependencies import bust_cache, full_sign_out, render_sign_out_button
 from core.runtime import _html_mod, datetime, st, time
+from services.upgrade_telemetry_service import log_upgrade_event, log_upgrade_event_once, log_upgrade_prompt_impression_once
+from services.upgrade_prompt_service import build_plan_usage_indicator
 
 
 def _get_entitlement_cached(ttl_seconds: int = BILLING_CACHE_TTL_SECONDS) -> dict:
@@ -39,12 +41,11 @@ def render_subscription_banner() -> None:
     if not entitlement:
         return
 
-    plan = str(entitlement.get("plan") or "").lower()
+    indicator = build_plan_usage_indicator(entitlement)
+    plan = str(indicator.get("plan") or "")
     status = str(entitlement.get("status") or "")
     period_end = str(entitlement.get("current_period_end") or "")
     cancel_at = bool(entitlement.get("cancel_at_period_end"))
-    emp_count = int(entitlement.get("employee_count") or 0)
-    emp_limit = int(entitlement.get("employee_limit") or 0)
     pending_plan = str(entitlement.get("pending_plan") or "").strip().lower()
     pending_change_at = str(entitlement.get("pending_change_at") or "").strip()
 
@@ -61,7 +62,16 @@ def render_subscription_banner() -> None:
 
     plan_colors = {"starter": "#6b7280", "pro": "#2563eb", "business": "#7c3aed"}
     color = plan_colors.get(plan, "#6b7280")
-    emp_str = f"{emp_count} / Unlimited" if emp_limit == -1 else f"{emp_count} / {emp_limit}"
+    _emp_count = int(indicator.get("employee_count") or 0)
+    _emp_limit = int(indicator.get("employee_limit") or 0)
+    _usage_percent = indicator.get("usage_percent")
+    _unlimited = bool(indicator.get("unlimited"))
+    if _unlimited:
+        emp_str = f"{_emp_count} tracked · unlimited seats"
+    elif _usage_percent is None:
+        emp_str = f"{_emp_count} / {_emp_limit} employees"
+    else:
+        emp_str = f"{_emp_count} / {_emp_limit} employees ({_usage_percent}% used)"
 
     if status == "past_due":
         bg = "#fef2f2"
@@ -84,7 +94,7 @@ def render_subscription_banner() -> None:
         date_label = ""
         date_style = ""
 
-    plan_part = f'<span style="font-weight:700;color:{color};font-size:13px;">Plan: {plan.capitalize()}</span>'
+    plan_part = f'<span style="font-weight:700;color:{color};font-size:13px;">Plan: {indicator.get("plan_label", plan.capitalize())}</span>'
     date_part = f'<span style="{date_style};font-size:13px;">{date_label}</span>' if date_label else ""
     emp_part = f'<span style="color:#374151;font-size:13px;">{emp_str} employees</span>'
     pending_part = ""
@@ -109,6 +119,52 @@ def render_subscription_banner() -> None:
         + "</div>",
         unsafe_allow_html=True,
     )
+
+    if not _unlimited and indicator.get("pressure") in ("near_limit", "at_limit"):
+        _prompt_feature_context = f"plan_usage:{indicator.get('pressure')}"
+        log_upgrade_prompt_impression_once(
+            st.session_state,
+            event_key=f"header_plan_usage_prompt:{indicator.get('pressure')}:{_emp_count}:{_emp_limit}",
+            prompt_location="header",
+            prompt_type="capacity",
+            current_plan=plan,
+            employee_count=_emp_count,
+            employee_limit=_emp_limit,
+            feature_context=_prompt_feature_context,
+            tenant_id=st.session_state.get("tenant_id", ""),
+            user_id=st.session_state.get("user_id", ""),
+            user_email=st.session_state.get("user_email", ""),
+        )
+        if indicator.get("pressure") == "at_limit":
+            log_upgrade_event_once(
+                st.session_state,
+                "plan_limit_reached",
+                event_key=f"header_plan_limit_reached:{_emp_count}:{_emp_limit}",
+                prompt_location="header",
+                prompt_type="capacity",
+                current_plan=plan,
+                employee_count=_emp_count,
+                employee_limit=_emp_limit,
+                feature_context=_prompt_feature_context,
+                tenant_id=st.session_state.get("tenant_id", ""),
+                user_id=st.session_state.get("user_id", ""),
+                user_email=st.session_state.get("user_email", ""),
+            )
+        if st.button("Review plan options", key="header_plan_usage_upgrade_prompt_cta"):
+            log_upgrade_event(
+                "upgrade_prompt_click",
+                prompt_location="header",
+                prompt_type="capacity",
+                current_plan=plan,
+                employee_count=_emp_count,
+                employee_limit=_emp_limit,
+                feature_context=_prompt_feature_context,
+                tenant_id=st.session_state.get("tenant_id", ""),
+                user_id=st.session_state.get("user_id", ""),
+                user_email=st.session_state.get("user_email", ""),
+            )
+            st.session_state["goto_page"] = "settings"
+            st.rerun()
 
 
 def render_app_navigation() -> str:

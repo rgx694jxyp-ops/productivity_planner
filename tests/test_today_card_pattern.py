@@ -52,9 +52,8 @@ def test_today_card_pattern_performance_signal(monkeypatch):
 
     assert card.line_1 == "Alex · Receiving"
     assert card.line_2 == "Below expected pace"
-    assert card.line_3 == "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available)."
+    assert card.line_3 == "Below recent baseline vs comparable days."
     assert card.line_4 == "Latest snapshot only"
-    assert card.line_5 == "Confidence: High"
 
 
 def test_today_card_pattern_follow_up_signal(monkeypatch):
@@ -180,7 +179,7 @@ def test_today_card_trend_lines_use_canonical_short_window_and_no_repeated_meani
     card = vm.secondary_cards[0]
 
     assert card.line_2 == "Lower than recent pace"
-    assert card.line_3 == "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available)."
+    assert card.line_3 == "Below recent baseline vs comparable days."
     assert card.line_4 == "Latest snapshot only"
     assert card.line_5 == "Confidence: Low"
     assert card.expanded_lines == ["Watch for continued drift"]
@@ -210,7 +209,7 @@ def test_today_card_pattern_shows_one_repeat_support_line_without_overriding_tre
     card = vm.secondary_cards[0]
 
     assert card.line_2 == "Lower than recent pace"
-    assert card.line_3 == "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available)."
+    assert card.line_3 == "Below recent baseline vs comparable days."
     assert card.line_4 == "Latest snapshot only"
     assert card.expanded_lines == ["Repeated 3 times this week"]
 
@@ -252,7 +251,7 @@ def test_today_card_pattern_adds_repeat_evidence_when_snapshot_history_repeats(m
     vm = build_today_queue_view_model(attention=_summary(repeated_item), suppressed_cards=[], today=date(2026, 4, 11))
     card = vm.primary_cards[0]
 
-    assert card.line_3 == "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available)."
+    assert card.line_3 == "Below recent baseline vs comparable days."
     assert "Seen 3 times in the last 5 snapshots" in card.line_4
     assert card.repeat_count == 3
     assert card.repeat_window_label == "last 5 snapshots"
@@ -337,7 +336,7 @@ def test_today_card_expanded_lines_include_source_and_exception_context(monkeypa
     joined = " | ".join(card.expanded_lines).lower()
     assert "source:" in joined
     assert "open operational exception remains unresolved" in joined
-    assert card.collapsed_hint.startswith("Flagged due to")
+    assert card.collapsed_hint == "Active operational issue"
     assert card.collapsed_evidence.startswith("Source: ")
     assert card.collapsed_issue == "Active issue linked"
 
@@ -363,7 +362,7 @@ def test_today_card_contract_non_prescriptive_and_required_fields(monkeypatch):
 
     assert " · " in card.line_1
     assert card.line_2
-    assert card.line_3.startswith("Surfaced because")
+    assert card.line_3
     assert card.line_5.lower().startswith("confidence") or card.line_5.lower() == "low confidence"
     assert str(card.freshness_line or "").startswith("Freshness:")
     assert card.line_4 in {"Latest snapshot only"} or card.line_4.startswith("Based on")

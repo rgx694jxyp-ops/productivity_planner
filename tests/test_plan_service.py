@@ -25,6 +25,20 @@ def test_evaluate_employee_limit_disallows_over_plan_limit(monkeypatch):
     assert result["projected_total"] == 26
 
 
+def test_evaluate_employee_limit_allows_exact_plan_limit(monkeypatch):
+    monkeypatch.setattr(
+        plan_service,
+        "get_subscription_entitlement",
+        lambda tenant_id: {"plan": "starter", "employee_limit": 25, "has_access": True},
+    )
+
+    result = plan_service.evaluate_employee_limit("tenant-1", current_count=24, additional_count=1)
+
+    assert result["allowed"] is True
+    assert result["employee_limit"] == 25
+    assert result["projected_total"] == 25
+
+
 def test_enforce_invite_limit_raises_with_clear_message(monkeypatch):
     monkeypatch.setattr(
         plan_service,

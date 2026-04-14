@@ -277,3 +277,120 @@ def test_cross_bucket_duplicate_is_merged_into_primary(monkeypatch):
     assert vm.primary_cards[0].employee_id == "E10"
     assert len(vm.secondary_cards) == 0
     assert any(line.startswith("Additional signal: ") for line in vm.primary_cards[0].expanded_lines)
+
+
+def test_card_shows_recent_last_action_date_when_lookup_present(monkeypatch):
+    coached = _item(employee_id="E9", score=80)
+
+    signals = {
+        "E9": DisplaySignal(
+            employee_name="E9",
+            process="Receiving",
+            signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+            observed_date=date(2026, 4, 13),
+            observed_value=31.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.HIGH,
+            data_completeness=None,
+            flags={},
+        )
+    }
+
+    monkeypatch.setattr(
+        "services.today_view_model_service.build_display_signal_from_attention_item",
+        lambda item, today: signals[str(item.employee_id)],
+    )
+
+    vm = build_today_queue_view_model(
+        attention=_summary([coached]),
+        suppressed_cards=[],
+        today=date(2026, 4, 13),
+        last_action_lookup={"E9": "2026-04-11"},
+    )
+
+    assert vm.primary_cards[0].last_action_date_label == "Last action: 2 days ago"
+
+
+def test_card_hides_last_action_date_when_lookup_missing(monkeypatch):
+    no_history = _item(employee_id="E12", score=80)
+
+    signals = {
+        "E12": DisplaySignal(
+            employee_name="E12",
+            process="Receiving",
+            signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+            observed_date=date(2026, 4, 13),
+            observed_value=31.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.HIGH,
+            data_completeness=None,
+            flags={},
+        )
+    }
+
+    monkeypatch.setattr(
+        "services.today_view_model_service.build_display_signal_from_attention_item",
+        lambda item, today: signals[str(item.employee_id)],
+    )
+
+    vm = build_today_queue_view_model(
+        attention=_summary([no_history]),
+        suppressed_cards=[],
+        today=date(2026, 4, 13),
+        last_action_lookup={},
+    )
+
+    assert vm.primary_cards[0].last_action_date_label == ""
+
+
+def test_merged_duplicate_cards_preserve_last_action_label(monkeypatch):
+    first = _item(employee_id="E13", score=85)
+    second = _item(employee_id="E13", score=80)
+
+    signals = {
+        85: DisplaySignal(
+            employee_name="E13",
+            process="Receiving",
+            signal_label=SignalLabel.BELOW_EXPECTED_PACE,
+            observed_date=date(2026, 4, 13),
+            observed_value=31.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.HIGH,
+            data_completeness=None,
+            flags={},
+        ),
+        80: DisplaySignal(
+            employee_name="E13",
+            process="Receiving",
+            signal_label=SignalLabel.INCONSISTENT_PACE,
+            observed_date=date(2026, 4, 13),
+            observed_value=31.0,
+            comparison_start_date=date(2026, 4, 6),
+            comparison_end_date=date(2026, 4, 10),
+            comparison_value=40.0,
+            confidence=SignalConfidence.HIGH,
+            data_completeness=None,
+            flags={},
+        ),
+    }
+
+    monkeypatch.setattr(
+        "services.today_view_model_service.build_display_signal_from_attention_item",
+        lambda item, today: signals[int(item.attention_score)],
+    )
+
+    vm = build_today_queue_view_model(
+        attention=_summary([first, second]),
+        suppressed_cards=[],
+        today=date(2026, 4, 13),
+        last_action_lookup={"E13": "2026-04-10"},
+    )
+
+    assert len(vm.primary_cards) == 1
+    assert vm.primary_cards[0].last_action_date_label == "Last action: 3 days ago"

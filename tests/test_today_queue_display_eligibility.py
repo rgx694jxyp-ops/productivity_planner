@@ -1,9 +1,10 @@
 from datetime import date
+from pathlib import Path
 
 from domain.display_signal import DisplaySignal, DisplaySignalState, SignalConfidence, SignalLabel
 from services.attention_scoring_service import AttentionItem, AttentionSummary
+from services.today_queue_service import build_action_queue
 from services.today_view_model_service import build_today_queue_view_model, build_today_value_strip_view_model
-from ui.today_queue import build_action_queue
 
 
 def _attention_item(*, employee_id: str, tier: str = "high") -> AttentionItem:
@@ -210,6 +211,52 @@ def test_build_action_queue_routes_low_confidence_to_secondary_bucket():
 
     assert len(queue_items) == 1
     assert queue_items[0]["_display_bucket"] == "secondary"
+
+
+def test_legacy_ui_queue_wrapper_delegates_to_canonical_service(monkeypatch):
+    captured = {}
+
+    def _fake_build_action_queue(**kwargs):
+        captured.update(kwargs)
+        return [{"id": "A9", "_display_bucket": "primary"}]
+
+    monkeypatch.setattr("ui.today_queue.build_action_queue_service", _fake_build_action_queue)
+
+    from ui.today_queue import build_action_queue as build_action_queue_legacy
+
+    result = build_action_queue_legacy(
+        open_actions=[{"id": "A9"}],
+        repeat_offenders=[{"employee_id": "E9"}],
+        recognition_opportunities=[{"action_id": "A9"}],
+        tenant_id="tenant-test",
+        today=date(2026, 4, 11),
+    )
+
+    assert result == [{"id": "A9", "_display_bucket": "primary"}]
+    assert captured["open_actions"] == [{"id": "A9"}]
+    assert captured["repeat_offenders"] == [{"employee_id": "E9"}]
+    assert captured["recognition_opportunities"] == [{"action_id": "A9"}]
+    assert captured["tenant_id"] == "tenant-test"
+
+
+def test_legacy_ui_queue_module_does_not_redefine_canonical_queue_helpers():
+    source = Path("ui/today_queue.py").read_text()
+
+    banned_defs = [
+        "def _queue_status(",
+        "def _short_reason(",
+        "def _good_looks_like(",
+        "def _build_repeat_lookup(",
+        "def _build_recognition_lookup(",
+        "def _why_this_is_here(",
+        "def _surfaced_factors(",
+        "def _is_queue_item_display_eligible(",
+        "def _display_bucket(",
+        "def _sort_key(",
+    ]
+
+    for marker in banned_defs:
+        assert marker not in source, f"Legacy ui/today_queue.py reintroduced duplicate helper: {marker}"
 
 
 def test_today_value_strip_prefers_existing_goal_status_and_import_summary_data():

@@ -48,8 +48,11 @@ def parse_sessions_to_rows(sessions: list[dict], fallback_date: date) -> list[di
 
         for idx, row in enumerate(rows, start=1):
             work_date = fallback_date_str
+            used_fallback_date = False
+            raw_date_value = ""
             if date_col:
-                raw_date = _safe_str(row.get(date_col, ""))[:10]
+                raw_date_value = _safe_str(row.get(date_col, ""))
+                raw_date = raw_date_value[:10]
                 if raw_date:
                     cached_date = date_parse_cache.get(raw_date)
                     if cached_date is None:
@@ -61,6 +64,10 @@ def parse_sessions_to_rows(sessions: list[dict], fallback_date: date) -> list[di
                         date_parse_cache[raw_date] = cached_date
                     if cached_date:
                         work_date = cached_date
+                    else:
+                        used_fallback_date = True
+                else:
+                    used_fallback_date = True
 
             out.append(
                 {
@@ -73,6 +80,8 @@ def parse_sessions_to_rows(sessions: list[dict], fallback_date: date) -> list[di
                     "units": _safe_float(row.get(units_col)),
                     "hours_worked": _safe_float(row.get(hours_col)),
                     "uph": _safe_float(row.get(uph_col)),
+                    "_used_fallback_date": used_fallback_date,
+                    "_raw_date_value": raw_date_value,
                 }
             )
 

@@ -5,11 +5,98 @@ Responsible for KPI/statistics rollups and outcome summaries.
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from domain.actions import OPEN_STATUSES, runtime_status
 from repositories import action_events_repo, actions_repo
+
+
+_TODAY_SIGNAL_STATUS_EVENT_TYPE = "today_signal_status_set"
+_TODAY_SIGNAL_STATUS_SCOPE = "today_queue_signal_status"
+_TODAY_SIGNAL_STATUS_LOOKED_AT = "looked_at"
+
+
+def _parse_today_signal_status(details: Any) -> tuple[str, str]:
+    raw = str(details or "").strip()
+    if not raw:
+        return "", ""
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return "", ""
+    if not isinstance(payload, dict):
+        return "", ""
+    if str(payload.get("scope") or "") != _TODAY_SIGNAL_STATUS_SCOPE:
+        return "", ""
+    signal_key = str(payload.get("signal_key") or "").strip()
+    signal_status = str(payload.get("signal_status") or "").strip().lower()
+    return signal_key, signal_status
+
+
+def get_weekly_manager_activity_summary(
+    tenant_id: str = "",
+    lookback_days: int = 7,
+    today: date | None = None,
+) -> dict[str, int]:
+    """Return lightweight weekly manager-activity counts for Today.
+
+    Counts are intentionally conservative and derived from existing action/event
+    sources only:
+    - reviewed_issues: distinct Today signal keys marked looked-at this week
+    - follow_up_touchpoints: coaching/follow-up events logged this week
+    - closed_issues: resolved/deprioritized actions closed this week
+    - improved_outcomes: explicit improved outcomes logged this week
+    """
+    today = today or date.today()
+    cutoff = today - timedelta(days=lookback_days)
+
+    try:
+        reviewed_signal_keys: set[str] = set()
+        follow_up_touchpoints = 0
+
+        all_events = action_events_repo.list_action_events(
+            action_id="",
+            tenant_id=tenant_id,
+            limit=5000,
+            newest_first=True,
+            columns="event_type, event_at, details",
+        )
+        for event in all_events or []:
+            event_date = _parse_date(event.get("event_at"))
+            if event_date is None or event_date < cutoff:
+                continue
+
+            event_type = str(event.get("event_type") or "").strip()
+            if event_type == _TODAY_SIGNAL_STATUS_EVENT_TYPE:
+                signal_key, signal_status = _parse_today_signal_status(event.get("details"))
+                if signal_key and signal_status == _TODAY_SIGNAL_STATUS_LOOKED_AT:
+                    reviewed_signal_keys.add(signal_key)
+            elif event_type in {"coached", "follow_up_logged", "follow_through_logged"}:
+                follow_up_touchpoints += 1
+
+        manager_outcomes = get_manager_outcome_stats(
+            tenant_id=tenant_id,
+            lookback_days=lookback_days,
+            today=today,
+        )
+        recent_closed = _recent_action_outcomes(lookback_days=lookback_days, tenant_id=tenant_id)
+
+        return {
+            "reviewed_issues": len(reviewed_signal_keys),
+            "follow_up_touchpoints": int(follow_up_touchpoints),
+            "closed_issues": len(list(recent_closed or [])),
+            "improved_outcomes": int((manager_outcomes.get("outcomes") or {}).get("improved", 0) or 0),
+        }
+    except Exception as e:
+        print(f"[Error] get_weekly_manager_activity_summary failed: {e}")
+        return {
+            "reviewed_issues": 0,
+            "follow_up_touchpoints": 0,
+            "closed_issues": 0,
+            "improved_outcomes": 0,
+        }
 
 def get_manager_outcome_stats(
     tenant_id: str = "",

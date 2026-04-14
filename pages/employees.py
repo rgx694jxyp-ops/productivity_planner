@@ -9,6 +9,9 @@ from core.dependencies import (
     require_db,
 )
 from services.plan_service import get_available_employee_views
+from services.plan_service import get_current_plan
+from services.upgrade_telemetry_service import log_upgrade_event, log_upgrade_prompt_impression_once
+from services.upgrade_prompt_service import build_coaching_insights_upgrade_prompt
 from core.runtime import _html_mod, date, datetime, io, pd, st, time, traceback, init_runtime
 from typing import Any
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
@@ -21,7 +24,6 @@ from services.employee_service import (
     load_employee_history_workflow,
     parse_history_range,
 )
-from services.action_lifecycle_service import log_coaching_lifecycle_entry
 from services.action_query_service import get_employee_action_timeline, get_employee_actions
 from services.activity_comparison_service import list_recent_activity_comparisons, summarize_activity_comparisons
 from services.employee_detail_service import build_employee_detail_context
@@ -46,8 +48,13 @@ from services.exception_tracking_service import (
 from services.follow_through_service import (
     FOLLOW_THROUGH_STATUSES,
     build_follow_through_context_line,
-    log_follow_through_event,
     summarize_follow_through_events,
+)
+from services.action_state_service import (
+    build_employee_action_state_summary,
+    log_coaching_lifecycle_entry,
+    log_follow_through_event,
+    schedule_follow_up_for_employee,
 )
 from services.employees_service import _build_archived_productivity
 from database import add_coaching_note, archive_coaching_notes, delete_coaching_note
@@ -65,6 +72,8 @@ from ui.components import (
 )
 from ui.floor_language import translate_to_floor_language
 from ui.state_panels import (
+    consume_flash_message,
+    set_flash_message,
     show_error_state,
     show_healthy_state,
     show_loading_state,
@@ -265,7 +274,7 @@ def _render_employee_exception_panel(*, tenant_id: str, emp_id: str, emp_name: s
                         tenant_id=tenant_id,
                     )
                     if resolved:
-                        show_success_state(f"{emp_name}: operational exception resolved.")
+                        set_flash_message("Issue resolved.")
                         st.rerun()
                     else:
                         show_error_state("Operational exception could not be resolved right now.")
@@ -340,7 +349,7 @@ def _render_employee_follow_through_panel(*, tenant_id: str, emp_id: str, emp_na
                     tenant_id=tenant_id,
                 )
                 if result:
-                    show_success_state(f"{emp_name}: follow-through saved.")
+                    set_flash_message("Follow-through saved.")
                     st.rerun()
                 else:
                     show_error_state("Follow-through could not be saved right now.")
@@ -760,6 +769,46 @@ def page_employees():
             key="employees_view_tab",
             label_visibility="collapsed",
         )
+
+        if "Coaching Insights" not in _views:
+            try:
+                _current_plan = get_current_plan(tenant_id)
+                _coaching_prompt = build_coaching_insights_upgrade_prompt(plan=_current_plan)
+                if _coaching_prompt:
+                    _prompt_feature_context = "coaching_insights"
+                    log_upgrade_prompt_impression_once(
+                        st.session_state,
+                        event_key="employees_coaching_upgrade_prompt",
+                        prompt_location="employees",
+                        prompt_type="feature_locked",
+                        current_plan=_current_plan,
+                        employee_count=0,
+                        employee_limit=0,
+                        feature_context=_prompt_feature_context,
+                        tenant_id=tenant_id,
+                        user_id=st.session_state.get("user_id", ""),
+                        user_email=st.session_state.get("user_email", ""),
+                    )
+                    st.info(f"{_coaching_prompt['headline']} {_coaching_prompt['body']}")
+                    st.caption("Upgrade path: Settings -> Billing.")
+                    if st.button("View upgrade options", key="employees_coaching_upgrade_prompt_cta"):
+                        log_upgrade_event(
+                            "upgrade_prompt_click",
+                            prompt_location="employees",
+                            prompt_type="feature_locked",
+                            current_plan=_current_plan,
+                            employee_count=0,
+                            employee_limit=0,
+                            feature_context=_prompt_feature_context,
+                            tenant_id=tenant_id,
+                            user_id=st.session_state.get("user_id", ""),
+                            user_email=st.session_state.get("user_email", ""),
+                        )
+                        st.session_state["goto_page"] = "settings"
+                        st.rerun()
+            except Exception:
+                pass
+
         st.session_state["emp_view"] = _selected_view
         if _selected_view == "Employee History":
             _emp_history()
@@ -1069,6 +1118,9 @@ def _emp_coaching():
             emp_dept = selected_emp.get("department","")
             _open_emp_actions = []
 
+            # ── Post-save toast (fires on the rerun after any quick action) ──
+            consume_flash_message()
+
             # ── Post-save feedback (persists across rerun once via session_state) ──
             _cn_fb = st.session_state.get("_cn_feedback")
             if _cn_fb and _cn_fb.get("emp_id") == emp_id:
@@ -1266,6 +1318,9 @@ def _emp_coaching():
                 _emp_actions = list(get_employee_actions(emp_id, tenant_id=tenant_id) or [])
                 _open_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"new", "in_progress", "follow_up_due", "overdue", "escalated"}]
                 _closed_emp_actions = [a for a in _emp_actions if str(a.get("status") or "") in {"resolved", "deprioritized", "transferred"}]
+                _action_state_summary = build_employee_action_state_summary(emp_id, tenant_id=tenant_id)
+                _action_state_rows = list(_action_state_summary.get("states") or [])
+                _open_action_state_rows = [row for row in _action_state_rows if bool(row.get("is_open"))]
 
                 _improved_actions = sum(1 for a in _emp_actions if str(a.get("resolution_type") or "").startswith("improved"))
                 _recognition_actions = [
@@ -1275,29 +1330,36 @@ def _emp_coaching():
                 ]
 
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Open Actions", len(_open_emp_actions))
-                m2.metric("Total Action History", len(_emp_actions))
-                m3.metric("Improved Outcomes", _improved_actions)
-                m4.metric("Recognition/Development", len(_recognition_actions))
+                m1.metric("Active Contexts", int((_action_state_summary.get("summary") or {}).get("open_count", 0) or 0))
+                m2.metric("Follow-up Scheduled", int((_action_state_summary.get("summary") or {}).get("scheduled_count", 0) or 0))
+                m3.metric("Resolved Contexts", int((_action_state_summary.get("summary") or {}).get("resolved_count", 0) or 0))
+                m4.metric("Total Action History", len(_emp_actions))
 
-                if _open_emp_actions:
-                    with st.expander(f"Open actions ({len(_open_emp_actions)})", expanded=True):
-                        for _a in _open_emp_actions:
-                            _rid = str(_a.get("id") or "")
-                            _due = str(_a.get("follow_up_due_at") or "")[:10]
-                            _status = str(_a.get("_runtime_status") or _a.get("status") or "new").replace("_", " ").title()
-                            _next_step = str(_a.get("action_type") or "").replace("_", " ").title() or "Follow up"
-                            st.markdown(f"**#{_rid}** · {_status}")
-                            st.caption(
-                                f"Issue: {str(_a.get('issue_type') or '').replace('_', ' ')} | "
-                                f"Trigger: {str(_a.get('trigger_summary') or '')[:120]}"
-                            )
-                            st.caption(
-                                f"Due: {_due or '—'} | Logged intervention type: {_next_step}"
-                            )
+                if _open_action_state_rows:
+                    with st.expander(f"Normalized action state ({len(_open_action_state_rows)})", expanded=True):
+                        for _row in _open_action_state_rows:
+                            _ref = f"#{_row.get('action_id')}" if str(_row.get("action_id") or "").strip() else "Scheduled follow-up"
+                            st.markdown(f"**{_ref}** · {str(_row.get('state') or '')}")
+                            if str(_row.get("title") or "").strip():
+                                st.caption(str(_row.get("title") or "")[:140])
+                            _context_bits = [str(_row.get("source_label") or "")]
+                            if str(_row.get("state_detail") or "").strip():
+                                _context_bits.append(str(_row.get("state_detail") or ""))
+                            if str(_row.get("latest_event_type") or "").strip():
+                                _context_bits.append(f"Latest event: {_row.get('latest_event_type')}")
+                            if str(_row.get("latest_event_at") or "").strip():
+                                _context_bits.append(str(_row.get("latest_event_at") or "")[:16].replace("T", " "))
+                            st.caption(" | ".join(bit for bit in _context_bits if bit))
+                            if str(_row.get("note_preview") or "").strip():
+                                st.caption(str(_row.get("note_preview") or "")[:180])
                             st.divider()
                 else:
-                    st.caption("No open actions for this employee.")
+                    st.caption("No open action context for this employee.")
+
+                if _improved_actions or _recognition_actions:
+                    st.caption(
+                        f"Improved outcomes: {_improved_actions} | Recognition/development actions: {len(_recognition_actions)}"
+                    )
 
                 # What has been tried (interventions + events)
                 _tried_interventions = sorted({
@@ -1410,9 +1472,18 @@ def _emp_coaching():
                         st.error("Invalid date format.")
                 if _fu_date:
                     try:
-                        from followup_manager import add_followup
-                        add_followup(emp_id, emp_name, emp_dept, _fu_date, _note_prev)
-                        st.success(f"✓ Follow-up scheduled for {_fu_date}")
+                        _schedule_result = schedule_follow_up_for_employee(
+                            employee_id=emp_id,
+                            employee_name=emp_name,
+                            department=emp_dept,
+                            follow_up_date=_fu_date,
+                            note_preview=_note_prev,
+                            tenant_id=tenant_id,
+                            action_id=str(st.session_state.get(f"_cn_last_action_id_{emp_id}", "") or ""),
+                        )
+                        if not _schedule_result:
+                            raise ValueError("schedule result was empty")
+                        set_flash_message(f"Follow-up scheduled for {_fu_date}.")
                     except Exception as _fue:
                         st.error(f"Could not save follow-up: {_fue}")
                     del st.session_state[_fu_key]
@@ -1538,6 +1609,7 @@ def _emp_coaching():
                     _raw_cached_all_coaching_notes.clear()
                     _preview = note_text.strip()[:80]
                     st.session_state[f"_cn_last_note_{emp_id}"] = _preview
+                    st.session_state[f"_cn_last_action_id_{emp_id}"] = str(_cycle_result.get("action_id") or "")
                     st.session_state[_fu_key] = True   # prompt follow-up scheduler
                     st.session_state["_cn_clear_inputs"] = True
                     st.session_state["_employees_set_view"] = "Performance Journal"

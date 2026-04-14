@@ -21,7 +21,7 @@ def _build_card(*, confidence_level: str = "high", included_rows: int | None = 6
         title="Lower than recent pace",
         what_happened="Lower than recent pace",
         compared_to_what="Compared with the latest 3-day window versus prior 3-day window",
-        why_flagged="Surfaced because recent output is below the recent baseline (prior comparable days and target context when available).",
+        why_flagged="Below recent baseline vs comparable days.",
         confidence=ConfidenceInfo(
             level=confidence_level,
             score=0.55,
@@ -57,7 +57,7 @@ def test_traceability_payload_includes_normalized_drilldown_fields():
     payload = traceability_payload_from_card(_build_card(confidence_level="low", included_rows=2, sample_size=2))
 
     assert payload["signal_summary"] == "Lower than recent pace"
-    assert payload["surfaced_because"].startswith("Surfaced because")
+    assert payload["surfaced_because"]
     assert payload["comparison_statement"].startswith("Compared with")
     assert payload["confidence_level"] == "low"
     assert payload["confidence_sample_size"] == 2

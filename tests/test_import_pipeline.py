@@ -109,3 +109,87 @@ def test_preview_import_blocks_exact_duplicate_file(monkeypatch):
     assert result.can_import is False
     assert result.exact_duplicate_import is True
     assert "identical to a previous import" in result.message.lower()
+
+
+def test_preview_import_has_no_warning_summary_for_clean_rows(monkeypatch):
+    monkeypatch.setattr(
+        orchestrator,
+        "review_mapping",
+        lambda mapping: MappingReview(mapped={"EmployeeID": "EmployeeID"}, required_missing=[], optional_unmapped=[]),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "parse_sessions_to_rows",
+        lambda sessions, fallback_date: [{
+            "emp_id": "E1",
+            "work_date": "2026-04-10",
+            "department": "Pack",
+            "uph": 80,
+            "units": 160,
+            "hours_worked": 2,
+        }],
+    )
+    monkeypatch.setattr(orchestrator, "validate_rows", lambda rows: (rows, [], 0))
+    monkeypatch.setattr(orchestrator, "_find_matching_upload_by_fingerprint", lambda tenant_id, fingerprint, days=3650: None)
+
+    result = orchestrator.preview_import(
+        [{"mapping": {"EmployeeID": "EmployeeID"}}],
+        fallback_date=date(2026, 4, 10),
+        tenant_id="tenant-a",
+        user_role="manager",
+    )
+
+    assert result.success is True
+    assert result.trust_summary.warning_summary == ""
+
+
+def test_preview_import_surfaces_fallback_date_warning_summary(monkeypatch):
+    monkeypatch.setattr(
+        orchestrator,
+        "review_mapping",
+        lambda mapping: MappingReview(mapped={"EmployeeID": "EmployeeID", "Date": "Date"}, required_missing=[], optional_unmapped=[]),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "parse_sessions_to_rows",
+        lambda sessions, fallback_date: [{
+            "emp_id": "E1",
+            "work_date": fallback_date.isoformat(),
+            "department": "Pack",
+            "uph": 80,
+            "units": 160,
+            "hours_worked": 2,
+            "row_index": 1,
+            "_used_fallback_date": True,
+            "_raw_date_value": "04/10/2026",
+        }],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "validate_rows",
+        lambda rows: (
+            [{k: v for k, v in rows[0].items() if not str(k).startswith("_")}],
+            [
+                orchestrator.ImportIssue(
+                    code="date_parse_fallback",
+                    message="Date missing or unparseable; used selected work date",
+                    severity="warning",
+                    row_index=1,
+                    field="Date",
+                    value="04/10/2026",
+                )
+            ],
+            0,
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "_find_matching_upload_by_fingerprint", lambda tenant_id, fingerprint, days=3650: None)
+
+    result = orchestrator.preview_import(
+        [{"mapping": {"EmployeeID": "EmployeeID", "Date": "Date"}}],
+        fallback_date=date(2026, 4, 10),
+        tenant_id="tenant-a",
+        user_role="manager",
+    )
+
+    assert result.success is True
+    assert result.trust_summary.warning_summary == "Some row dates could not be parsed and used the selected work date instead."

@@ -3,6 +3,7 @@ from datetime import datetime
 
 import streamlit as st
 from core.billing_cache import clear_billing_cache
+from services.upgrade_telemetry_service import log_upgrade_event
 
 
 def verify_checkout_and_activate(tenant_id: str, user_id: str = ""):
@@ -317,6 +318,7 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
         create_stripe_checkout_url,
         get_subscription,
     )
+    from services.billing_service import get_subscription_entitlement
 
     _PORD = ["starter", "pro", "business"]
     _PINFO = {
@@ -332,6 +334,30 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
     _tenant_id = str(st.session_state.get("tenant_id", "") or "")
     _user_id = str(st.session_state.get("user_id", "") or "")
     _user_email = str(st.session_state.get("user_email", "") or "")
+    _entitlement = get_subscription_entitlement(_tenant_id, _user_email)
+    _current_plan = str(_entitlement.get("plan") or "starter")
+    _employee_count = int(_entitlement.get("employee_count") or 0)
+    _employee_limit = int(_entitlement.get("employee_limit") or 0)
+
+    def _queue_billing_portal_continue(*, label: str, launch_key: str, url: str, feature_context: str, button_type: str = "primary") -> None:
+        if not url:
+            return
+        if st.button(label, key=launch_key, use_container_width=True, type=button_type):
+            log_upgrade_event(
+                "billing_portal_opened",
+                prompt_location="",
+                prompt_type="",
+                current_plan=_current_plan,
+                employee_count=_employee_count,
+                employee_limit=_employee_limit,
+                feature_context=feature_context,
+                tenant_id=_tenant_id,
+                user_id=_user_id,
+                user_email=_user_email,
+            )
+            st.session_state[f"_{launch_key}_url"] = url
+        if st.session_state.get(f"_{launch_key}_url") == url:
+            st.link_button("Continue to Billing Portal →", url, use_container_width=True, type="secondary")
 
     _qp = st.query_params
     if _qp.get("checkout") == "success":
@@ -432,7 +458,12 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
             unsafe_allow_html=True,
         )
         if _portal_url:
-            st.link_button("Update Payment Method →", _portal_url, use_container_width=True, type="primary")
+            _queue_billing_portal_continue(
+                label="Update Payment Method",
+                launch_key="billing_update_payment_method",
+                url=_portal_url,
+                feature_context="billing_past_due_update_payment",
+            )
         else:
             st.info("Contact support to update your payment method.")
         st.markdown("---")
@@ -522,7 +553,12 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                     target_price_id=_price_map.get(_pk, ""),
                     flow="subscription_update",
                 ) or _portal_url
-                st.link_button(f"Reactivate {_pi['label']} →", _reactivate_url, use_container_width=True, type="primary")
+                _queue_billing_portal_continue(
+                    label=f"Reactivate {_pi['label']}",
+                    launch_key=f"billing_reactivate_{_pk}",
+                    url=_reactivate_url,
+                    feature_context=f"billing_reactivate:{_pk}",
+                )
             elif _price_id:
                 _btn_label = f"Get {_pi['label']}"
                 _btn_type = "primary" if _is_pop else "secondary"
@@ -537,6 +573,18 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                             user_email=_user_email,
                         )
                     if url:
+                        log_upgrade_event(
+                            "billing_checkout_started",
+                            prompt_location="",
+                            prompt_type="",
+                            current_plan=_current_plan,
+                            employee_count=_employee_count,
+                            employee_limit=_employee_limit,
+                            feature_context=f"subscription_page_checkout:{_pk}",
+                            tenant_id=_tenant_id,
+                            user_id=_user_id,
+                            user_email=_user_email,
+                        )
                         st.session_state["_checkout_url"] = url
                         st.session_state["_checkout_plan"] = _pi["label"]
                         st.rerun()
@@ -549,7 +597,12 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
                                 flow="subscription_update",
                             ) or _portal_url
                             st.info("You already have an active subscription. Use the billing portal to change plans.")
-                            st.link_button("Manage Subscription →", _manage_url, use_container_width=True, type="primary")
+                            _queue_billing_portal_continue(
+                                label="Manage Subscription",
+                                launch_key=f"billing_manage_subscription_{_pk}",
+                                url=_manage_url,
+                                feature_context="billing_active_subscription_manage",
+                            )
                         else:
                             st.info("You already have an active subscription. Go to Settings → Billing to manage it.")
                     else:

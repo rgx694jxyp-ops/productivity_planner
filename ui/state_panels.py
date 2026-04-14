@@ -119,3 +119,37 @@ def show_error_state(message: str = "Something unexpected prevented this section
         message,
         "You can refresh data and try again.",
     )
+
+
+def show_toast_feedback(message: str, *, icon: str = "✔") -> None:
+    """Show a brief non-blocking toast notification for completed actions.
+
+    Designed to be called from a flash-message session-state handler so it
+    fires in the render that follows st.rerun(), not before it.  Callers
+    should NOT call this immediately before st.rerun() — the notification
+    would be discarded.  Use set_flash_message() + st.rerun() instead.
+    """
+    try:
+        st.toast(f"{icon} {message}")
+    except Exception:
+        # Fallback: render a compact success panel if toast is unavailable.
+        _panel("state-success", "Saved", message, "")
+
+
+# Key used by both today.py and employees.py for cross-page flash messages.
+_FLASH_KEY = "_action_flash_message"
+
+
+def set_flash_message(message: str) -> None:
+    """Store a flash message to be shown on the next render via consume_flash_message()."""
+    st.session_state[_FLASH_KEY] = str(message)
+
+
+def consume_flash_message() -> None:
+    """Render and clear any pending flash message stored by set_flash_message().
+
+    Safe to call even when no message is pending.
+    """
+    message = str(st.session_state.pop(_FLASH_KEY, "") or "")
+    if message:
+        show_toast_feedback(message)

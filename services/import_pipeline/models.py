@@ -48,6 +48,7 @@ class ImportTrustSummary:
     inconsistent_names: int = 0
     suspicious_values: int = 0
     confidence_score: int = 0
+    warning_summary: str = ""
 
 
 @dataclass

@@ -15,7 +15,12 @@ from core.dependencies import _bust_cache, _cached_employees, _log_app_error
 from domain.display_signal import DisplaySignal, SignalLabel
 from domain.insight_card_contract import InsightCardContract
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
-from services.action_metrics_service import _recent_action_outcomes, get_manager_outcome_stats
+from services.action_state_service import build_employee_action_state_lookup, log_follow_through_event
+from services.action_metrics_service import (
+    _recent_action_outcomes,
+    get_manager_outcome_stats,
+    get_weekly_manager_activity_summary,
+)
 from services.exception_tracking_service import (
     build_exception_context_line,
     create_operational_exception,
@@ -24,7 +29,7 @@ from services.exception_tracking_service import (
 )
 from services.attention_scoring_service import AttentionSummary
 from services.display_signal_factory import build_display_signal_from_attention_item, build_display_signal_from_insight_card
-from services.follow_through_service import FOLLOW_THROUGH_STATUSES, log_follow_through_event
+from services.follow_through_service import FOLLOW_THROUGH_STATUSES
 from services.signal_formatting_service import (
     format_comparison_line,
     format_confidence_line,
@@ -57,14 +62,21 @@ from services.today_signal_status_service import (
     set_signal_status,
 )
 from services.today_view_model_service import (
+    TodayAttentionStripViewModel,
     TodayQueueCardViewModel,
     TodayValueStripViewModel,
+    TodayWeeklySummaryViewModel,
+    build_today_attention_strip,
     build_today_queue_card_from_insight_card,
     build_today_value_strip_view_model,
+    build_today_weekly_summary_view_model,
+    enrich_today_queue_card_action_context,
 )
 from services.signal_traceability_service import traceability_payload_from_card
 from services.plain_language_service import signal_wording
 from ui.state_panels import (
+    consume_flash_message,
+    set_flash_message,
     show_error_state,
     show_loading_state,
     show_success_state,
@@ -102,6 +114,38 @@ def _cached_manager_outcome_stats(*, tenant_id: str, lookback_days: int, today_i
     except Exception:
         today_value = date.today()
     return dict(get_manager_outcome_stats(tenant_id=tenant_id, lookback_days=lookback_days, today=today_value) or {})
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_weekly_manager_activity_summary(*, tenant_id: str, lookback_days: int, today_iso: str) -> dict[str, int]:
+    _log_heavy_render_compute("get_weekly_manager_activity_summary")
+    try:
+        today_value = date.fromisoformat(str(today_iso or "")[:10])
+    except Exception:
+        today_value = date.today()
+    return dict(get_weekly_manager_activity_summary(tenant_id=tenant_id, lookback_days=lookback_days, today=today_value) or {})
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_today_action_state_lookup(
+    *,
+    tenant_id: str,
+    employee_ids: tuple[str, ...],
+    today_iso: str,
+) -> dict[str, dict[str, Any]]:
+    _log_heavy_render_compute("build_employee_action_state_lookup")
+    try:
+        today_value = date.fromisoformat(str(today_iso or "")[:10])
+    except Exception:
+        today_value = date.today()
+    return dict(
+        build_employee_action_state_lookup(
+            employee_ids,
+            tenant_id=tenant_id,
+            today=today_value,
+        )
+        or {}
+    )
 
 
 def _apply_today_styles() -> None:
@@ -409,6 +453,36 @@ def _apply_today_styles() -> None:
             padding: 1px 8px;
             margin-bottom: 6px;
         }
+        .today-action-state-chip {
+            display: inline-block;
+            font-size: 0.76rem;
+            font-weight: 700;
+            border-radius: 999px;
+            padding: 2px 8px;
+            margin-top: 2px;
+            margin-bottom: 6px;
+            border: 1px solid #d8e3ef;
+        }
+        .today-action-state-open {
+            background: #eef3fa;
+            color: #36506d;
+            border-color: #d4e0ec;
+        }
+        .today-action-state-in-progress {
+            background: #fff3e4;
+            color: #8a5a00;
+            border-color: #efd3a4;
+        }
+        .today-action-state-follow-up-scheduled {
+            background: #e9f4ff;
+            color: #19527c;
+            border-color: #c8def1;
+        }
+        .today-action-state-resolved {
+            background: #e8f5e9;
+            color: #20603a;
+            border-color: #b9e0be;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -416,9 +490,11 @@ def _apply_today_styles() -> None:
 
 
 def _show_flash_message() -> None:
-    message = str(st.session_state.pop("today_flash_message", "") or "")
-    if message:
-        show_success_state(message)
+    # Legacy key kept so existing callers (signal status) still work.
+    legacy_msg = str(st.session_state.pop("today_flash_message", "") or "")
+    if legacy_msg:
+        set_flash_message(legacy_msg)
+    consume_flash_message()
 
 
 def _is_demo_upload_row(upload_row: dict[str, Any]) -> bool:
@@ -673,6 +749,34 @@ def _queue_counts(queue_items: list[dict]) -> dict[str, int]:
     return counts
 
 
+def _build_last_action_lookup(queue_items: list[dict]) -> dict[str, str]:
+    """Build {employee_id: iso_date_str} from precomputed queue items.
+
+    Uses ``last_event_at`` as the primary date — this is updated by Supabase
+    every time a coaching event, follow-through log, or status change is
+    recorded against the action, which makes it the most product-correct
+    proxy for "last time a manager touched this employee's case".
+
+    Falls back to ``created_at`` when ``last_event_at`` is absent (can happen
+    on brand-new actions before any follow-on event has been logged).
+
+    Only the most-recent date per employee is kept. Employees with no queue
+    item produce no entry (caller treats missing key as "no data").
+    """
+    best: dict[str, str] = {}
+    for item in list(queue_items or []):
+        emp_id = str(item.get("employee_id") or "").strip()
+        if not emp_id:
+            continue
+        raw = str(item.get("last_event_at") or item.get("created_at") or "").strip()
+        if not raw:
+            continue
+        date_prefix = raw[:10]
+        if emp_id not in best or date_prefix > best[emp_id]:
+            best[emp_id] = date_prefix
+    return best
+
+
 def _filter_queue(queue_items: list[dict], active_filter: str) -> list[dict]:
     if active_filter == "overdue":
         return [item for item in queue_items if item.get("_queue_status") == "overdue"]
@@ -851,6 +955,41 @@ def _render_queue_orientation_block(
     )
 
 
+def _render_attention_summary_strip(strip: TodayAttentionStripViewModel) -> None:
+    """Render 3–4 compact metric tiles above the queue.
+
+    Uses st.metric for operational density.  Shows "Reviewed today" only when
+    the value is available from the precomputed payload (not None).
+    """
+    n_cols = 4 if strip.reviewed_today is not None else 3
+    cols = st.columns(n_cols)
+    with cols[0]:
+        st.metric("Needing attention", strip.total_needing_attention)
+    with cols[1]:
+        st.metric("New today", strip.new_today)
+    with cols[2]:
+        st.metric("Overdue follow-ups", strip.overdue_follow_ups)
+    if strip.reviewed_today is not None:
+        with cols[3]:
+            st.metric("Reviewed today", strip.reviewed_today)
+
+
+def _render_weekly_summary_block(summary: TodayWeeklySummaryViewModel) -> None:
+    if not list(summary.items or []):
+        return
+
+    st.markdown('<div class="today-secondary-context-label">This week</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="today-secondary-context-note">Recent management activity and logged outcomes.</div>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns(min(4, max(1, len(summary.items))))
+    for idx, item in enumerate(summary.items[:4]):
+        with cols[idx]:
+            with st.container(border=True):
+                st.caption(item.headline)
+
+
 def _render_empty_state() -> None:
     with st.container(border=True):
         st.markdown("### No priority signals right now")
@@ -991,7 +1130,7 @@ def _render_exception_create_form(*, tenant_id: str, today_value: date) -> None:
                     user_role=_user_role,
                 )
                 if result:
-                    show_success_state("Operational exception saved.")
+                    set_flash_message("Exception logged.")
                     st.rerun()
                 else:
                     show_error_state("Operational exception could not be saved right now.")
@@ -1089,7 +1228,7 @@ def _render_open_exceptions(*, tenant_id: str) -> None:
                             tenant_id=tenant_id,
                         )
                         if result:
-                            show_success_state("Exception follow-through saved.")
+                            set_flash_message("Follow-through saved.")
                             st.rerun()
                         else:
                             show_error_state("Exception follow-through could not be saved right now.")
@@ -1107,7 +1246,7 @@ def _render_open_exceptions(*, tenant_id: str) -> None:
                         tenant_id=tenant_id,
                     )
                     if resolved:
-                        show_success_state("Operational exception resolved.")
+                        set_flash_message("Issue resolved.")
                         st.rerun()
                     else:
                         show_error_state("Operational exception could not be resolved right now.")
@@ -1233,6 +1372,16 @@ def _format_signal_status_label(signal_status: str) -> str:
     return ""
 
 
+def _action_state_chip(card: TodayQueueCardViewModel) -> str:
+    state = str(getattr(card, "normalized_action_state", "") or "").strip()
+    if not state:
+        return ""
+    css_suffix = state.lower().replace(" ", "-").replace("/", "-")
+    return (
+        f'<div class="today-action-state-chip today-action-state-{css_suffix}">{state}</div>'
+    )
+
+
 def _render_signal_status_controls(*, card: TodayQueueCardViewModel, key_prefix: str, status_map: dict[str, dict[str, str]]) -> None:
     signal_key = str(getattr(card, "signal_key", "") or "").strip()
     employee_id = str(card.employee_id or "").strip()
@@ -1284,7 +1433,7 @@ def _render_signal_status_controls(*, card: TodayQueueCardViewModel, key_prefix:
         tenant_id=tenant_id,
     )
     if saved:
-        st.session_state["today_flash_message"] = "Signal status saved."
+        set_flash_message("Marked reviewed." if selected == SIGNAL_STATUS_LOOKED_AT else "Flagged for follow-up.")
         st.rerun()
 
 
@@ -1298,6 +1447,9 @@ def _render_attention_card(
 ) -> None:
     with st.container(border=True):
         st.markdown(f'<div class="today-insight-title">{card.line_1}</div>', unsafe_allow_html=True)
+        action_state_chip = _action_state_chip(card)
+        if action_state_chip:
+            st.markdown(action_state_chip, unsafe_allow_html=True)
         st.markdown(f'<div class="today-insight-line">{card.line_2}</div>', unsafe_allow_html=True)
         if str(card.line_3 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_3}</div>', unsafe_allow_html=True)
@@ -1312,16 +1464,15 @@ def _render_attention_card(
             if freshness_text:
                 st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
         else:
-            confidence_freshness = line_5_text
             if freshness_text:
-                confidence_freshness = (
-                    f"{line_5_text} · {freshness_text}" if line_5_text else freshness_text
-                )
-            if confidence_freshness:
-                st.markdown(f'<div class="today-insight-meta">{confidence_freshness}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="today-insight-meta">{freshness_text}</div>', unsafe_allow_html=True)
 
         if str(card.line_4 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card.line_4}</div>', unsafe_allow_html=True)
+
+        last_action_label = str(getattr(card, "last_action_date_label", "") or "").strip()
+        if last_action_label:
+            st.markdown(f'<div class="today-insight-meta">{last_action_label}</div>', unsafe_allow_html=True)
 
         collapsed_hint = str(getattr(card, "collapsed_hint", "") or "").strip()
         if collapsed_hint:
@@ -1362,20 +1513,26 @@ def _render_attention_card(
 def _render_unified_attention_queue(
     attention: AttentionSummary,
     *,
+    decision_items: list[Any] | None = None,
     suppressed_cards: list[InsightCardContract] | None = None,
     is_stale: bool = False,
     show_secondary_open: bool = False,
     weak_data_mode: bool = False,
     snapshot_cards: list[TodayQueueCardViewModel] | None = None,
+    last_action_lookup: dict[str, str] | None = None,
+    action_state_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     plan: TodayQueueRenderPlan = build_today_queue_render_plan(
         attention=attention,
+        decision_items=decision_items,
         suppressed_cards=suppressed_cards,
         today_value=date.today(),
         is_stale=is_stale,
         weak_data_mode=weak_data_mode,
         show_secondary_open=show_secondary_open,
         snapshot_cards=snapshot_cards,
+        last_action_lookup=last_action_lookup,
+        action_state_lookup=action_state_lookup,
     )
 
     st.markdown(f'<div class="today-section-label">{plan.section_title}</div>', unsafe_allow_html=True)
@@ -1472,8 +1629,19 @@ def _render_today_value_strip(
             )
 
 
-def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
-    card_vm = build_today_queue_card_from_insight_card(card=item, today=date.today())
+def _render_insight_card(
+    item: InsightCardContract,
+    *,
+    key_prefix: str,
+    last_action_lookup: dict[str, str] | None = None,
+    action_state_lookup: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    card_vm = build_today_queue_card_from_insight_card(
+        card=item,
+        today=date.today(),
+        last_action_lookup=last_action_lookup,
+        action_state_lookup=action_state_lookup,
+    )
     if card_vm is None:
         display_signal = build_display_signal_from_insight_card(card=item, today=date.today())
         suppressed = list(st.session_state.get("_today_suppressed_signals_debug") or [])
@@ -1490,6 +1658,9 @@ def _render_insight_card(item: InsightCardContract, *, key_prefix: str) -> None:
 
     with st.container(border=True):
         st.markdown(f'<div class="today-insight-title">{card_vm.line_1}</div>', unsafe_allow_html=True)
+        action_state_chip = _action_state_chip(card_vm)
+        if action_state_chip:
+            st.markdown(action_state_chip, unsafe_allow_html=True)
         st.markdown(f'<div class="today-insight-line">{card_vm.line_2}</div>', unsafe_allow_html=True)
         if str(card_vm.line_3 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card_vm.line_3}</div>', unsafe_allow_html=True)
@@ -1552,6 +1723,8 @@ def _render_home_section(
     key_prefix: str,
     placeholder_message: str,
     placeholder_todo: str,
+    last_action_lookup: dict[str, str] | None = None,
+    action_state_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     st.markdown('<div class="today-home-section">', unsafe_allow_html=True)
     st.markdown(f'<div class="today-home-title">{section_title}</div>', unsafe_allow_html=True)
@@ -1568,8 +1741,47 @@ def _render_home_section(
         return
 
     for item in eligible_items:
-        _render_insight_card(item, key_prefix=key_prefix)
+        _render_insight_card(
+            item,
+            key_prefix=key_prefix,
+            last_action_lookup=last_action_lookup,
+            action_state_lookup=action_state_lookup,
+        )
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _today_action_state_employee_ids(
+    *,
+    attention: AttentionSummary,
+    decision_items: list[Any] | None,
+    home_sections: dict[str, Any],
+    snapshot_cards: list[TodayQueueCardViewModel] | None,
+) -> tuple[str, ...]:
+    employee_ids: list[str] = []
+
+    for item in list(attention.ranked_items or []):
+        employee_id = str(getattr(item, "employee_id", "") or "").strip()
+        if employee_id:
+            employee_ids.append(employee_id)
+
+    for item in list(decision_items or []):
+        employee_id = str(getattr(item, "employee_id", "") or "").strip()
+        if employee_id:
+            employee_ids.append(employee_id)
+
+    for section_key in ("suppressed_signals", "top_insight_cards"):
+        for card in list(home_sections.get(section_key) or []):
+            if isinstance(card, InsightCardContract):
+                employee_id = str(card.drill_down.entity_id or "").strip()
+                if employee_id:
+                    employee_ids.append(employee_id)
+
+    for card in list(snapshot_cards or []):
+        employee_id = str(getattr(card, "employee_id", "") or "").strip()
+        if employee_id:
+            employee_ids.append(employee_id)
+
+    return tuple(sorted({employee_id for employee_id in employee_ids if employee_id}))
 
 
 def page_today() -> None:
@@ -1715,6 +1927,30 @@ def page_today() -> None:
                 today=today_value,
             ) or None
 
+        last_action_lookup = _build_last_action_lookup(queue_items)
+        decision_items = list(payload.get("decision_items") or [])
+        decision_summary = payload.get("decision_summary") or attention_summary
+        action_state_lookup = _cached_today_action_state_lookup(
+            tenant_id=tenant_id,
+            employee_ids=_today_action_state_employee_ids(
+                attention=decision_summary,
+                decision_items=decision_items,
+                home_sections=home_sections,
+                snapshot_cards=snapshot_cards,
+            ),
+            today_iso=today_value.isoformat(),
+        )
+        if snapshot_cards:
+            snapshot_cards = [
+                enrich_today_queue_card_action_context(
+                    card=card,
+                    today=today_value,
+                    last_action_lookup=last_action_lookup,
+                    action_state_lookup=action_state_lookup,
+                )
+                for card in list(snapshot_cards or [])
+            ]
+
         orientation_state = meaning.surface_state
         if (
             orientation_state == TodaySurfaceState.NO_STRONG_SIGNALS
@@ -1724,6 +1960,8 @@ def page_today() -> None:
             orientation_state = TodaySurfaceState.EARLY_SIGNAL
 
         orientation_model = build_queue_orientation(attention_summary)
+        if decision_summary.ranked_items:
+            orientation_model = build_queue_orientation(decision_summary)
         if snapshot_cards and orientation_model.total_shown <= 0:
             orientation_model = TodayQueueOrientationModel(
                 total_shown=len(snapshot_cards),
@@ -1741,14 +1979,37 @@ def page_today() -> None:
             signal_mode=signal_mode,
         )
 
+        attention_strip = build_today_attention_strip(
+            attention=decision_summary,
+            queue_items=queue_items,
+            today=today_value,
+        )
+        _render_attention_summary_strip(attention_strip)
+
         _render_unified_attention_queue(
-            attention_summary,
+            decision_summary,
+            decision_items=decision_items,
             suppressed_cards=home_sections.get("suppressed_signals", []),
             is_stale=bool(meaning.state_flags.get("stale_data")),
             show_secondary_open=bool(st.session_state.get("_first_import_just_completed")),
             weak_data_mode=bool(meaning.weak_data_mode),
             snapshot_cards=snapshot_cards,
+            last_action_lookup=last_action_lookup,
+            action_state_lookup=action_state_lookup,
         )
+
+        weekly_activity = _cached_weekly_manager_activity_summary(
+            tenant_id=tenant_id,
+            lookback_days=7,
+            today_iso=today_value.isoformat(),
+        )
+        weekly_summary = build_today_weekly_summary_view_model(
+            reviewed_issues=int(weekly_activity.get("reviewed_issues", 0) or 0),
+            follow_up_touchpoints=int(weekly_activity.get("follow_up_touchpoints", 0) or 0),
+            closed_issues=int(weekly_activity.get("closed_issues", 0) or 0),
+            improved_outcomes=int(weekly_activity.get("improved_outcomes", 0) or 0),
+        )
+        _render_weekly_summary_block(weekly_summary)
 
         _supporting_context_key = "_today_supporting_context_loaded"
         if bool(st.session_state.get("_first_import_just_completed")):

@@ -1,4 +1,10 @@
-"""Reusable Today page queue components."""
+"""Legacy Today queue renderer.
+
+Canonical queue generation lives in services.today_queue_service.build_action_queue.
+Canonical Today page rendering lives in pages.today via the attention-summary /
+view-model pipeline. This module is kept only as a backwards-compatible
+renderer for older surfaces that may still receive prebuilt queue items.
+"""
 
 from __future__ import annotations
 
@@ -8,12 +14,10 @@ import streamlit as st
 
 from domain.actions import parse_action_date
 from services.action_lifecycle_service import (
-    log_action_event,
-    log_recognition_event,
     mark_action_deprioritized,
     mark_action_escalated,
-    save_action_touchpoint,
 )
+from services.action_state_service import log_action_event, log_recognition_event, save_action_touchpoint
 from services.plain_language_service import (
     action_label,
     outcome_code,
@@ -30,7 +34,6 @@ OUTCOME_CODES = ["improved", "no_change", "worse", "blocked", "not_applicable"]
 OUTCOME_OPTIONS = [outcome_label(code) for code in OUTCOME_CODES]
 ACTION_CODES = ["log_check_in", "log_follow_up", "log_recognition", "mark_for_review", "lower_urgency"]
 ACTION_OPTIONS = [action_label(code) for code in ACTION_CODES]
-_AMBIGUOUS_FACTOR_PHRASES = {"", "unknown", "status", "needs review", "worth review", "limited data available"}
 
 
 def _escape_html(value: object) -> str:
@@ -155,125 +158,6 @@ def _render_queue_styles() -> None:
     )
 
 
-def _queue_status(action: dict, today: date) -> str:
-    due_date = parse_action_date(action.get("follow_up_due_at"))
-    if due_date and due_date < today:
-        return "overdue"
-    if due_date and due_date == today:
-        return "due_today"
-    return "pending"
-
-
-def _short_reason(action: dict) -> str:
-    trigger_summary = str(action.get("trigger_summary") or "").strip()
-    if trigger_summary:
-        return trigger_summary
-
-    issue_type = str(action.get("issue_type") or "issue").replace("_", " ").strip()
-    return issue_type.title() or "Needs attention"
-
-
-def _good_looks_like(action: dict) -> str:
-    success_metric = str(action.get("success_metric") or "").strip()
-    if success_metric:
-        lower = success_metric.lower()
-        if any(token in lower for token in ("escalate", "move role", "role reset", "support plan")):
-            return "Track whether performance stabilizes versus baseline over the next review window."
-        return success_metric
-
-    baseline_uph = float(action.get("baseline_uph") or 0.0)
-    if baseline_uph > 0:
-        return f"Previous baseline context: {baseline_uph:.0f} UPH."
-
-    return "Follow-up context is available in this item's timeline."
-
-
-def _build_repeat_lookup(repeat_offenders: list[dict]) -> dict[str, dict]:
-    return {str(item.get("employee_id") or ""): item for item in repeat_offenders}
-
-
-def _build_recognition_lookup(recognition_opportunities: list[dict]) -> dict[str, dict]:
-    return {str(item.get("action_id") or ""): item for item in recognition_opportunities}
-
-
-def _why_this_is_here(action: dict, queue_status: str) -> str:
-    if queue_status == "overdue":
-        return "This follow-up date already passed, so it stays at the top until someone closes the loop."
-    if queue_status == "due_today":
-        return "This item is due today, so it belongs in the active queue for this shift."
-    if action.get("_is_repeat_issue"):
-        return "This employee has a repeated open pattern, so it stays visible for closer follow-through."
-    if action.get("_is_recognition_opportunity"):
-        return "This person is doing well and no recognition touchpoint has been logged yet."
-    return "This item is still open and needs a supervisor decision to keep work moving."
-
-
-def _surfaced_factors(action: dict) -> list[str]:
-    factors: list[str] = []
-    queue_status = str(action.get("_queue_status") or "pending")
-    if queue_status in {"overdue", "due_today"}:
-        factors.append("Follow-up overdue")
-    if bool(action.get("_is_repeat_issue")):
-        factors.append("Seen multiple times")
-
-    issue_type = str(action.get("issue_type") or "").strip().lower()
-    trigger_summary = str(action.get("trigger_summary") or "").strip().lower()
-    if issue_type in {"low_performance", "low_performance_unaddressed", "repeated_low_performance"}:
-        factors.append("Lower than recent pace")
-    elif "below" in trigger_summary or "lower" in trigger_summary or "declin" in trigger_summary:
-        factors.append("Lower than recent pace")
-
-    if not factors:
-        factors.append("Lower than recent pace")
-
-    unique: list[str] = []
-    seen: set[str] = set()
-    for factor in factors:
-        key = factor.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(factor)
-    return unique
-
-
-def _is_queue_item_display_eligible(action: dict) -> bool:
-    if bool(action.get("_system_artifact")):
-        return False
-    factors = [str(f or "").strip() for f in list(action.get("_surfaced_factors") or [])]
-    factors = [f for f in factors if f]
-    if not factors:
-        return False
-    for factor in factors:
-        lowered = factor.lower()
-        if lowered in _AMBIGUOUS_FACTOR_PHRASES:
-            return False
-        if "system" in lowered or "artifact" in lowered:
-            return False
-    return True
-
-
-def _display_bucket(action: dict) -> str:
-    if not _is_queue_item_display_eligible(action):
-        return "suppressed"
-    confidence = str(action.get("confidence") or action.get("confidence_label") or "").strip().lower()
-    if confidence == "low":
-        return "secondary"
-    return "primary"
-
-
-def _sort_key(action: dict) -> tuple:
-    queue_status = str(action.get("_queue_status") or "pending")
-    status_rank = {"overdue": 0, "due_today": 1, "pending": 2}.get(queue_status, 3)
-    priority_rank = {"high": 0, "medium": 1, "low": 2}.get(str(action.get("priority") or "medium"), 1)
-    repeat_rank = 0 if action.get("_is_repeat_issue") else 1
-    follow_up_rank = 0 if queue_status in {"overdue", "due_today"} else 1
-    pace_rank = 0 if "Lower than recent pace" in list(action.get("_surfaced_factors") or []) else 1
-    recognition_rank = 1 if action.get("_is_recognition_opportunity") else 0
-    due_date = parse_action_date(action.get("follow_up_due_at")) or date.max
-    return (status_rank, follow_up_rank, repeat_rank, pace_rank, priority_rank, recognition_rank, due_date, str(action.get("employee_name") or ""))
-
-
 def build_action_queue(
     *,
     open_actions: list[dict],
@@ -282,6 +166,11 @@ def build_action_queue(
     tenant_id: str,
     today: date,
 ) -> list[dict]:
+    """Compatibility wrapper over the canonical queue service.
+
+    Keep this wrapper thin so any remaining legacy surface cannot silently
+    diverge from the service used by daily_signals_service and the Today page.
+    """
     return build_action_queue_service(
         open_actions=open_actions,
         repeat_offenders=repeat_offenders,

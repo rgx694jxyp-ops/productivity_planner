@@ -7,6 +7,9 @@ from core.dependencies import (
     _log_app_error,
 )
 from services.plan_service import PlanEnforcementError, enforce_productivity_view_access, get_productivity_navigation
+from services.plan_service import get_current_plan
+from services.upgrade_telemetry_service import log_upgrade_event, log_upgrade_prompt_impression_once
+from services.upgrade_prompt_service import build_advanced_value_upgrade_prompt
 from core.runtime import _html_mod, date, datetime, io, pd, st, tempfile, time, traceback, init_runtime
 
 try:
@@ -119,6 +122,44 @@ def page_productivity():
         label_visibility="collapsed",
         key="prod_view",
     )
+
+    try:
+        _current_plan = get_current_plan(tenant_id)
+        _plan_prompt = build_advanced_value_upgrade_prompt(plan=_current_plan)
+        if _plan_prompt:
+            _prompt_feature_context = f"advanced_productivity:{prod_mode.lower()}"
+            log_upgrade_prompt_impression_once(
+                st.session_state,
+                event_key=f"productivity_upgrade_prompt:{prod_mode.lower()}",
+                prompt_location="productivity",
+                prompt_type="feature_locked",
+                current_plan=_current_plan,
+                employee_count=0,
+                employee_limit=0,
+                feature_context=_prompt_feature_context,
+                tenant_id=tenant_id,
+                user_id=st.session_state.get("user_id", ""),
+                user_email=st.session_state.get("user_email", ""),
+            )
+            st.info(f"{_plan_prompt['headline']} {_plan_prompt['body']}")
+            st.caption("Upgrade path: Settings -> Billing.")
+            if st.button("View upgrade options", key="productivity_upgrade_prompt_cta"):
+                log_upgrade_event(
+                    "upgrade_prompt_click",
+                    prompt_location="productivity",
+                    prompt_type="feature_locked",
+                    current_plan=_current_plan,
+                    employee_count=0,
+                    employee_limit=0,
+                    feature_context=_prompt_feature_context,
+                    tenant_id=tenant_id,
+                    user_id=st.session_state.get("user_id", ""),
+                    user_email=st.session_state.get("user_email", ""),
+                )
+                st.session_state["goto_page"] = "settings"
+                st.rerun()
+    except Exception:
+        pass
 
     try:
         enforce_productivity_view_access(tenant_id, chosen_prod)

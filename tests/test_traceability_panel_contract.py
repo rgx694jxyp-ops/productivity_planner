@@ -32,7 +32,7 @@ class _FakeStreamlit:
 def _base_context() -> dict:
     return {
         "signal_summary": "Lower than recent pace",
-        "surfaced_because": "Surfaced because recent output is below the recent baseline (prior comparable days and target context when available).",
+        "surfaced_because": "Below recent baseline vs comparable days.",
         "confidence_level": "low",
         "confidence_basis": "only 2 usable points are available",
         "confidence_caveat": "comparison depth is limited",

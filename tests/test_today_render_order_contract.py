@@ -16,7 +16,7 @@ def _build_card(*, line_5: str, freshness: str) -> TodayQueueCardViewModel:
         state="CURRENT",
         line_1="Alex · Receiving",
         line_2="Below expected pace",
-        line_3="Surfaced because recent output is below the recent baseline (prior comparable days and target context when available).",
+        line_3="Below recent baseline vs comparable days.",
         line_4="Based on 4 recent records",
         line_5=line_5,
         freshness_line=freshness,
@@ -37,10 +37,10 @@ def test_today_card_render_order_keeps_confidence_and_freshness_before_evidence(
     )
 
     payload = "\n".join(rendered)
-    confidence_index = payload.index("Confidence: High · Freshness: Updated 2h ago")
+    freshness_index = payload.index("Freshness: Updated 2h ago")
     evidence_index = payload.index("Based on 4 recent records")
 
-    assert confidence_index < evidence_index
+    assert freshness_index < evidence_index
 
 
 def test_today_card_render_order_keeps_low_confidence_branch_before_evidence(monkeypatch):

@@ -172,6 +172,13 @@ def build_action_queue(
     tenant_id: str,
     today: date,
 ) -> list[dict]:
+    """Canonical Today action-queue builder.
+
+    This is the single source of truth for queue-item generation from open
+    actions. daily_signals_service uses it when building the precomputed Today
+    payload, and any legacy UI wrapper must delegate here instead of copying
+    ranking or display-bucket logic.
+    """
     _ = tenant_id
     repeat_lookup = _build_repeat_lookup(repeat_offenders)
     recognition_lookup = _build_recognition_lookup(recognition_opportunities)

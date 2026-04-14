@@ -23,6 +23,18 @@ def validate_rows(parsed_rows: list[dict], *, max_reasonable_uph: float = 500.0)
         work_date = str(row.get("work_date") or "").strip()[:10]
         dept = str(row.get("department") or "").strip()
 
+        if bool(row.get("_used_fallback_date")):
+            issues.append(
+                ImportIssue(
+                    code="date_parse_fallback",
+                    message="Date missing or unparseable; used selected work date",
+                    severity="warning",
+                    row_index=row_idx,
+                    field="Date",
+                    value=str(row.get("_raw_date_value") or ""),
+                )
+            )
+
         if not emp_id:
             issues.append(ImportIssue(code="missing_emp_id", message="Missing Employee ID", row_index=row_idx, field="EmployeeID"))
             continue

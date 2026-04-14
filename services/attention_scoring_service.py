@@ -162,7 +162,7 @@ def _score_one(
     trend_raw = snapshot.get("trend_state") or snapshot.get("trend") or "insufficient_data"
     trend_state = normalize_trend_state(trend_raw)
     if trend_state == "declining":
-        factors.append(AttentionFactor("trend_declining", _WEIGHTS["trend_declining"], "Trend has been declining"))
+        factors.append(AttentionFactor("trend_declining", _WEIGHTS["trend_declining"], "Decline compared to recent baseline performance"))
     elif trend_state == "below_expected":
         factors.append(AttentionFactor("trend_below_expected", _WEIGHTS["trend_below_expected"], "Consistently below expected pace"))
     elif trend_state == "inconsistent":
