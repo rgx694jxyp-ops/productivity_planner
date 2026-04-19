@@ -5,6 +5,7 @@ from services.daily_snapshot_service import (
     snapshots_to_goal_status_rows,
     snapshots_to_history_rows,
 )
+import pytest
 
 
 def test_build_daily_employee_snapshots_generates_expected_fields(monkeypatch):
@@ -31,10 +32,33 @@ def test_build_daily_employee_snapshots_generates_expected_fields(monkeypatch):
 
 
 def test_snapshot_adapters_produce_goal_status_and_history_rows(monkeypatch):
-    monkeypatch.setattr(
-        "services.daily_snapshot_service.get_employees",
-        lambda: [{"emp_id": "E1", "name": "Alex", "department": "Packing"}],
-    )
+    class _EmployeesQuery:
+        def __init__(self):
+            self._tenant = ""
+
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, field, value):
+            if field == "tenant_id":
+                self._tenant = str(value)
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            class _Resp:
+                data = [{"emp_id": "E1", "name": "Alex", "department": "Packing"}] if self._tenant == "tenant-a" else []
+
+            return _Resp()
+
+    class _FakeClient:
+        def table(self, name):
+            assert name == "employees"
+            return _EmployeesQuery()
+
+    monkeypatch.setattr("repositories._common.get_client", lambda: _FakeClient())
     snapshot_rows = [
         {
             "snapshot_date": "2026-04-03",
@@ -59,7 +83,7 @@ def test_snapshot_adapters_produce_goal_status_and_history_rows(monkeypatch):
         }
     ]
 
-    goal_status = snapshots_to_goal_status_rows(snapshot_rows)
+    goal_status = snapshots_to_goal_status_rows(snapshot_rows, tenant_id="tenant-a")
     history_rows = snapshots_to_history_rows(snapshot_rows)
 
     assert goal_status[0]["Employee Name"] == "Alex"
@@ -72,6 +96,35 @@ def test_snapshot_adapters_produce_goal_status_and_history_rows(monkeypatch):
     assert goal_status[0]["data_completeness_status"] == "limited"
     assert history_rows[0]["work_date"] == "2026-04-03"
     assert history_rows[0]["uph"] == 94
+
+
+def test_snapshots_to_goal_status_rows_requires_explicit_tenant_id():
+    snapshot_rows = [
+        {
+            "snapshot_date": "2026-04-03",
+            "employee_id": "E1",
+            "process_name": "Packing",
+            "performance_uph": 94,
+            "recent_average_uph": 90,
+            "prior_average_uph": 82,
+            "expected_uph": 95,
+            "goal_status": "below_goal",
+            "trend_state": "improving",
+            "recent_trend_history": [],
+            "recent_goal_status_history": [],
+            "included_day_count": 3,
+            "workload_units": 470,
+            "workload_hours": 5,
+            "confidence_label": "Medium",
+            "data_completeness_note": "Partial data",
+            "repeat_count": 2,
+            "pattern_marker": "similar_pattern",
+            "raw_metrics": {"target_context": {"target_source_label": "process target"}},
+        }
+    ]
+
+    with pytest.raises(ValueError):
+        snapshots_to_goal_status_rows(snapshot_rows)
 
 
 def test_recompute_daily_employee_snapshots_is_idempotent(monkeypatch):
@@ -108,10 +161,33 @@ def test_recompute_daily_employee_snapshots_is_idempotent(monkeypatch):
 
 def test_get_latest_snapshot_goal_status_rebuilds_when_missing(monkeypatch):
     calls = {"list": 0}
-    monkeypatch.setattr(
-        "services.daily_snapshot_service.get_employees",
-        lambda: [{"emp_id": "E1", "name": "Alex", "department": "Packing"}],
-    )
+    class _EmployeesQuery:
+        def __init__(self):
+            self._tenant = ""
+
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, field, value):
+            if field == "tenant_id":
+                self._tenant = str(value)
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            class _Resp:
+                data = [{"emp_id": "E1", "name": "Alex", "department": "Packing"}] if self._tenant == "tenant-a" else []
+
+            return _Resp()
+
+    class _FakeClient:
+        def table(self, name):
+            assert name == "employees"
+            return _EmployeesQuery()
+
+    monkeypatch.setattr("repositories._common.get_client", lambda: _FakeClient())
 
     def _list_snapshots(**kwargs):
         calls["list"] += 1

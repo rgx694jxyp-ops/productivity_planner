@@ -185,8 +185,8 @@ def _tenant_today_value(tenant_id: str = "") -> date:
         from services.settings_service import get_tenant_local_now
 
         return get_tenant_local_now(str(tenant_id or "")).date()
-    except Exception:
-        return date.today()
+    except Exception as exc:
+        raise RuntimeError("Tenant-local date is unavailable.") from exc
 
 
 def _apply_today_styles() -> None:
@@ -1693,7 +1693,10 @@ def _save_today_quick_note(*, card: TodayQueueCardViewModel, note_text: str) -> 
     department = str(card.process_id or (name_parts[1] if len(name_parts) > 1 else "")).strip()
     performed_by = str(st.session_state.get("user_name") or st.session_state.get("user_email") or "").strip()
     tenant_id = str(st.session_state.get("tenant_id") or "").strip()
-    expected_follow_up_date = (_tenant_today_value(tenant_id) + timedelta(days=7)).isoformat()
+    try:
+        expected_follow_up_date = (_tenant_today_value(tenant_id) + timedelta(days=7)).isoformat()
+    except Exception:
+        return False
 
     write_result = log_coaching_lifecycle_entry(
         employee_id=employee_id,

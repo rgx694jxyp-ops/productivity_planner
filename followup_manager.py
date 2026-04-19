@@ -14,8 +14,8 @@ def _tenant_today(tenant_id: str = "") -> date:
         from services.settings_service import get_tenant_local_now
 
         return get_tenant_local_now(str(tenant_id or "")).date()
-    except Exception:
-        return date.today()
+    except Exception as exc:
+        raise RuntimeError("Tenant-local date is unavailable.") from exc
 
 
 def add_followup(

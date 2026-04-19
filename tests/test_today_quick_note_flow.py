@@ -101,3 +101,38 @@ def test_today_card_quick_note_saves_without_navigation(monkeypatch):
     assert "Checked conveyor calibration" in journal_calls[0][1]
     assert invalidation_calls["count"] == 1
     assert warnings == []
+
+
+def test_today_card_quick_note_degrades_when_tenant_local_date_unavailable(monkeypatch):
+    flash_messages: list[str] = []
+    lifecycle_calls: list[dict] = []
+    errors: list[str] = []
+    rerun_called = {"value": False}
+
+    monkeypatch.setattr("pages.today.st.container", _noop_container)
+    monkeypatch.setattr("pages.today.st.expander", _noop_expander)
+    monkeypatch.setattr("pages.today.st.markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr("pages.today.st.warning", lambda _msg: None)
+    monkeypatch.setattr("pages.today.st.text_area", lambda *args, **kwargs: "Checked issue")
+    monkeypatch.setattr("pages.today.st.button", lambda label, **kwargs: str(label) == "Save quick note")
+    monkeypatch.setattr("pages.today.st.session_state", {"user_email": "lead@example.com", "tenant_id": "t1", "goto_page": "today"})
+    monkeypatch.setattr("pages.today._tenant_today_value", lambda tenant_id="": (_ for _ in ()).throw(RuntimeError("tenant-local date unavailable")))
+    monkeypatch.setattr("pages.today.log_coaching_lifecycle_entry", lambda **kwargs: lifecycle_calls.append(dict(kwargs)) or {"action_id": "A1"})
+    monkeypatch.setattr("pages.today.add_coaching_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr("pages.today.set_flash_message", lambda msg: flash_messages.append(str(msg)))
+    monkeypatch.setattr("pages.today.show_error_state", lambda msg: errors.append(str(msg)))
+    monkeypatch.setattr("pages.today._invalidate_today_write_caches", lambda: None)
+    monkeypatch.setattr("pages.today.st.rerun", lambda: rerun_called.__setitem__("value", True))
+
+    _render_attention_card(
+        card=_card(),
+        key_prefix="today_quick_note_degraded",
+        compact=False,
+        show_action=False,
+    )
+
+    assert lifecycle_calls == []
+    assert rerun_called["value"] is False
+    assert flash_messages == []
+    assert len(errors) == 1
+    assert "Quick note could not be saved right now." in errors[0]

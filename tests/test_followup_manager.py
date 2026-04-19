@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 import followup_manager
 
 
@@ -53,3 +55,13 @@ def test_get_followups_due_today_uses_tenant_local_date(monkeypatch):
 
     assert captured["from_date"] == "2026-04-21"
     assert captured["to_date"] == "2026-04-21"
+
+
+def test_get_followups_for_range_raises_when_tenant_local_date_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "services.settings_service.get_tenant_local_now",
+        lambda _tenant_id: (_ for _ in ()).throw(RuntimeError("tenant clock unavailable")),
+    )
+
+    with pytest.raises(RuntimeError):
+        followup_manager.get_followups_for_range(tenant_id="tenant-a")

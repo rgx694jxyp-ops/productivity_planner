@@ -104,12 +104,10 @@ def list_latest_signal_statuses(*, signal_keys: set[str], tenant_id: str = "") -
         return {}
 
     page_size = max(200, min(1000, len(wanted) * 5))
-    max_scan_rows = max(2000, min(20000, len(wanted) * 200))
-    scanned = 0
     offset = 0
 
     by_signal: dict[str, dict[str, str]] = {}
-    while scanned < max_scan_rows and len(by_signal) < len(wanted):
+    while len(by_signal) < len(wanted):
         upper = offset + page_size - 1
         result = (
             get_client()
@@ -137,7 +135,6 @@ def list_latest_signal_statuses(*, signal_keys: set[str], tenant_id: str = "") -
             if len(by_signal) >= len(wanted):
                 break
 
-        scanned += len(rows)
         if len(rows) < page_size:
             break
         offset += page_size

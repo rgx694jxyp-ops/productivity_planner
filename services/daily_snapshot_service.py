@@ -7,7 +7,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any
 
-from repositories import daily_employee_snapshots_repo, get_employees
+from repositories import daily_employee_snapshots_repo
 from services.activity_records_service import get_recent_activity_records
 from services.signal_interpretation_service import derive_confidence_from_coverage_policy
 from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
@@ -363,11 +363,7 @@ def recompute_daily_employee_snapshots(
 def _employee_lookup(*, tenant_id: str = "") -> dict[str, dict]:
     tid = str(tenant_id or "").strip()
     if not tid:
-        return {
-            str(row.get("emp_id") or "").strip(): row
-            for row in (get_employees() or [])
-            if str(row.get("emp_id") or "").strip()
-        }
+        raise ValueError("tenant_id is required for snapshot employee enrichment")
 
     try:
         from repositories._common import get_client

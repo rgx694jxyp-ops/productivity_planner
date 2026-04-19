@@ -147,3 +147,59 @@ def test_list_latest_signal_statuses_scans_multiple_pages(monkeypatch):
     status_map = list_latest_signal_statuses(signal_keys={signal_key}, tenant_id="tenant-a")
 
     assert status_map[signal_key]["status"] == SIGNAL_STATUS_LOOKED_AT
+
+
+def test_list_latest_signal_statuses_scans_beyond_previous_max_scan_rows(monkeypatch):
+    signal_key = "today-signal:e77:pack:below_expected:stable_trend:2026-04-12"
+    row_count = 21000
+
+    class _DeepHistoryTable:
+        def __init__(self):
+            self._offset = 0
+            self._upper = 0
+
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def range(self, offset, upper):
+            self._offset = int(offset)
+            self._upper = int(upper)
+            return self
+
+        def execute(self):
+            start = self._offset
+            stop = min(self._upper + 1, row_count)
+            rows = []
+            for idx in range(start, stop):
+                is_target = idx == (row_count - 1)
+                key = signal_key if is_target else f"other-{idx}"
+                rows.append(
+                    {
+                        "event_type": "today_signal_status_set",
+                        "details": '{"scope":"today_queue_signal_status","signal_key":"%s","signal_status":"looked_at"}' % key,
+                        "owner": "lead@example.com",
+                        "event_at": "2026-04-12T10:00:00Z",
+                    }
+                )
+
+            class _Resp:
+                data = rows
+
+            return _Resp()
+
+    class _FakeClient:
+        def table(self, name):
+            assert name == "action_events"
+            return _DeepHistoryTable()
+
+    monkeypatch.setattr("services.today_signal_status_service.get_client", lambda: _FakeClient())
+
+    status_map = list_latest_signal_statuses(signal_keys={signal_key}, tenant_id="tenant-a")
+
+    assert status_map[signal_key]["status"] == SIGNAL_STATUS_LOOKED_AT
