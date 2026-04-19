@@ -498,6 +498,8 @@ def build_transient_today_payload(*, signal_date: date, tenant_id: str) -> dict[
 
 
 def read_precomputed_today_signals(*, tenant_id: str, signal_date: date) -> dict[str, Any] | None:
+    tenant_id = str(tenant_id or "").strip()
+
     rows = list_daily_signals(
         tenant_id=tenant_id,
         signal_date=signal_date.isoformat(),
@@ -505,6 +507,14 @@ def read_precomputed_today_signals(*, tenant_id: str, signal_date: date) -> dict
         limit=5,
     )
     if not rows:
+        # First recovery path: build a transient payload for today's date.
+        try:
+            transient = build_transient_today_payload(signal_date=signal_date, tenant_id=tenant_id)
+            if transient:
+                return transient
+        except Exception:
+            pass
+
         # Demo fallback: when no payload exists for today, look for the most recent
         # stored payload from any date. If it belongs to a demo session, reuse it
         # so demo users see their data every day without requiring a daily recompute.
@@ -523,47 +533,57 @@ def read_precomputed_today_signals(*, tenant_id: str, signal_date: date) -> dict
         else:
             return None
 
-    payload = dict((rows[0].get("payload") or {}))
-    home_sections_payload = dict(payload.get("home_sections") or {})
-    home_sections: dict[str, list[InsightCardContract]] = {}
-    for key, cards in home_sections_payload.items():
-        home_sections[str(key)] = [_deserialize_insight_card(card) for card in (cards or [])]
+    try:
+        payload = dict((rows[0].get("payload") or {}))
+        home_sections_payload = dict(payload.get("home_sections") or {})
+        home_sections: dict[str, list[InsightCardContract]] = {}
+        for key, cards in home_sections_payload.items():
+            home_sections[str(key)] = [_deserialize_insight_card(card) for card in (cards or [])]
 
-    attention_payload = dict(payload.get("attention_summary") or {})
-    attention_summary = AttentionSummary(
-        ranked_items=[_deserialize_attention_item(item) for item in (attention_payload.get("ranked_items") or [])],
-        is_healthy=bool(attention_payload.get("is_healthy")),
-        healthy_message=str(attention_payload.get("healthy_message") or ""),
-        suppressed_count=int(attention_payload.get("suppressed_count") or 0),
-        total_evaluated=int(attention_payload.get("total_evaluated") or 0),
-    )
-    decision_items = [_deserialize_decision_item(item) for item in (payload.get("decision_items") or [])]
-    if not decision_items:
-        goal_status = list(payload.get("goal_status") or [])
-        queue_items = list(payload.get("queue_items") or [])
-        import_summary = dict(payload.get("import_summary") or {})
-        weak_data_mode = _is_weak_data_mode(import_summary)
-        try:
-            open_exception_rows = list_open_operational_exceptions(tenant_id=tenant_id, limit=200)
-        except Exception:
-            open_exception_rows = []
-        decision_items = build_decision_items(
-            goal_status=goal_status,
-            queue_items=queue_items,
-            open_exception_rows=open_exception_rows,
-            tenant_id=tenant_id,
-            today=signal_date,
-            weak_data_mode=weak_data_mode,
+        attention_payload = dict(payload.get("attention_summary") or {})
+        attention_summary = AttentionSummary(
+            ranked_items=[_deserialize_attention_item(item) for item in (attention_payload.get("ranked_items") or [])],
+            is_healthy=bool(attention_payload.get("is_healthy")),
+            healthy_message=str(attention_payload.get("healthy_message") or ""),
+            suppressed_count=int(attention_payload.get("suppressed_count") or 0),
+            total_evaluated=int(attention_payload.get("total_evaluated") or 0),
         )
+        decision_items = [_deserialize_decision_item(item) for item in (payload.get("decision_items") or [])]
+        if not decision_items:
+            goal_status = list(payload.get("goal_status") or [])
+            queue_items = list(payload.get("queue_items") or [])
+            import_summary = dict(payload.get("import_summary") or {})
+            weak_data_mode = _is_weak_data_mode(import_summary)
+            try:
+                open_exception_rows = list_open_operational_exceptions(tenant_id=tenant_id, limit=200)
+            except Exception:
+                open_exception_rows = []
+            decision_items = build_decision_items(
+                goal_status=goal_status,
+                queue_items=queue_items,
+                open_exception_rows=open_exception_rows,
+                tenant_id=tenant_id,
+                today=signal_date,
+                weak_data_mode=weak_data_mode,
+            )
 
-    return {
-        "tenant_id": tenant_id,
-        "as_of_date": signal_date.isoformat(),
-        "queue_items": list(payload.get("queue_items") or []),
-        "goal_status": list(payload.get("goal_status") or []),
-        "import_summary": dict(payload.get("import_summary") or {}),
-        "home_sections": home_sections,
-        "attention_summary": attention_summary,
-        "decision_items": decision_items,
-        "decision_summary": build_decision_summary(decision_items) if decision_items else attention_summary,
-    }
+        return {
+            "tenant_id": tenant_id,
+            "as_of_date": signal_date.isoformat(),
+            "queue_items": list(payload.get("queue_items") or []),
+            "goal_status": list(payload.get("goal_status") or []),
+            "import_summary": dict(payload.get("import_summary") or {}),
+            "home_sections": home_sections,
+            "attention_summary": attention_summary,
+            "decision_items": decision_items,
+            "decision_summary": build_decision_summary(decision_items) if decision_items else attention_summary,
+        }
+    except Exception:
+        # Corrupt/stale persisted payloads should not block Today rendering.
+        try:
+            transient = build_transient_today_payload(signal_date=signal_date, tenant_id=tenant_id)
+            if transient:
+                return transient
+        except Exception:
+            pass
+        return None

@@ -116,4 +116,20 @@ def bust_cache():
     raw_cached_open_coaching_note_counts.clear()
     raw_cached_active_flags.clear()
     raw_cached_coaching_notes_for.clear()
+
+    # Clear non-Streamlit read caches used by Today/snapshot paths.
+    try:
+        from services.today_home_service import clear_today_read_caches
+
+        clear_today_read_caches()
+    except Exception:
+        pass
+
+    try:
+        from services.daily_snapshot_service import _clear_latest_snapshot_cache
+
+        _clear_latest_snapshot_cache()
+    except Exception:
+        pass
+
     st.session_state.pop("_current_plan", None)

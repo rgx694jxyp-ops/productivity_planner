@@ -214,11 +214,19 @@ def enforce_subscription_access() -> bool:
         except Exception as error:
             log_app_error(
                 "subscription_enforcement",
-                "Subscription entitlement lookup failed; falling back to allow access.",
+                "Subscription entitlement lookup failed; denying access until verification succeeds.",
                 detail=str(error),
                 severity="warning",
             )
-            sub_cached = True
+            sub_cached = False
+            st.session_state["_sub_entitlement"] = {
+                "has_access": False,
+                "status": "unknown",
+                "access_reason": "entitlement_lookup_failed",
+                "plan": "starter",
+            }
+            st.session_state["_billing_entitlement"] = st.session_state["_sub_entitlement"]
+            st.session_state["_billing_entitlement_ts"] = time.time()
         st.session_state["_sub_check_result"] = sub_cached
         st.session_state["_sub_check_ts"] = time.time()
 

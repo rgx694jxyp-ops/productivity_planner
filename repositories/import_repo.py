@@ -6,7 +6,7 @@ import math
 from datetime import date, timedelta
 from typing import Callable
 
-from repositories._common import get_client, get_tenant_id, log_error, tenant_fields, tenant_query
+from repositories._common import get_client, get_tenant_id, log_error, require_tenant, tenant_query
 from repositories.employees_repo import get_employees
 from services.app_logging import log_error as log_app_error
 from services.app_logging import log_info, log_warn
@@ -148,11 +148,10 @@ def batch_store_uph_history(
     if not records:
         return
 
+    tid = require_tenant()
     sb = get_client()
     if not records[0].get("tenant_id"):
-        fields = tenant_fields()
-        if fields:
-            records = [{**record, **fields} for record in records]
+        records = [{**record, "tenant_id": tid} for record in records]
 
     chunk_size = 2000
     total_records = len(records)

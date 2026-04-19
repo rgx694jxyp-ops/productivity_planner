@@ -149,3 +149,35 @@ def test_get_latest_snapshot_goal_status_rebuilds_when_missing(monkeypatch):
     assert snapshot_date == "2026-04-03"
     assert goal_status[0]["EmployeeID"] == "E1"
     assert history_rows[0]["emp_id"] == "E1"
+
+
+def test_recompute_daily_employee_snapshots_uses_tenant_local_date_for_defaults(monkeypatch):
+    monkeypatch.setattr(
+        "services.daily_snapshot_service.get_recent_activity_records",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "services.daily_snapshot_service.daily_employee_snapshots_repo.batch_upsert_daily_employee_snapshots",
+        lambda rows: None,
+    )
+    monkeypatch.setattr(
+        "services.daily_snapshot_service.daily_employee_snapshots_repo.delete_daily_employee_snapshots",
+        lambda **kwargs: None,
+    )
+
+    class _LocalNow:
+        @staticmethod
+        def date():
+            from datetime import date as _date
+
+            return _date(2026, 4, 19)
+
+    monkeypatch.setattr(
+        "services.settings_service.get_tenant_local_now",
+        lambda _tenant_id: _LocalNow(),
+    )
+
+    result = recompute_daily_employee_snapshots(tenant_id="tenant-a", days=3)
+
+    assert result["to_date"] == "2026-04-19"
+    assert result["from_date"] == "2026-04-17"

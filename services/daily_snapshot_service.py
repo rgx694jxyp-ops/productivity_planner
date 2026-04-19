@@ -19,6 +19,15 @@ _SNAPSHOT_READ_CACHE_TTL_SECONDS = 30
 _LATEST_SNAPSHOT_CACHE: dict[tuple[str, int], tuple[float, tuple[list[dict], list[dict], str]]] = {}
 
 
+def _tenant_today(tenant_id: str = "") -> date:
+    try:
+        from services.settings_service import get_tenant_local_now
+
+        return get_tenant_local_now(str(tenant_id or "")).date()
+    except Exception:
+        return date.today()
+
+
 def _latest_snapshot_cache_key(*, tenant_id: str, days: int) -> tuple[str, int]:
     return (str(tenant_id or "").strip(), int(days or 30))
 
@@ -291,7 +300,7 @@ def recompute_daily_employee_snapshots(
         span_days = max(1, (end_date - start_date).days + 1) if start_date and end_date else max(1, int(days or 30))
         fetch_days = span_days + (lookback_days * 3)
     else:
-        end_date = date.today()
+        end_date = _tenant_today(tenant_id)
         fetch_days = max(1, int(days or 30)) + (lookback_days * 3)
         start_date = end_date - timedelta(days=max(0, int(days or 30) - 1))
 

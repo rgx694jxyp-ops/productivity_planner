@@ -384,7 +384,7 @@ def _clear_today_demo_recovery_state() -> None:
         tenant_id = str(st.session_state.get("tenant_id", "") or "").strip()
         if tenant_id:
             from repositories.daily_signals_repo import delete_daily_signals
-            delete_daily_signals(tenant_id=tenant_id)
+            delete_daily_signals(tenant_id=tenant_id, clear_all=True)
     except Exception:
         pass
 

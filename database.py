@@ -193,9 +193,14 @@ def _tenant_fields() -> dict:
 
 
 def _tq(query):
-    """Apply tenant_id filter to a Supabase query if a tenant is set."""
+    """Apply tenant_id filter to a Supabase query. Raises if no tenant context is set."""
     tid = get_tenant_id()
-    return query.eq("tenant_id", tid) if tid else query
+    if not tid:
+        raise RuntimeError(
+            "No tenant context found — refusing to execute unscoped query. "
+            "Ensure the user is authenticated before calling DB helpers."
+        )
+    return query.eq("tenant_id", tid)
 
 
 def _first_row(query) -> Optional[dict]:
@@ -275,7 +280,7 @@ def delete_client(client_id: str):
 
 def get_orders(client_id: str = None, status: str = None) -> list[dict]:
     sb = get_client()
-    q  = sb.table("orders").select("*, clients(name)")
+    q  = _tq(sb.table("orders").select("*, clients(name)"))
     if client_id:
         q = q.eq("client_id", client_id)
     if status:
@@ -286,7 +291,7 @@ def get_orders(client_id: str = None, status: str = None) -> list[dict]:
 
 def get_order(order_id: str) -> dict:
     sb = get_client()
-    r  = sb.table("orders").select("*, clients(name)").eq("id", order_id).execute()
+    r  = _tq(sb.table("orders").select("*, clients(name)").eq("id", order_id)).execute()
     return r.data[0] if r.data else {}
 
 
@@ -313,7 +318,7 @@ def create_order(client_id: str, order_number: str, description: str,
 
 def update_order(order_id: str, **kwargs) -> dict:
     sb = get_client()
-    r  = sb.table("orders").update(kwargs).eq("id", order_id).execute()
+    r  = _tq(sb.table("orders").update(kwargs).eq("id", order_id)).execute()
     return r.data[0] if r.data else {}
 
 
@@ -422,17 +427,19 @@ def upsert_employee(emp_id: str, name: str, department: str = "",
         }).eq("emp_id", emp_id)).execute()
         return r.data[0] if r.data else {}
 
-    # Check WITHOUT tenant filter — row may exist with NULL/different tenant_id
-    r_any = sb.table("employees").select("id").eq("emp_id", emp_id).execute()
+    # Check WITHOUT tenant filter — row may exist with NULL tenant_id (truly orphaned)
+    r_any = sb.table("employees").select("id, tenant_id").eq("emp_id", emp_id).execute()
     if r_any.data:
-        _enforce_employee_capacity_for_ids([emp_id], tid)
-        # Claim the orphaned row for this tenant
-        update_data = {
-            "name": name, "department": department, "shift": shift, "is_new": False,
-            **_tenant_fields(),
-        }
-        r = sb.table("employees").update(update_data).eq("emp_id", emp_id).execute()
-        return r.data[0] if r.data else {}
+        # Only claim rows with no tenant_id — never overwrite another tenant's employee
+        orphan = next((row for row in r_any.data if not row.get("tenant_id")), None)
+        if orphan:
+            _enforce_employee_capacity_for_ids([emp_id], tid)
+            update_data = {
+                "name": name, "department": department, "shift": shift, "is_new": False,
+                **_tenant_fields(),
+            }
+            r = sb.table("employees").update(update_data).eq("id", orphan["id"]).execute()
+            return r.data[0] if r.data else {}
 
     _enforce_employee_capacity_for_ids([emp_id], tid)
     r = sb.table("employees").insert({
@@ -503,7 +510,7 @@ def mark_employee_not_new(emp_id: str):
 def get_assignments(order_id: str = None, emp_id: str = None,
                     active_only: bool = True) -> list[dict]:
     sb = get_client()
-    q  = sb.table("order_assignments").select("*")
+    q  = _tq(sb.table("order_assignments").select("*"))
     if order_id:
         q = q.eq("order_id", order_id)
     if emp_id:
@@ -517,9 +524,9 @@ def get_assignments(order_id: str = None, emp_id: str = None,
 def assign_employee_to_order(order_id: str, emp_id: str) -> dict:
     """Assign an employee to an order. Deactivates any previous active assignments for that employee."""
     sb = get_client()
-    # Deactivate old active assignments for this employee
-    sb.table("order_assignments").update({"is_active": False}).eq(
-        "emp_id", emp_id).eq("is_active", True).execute()
+    # Deactivate old active assignments for this employee (scoped to tenant)
+    _tq(sb.table("order_assignments").update({"is_active": False}).eq(
+        "emp_id", emp_id).eq("is_active", True)).execute()
     # Create new assignment
     r = sb.table("order_assignments").insert({
         "order_id": order_id, "emp_id": emp_id,
@@ -536,8 +543,9 @@ def assign_employee_split(emp_id: str, order_assignments: list[dict]):
     Deactivates all previous assignments first.
     """
     sb = get_client()
-    sb.table("order_assignments").update({"is_active": False}).eq(
-        "emp_id", emp_id).eq("is_active", True).execute()
+    # Deactivate only this tenant's assignments for this employee
+    _tq(sb.table("order_assignments").update({"is_active": False}).eq(
+        "emp_id", emp_id).eq("is_active", True)).execute()
     for a in order_assignments:
         sb.table("order_assignments").insert({
             "order_id":    a["order_id"],
@@ -656,7 +664,7 @@ def bulk_submit_units(subs: list, source_file: str = "") -> tuple:
 def get_submissions(order_id: str = None, emp_id: str = None,
                     from_date: str = None) -> list[dict]:
     sb = get_client()
-    q  = sb.table("unit_submissions").select("*").order("work_date", desc=True)
+    q  = _tq(sb.table("unit_submissions").select("*")).order("work_date", desc=True)
     if order_id: q = q.eq("order_id", order_id)
     if emp_id:   q = q.eq("emp_id", emp_id)
     if from_date: q = q.gte("work_date", from_date)
@@ -749,7 +757,9 @@ def delete_duplicate_uph_history():
 
     seen, to_delete = {}, []
     for row in all_rows:
-        key = (row.get("emp_id",""), row.get("work_date",""))
+        # Key must match the DB unique constraint: tenant_id, emp_id, work_date, department
+        # Using only emp_id+work_date would incorrectly deduplicate split-department days.
+        key = (row.get("emp_id",""), row.get("work_date",""), row.get("department",""))
         if key in seen:
             to_delete.append(row["id"])
         else:
@@ -846,9 +856,16 @@ def archive_coaching_notes(emp_id: str):
     
     try:
         _tq(sb.table("coaching_notes").update({"archived": True}).eq("emp_id", numeric_emp_id)).execute()
-    except Exception:
-        # archived column may not exist — fall back to hard delete
-        _tq(sb.table("coaching_notes").delete().eq("emp_id", numeric_emp_id)).execute()
+    except Exception as exc:
+        # Only fall back to hard delete if the 'archived' column is genuinely missing
+        err_str = str(exc).lower()
+        if "column" in err_str and "archived" in err_str:
+            _tq(sb.table("coaching_notes").delete().eq("emp_id", numeric_emp_id)).execute()
+        else:
+            log_error("coaching_notes",
+                      f"archive_coaching_notes failed for emp_id={numeric_emp_id}: {exc}",
+                      severity="error")
+            raise
 
 
 # ── Shifts ────────────────────────────────────────────────────────────────────
@@ -917,8 +934,8 @@ def store_client_trend(client_id: str, period: str, avg_uph: float,
 
 def get_client_trends(client_id: str) -> list[dict]:
     sb = get_client()
-    r  = sb.table("client_trends").select("*").eq(
-        "client_id", client_id).order("period").execute()
+    r  = _tq(sb.table("client_trends").select("*").eq(
+        "client_id", client_id)).order("period").execute()
     return r.data or []
 
 
@@ -949,8 +966,8 @@ def suggest_employees_for_order(order_id: str,
         for i in range(0, len(emp_ids), chunk_size):
             chunk = emp_ids[i:i + chunk_size]
             try:
-                r = sb.table("uph_history").select("emp_id, uph") \
-                      .in_("emp_id", chunk).gte("work_date", cutoff).execute()
+                r = _tq(sb.table("uph_history").select("emp_id, uph") \
+                      .in_("emp_id", chunk).gte("work_date", cutoff)).execute()
                 all_history.extend(r.data or [])
             except Exception:
                 pass
@@ -1547,7 +1564,7 @@ def _get_live_subscription_fallback(tenant_id: str = "") -> Optional[dict]:
         if not _ts:
             return None
         try:
-            return datetime.fromtimestamp(int(_ts)).isoformat()
+            return datetime.utcfromtimestamp(int(_ts)).isoformat() + "Z"
         except Exception:
             return None
 

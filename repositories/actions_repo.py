@@ -100,6 +100,29 @@ def list_actions(tenant_id: str = "", statuses: list[str] | None = None, employe
     if not tid:
         return []
 
+    try:
+        sb = get_client()
+        query = sb.table("actions").select("*").eq("tenant_id", tid).order("last_event_at", desc=True)
+
+        if employee_id:
+            query = query.eq("employee_id", str(employee_id))
+        if statuses:
+            normalized = [str(status or "").lower() for status in statuses if str(status or "").strip()]
+            if normalized:
+                query = query.in_("status", normalized)
+
+        result = query.execute()
+        return result.data or []
+    except Exception as error:
+        log_warn(
+            "repo_actions_list_failed",
+            "Repository action listing failed.",
+            tenant_id=tid,
+            context={"employee_id": str(employee_id or ""), "statuses": statuses or []},
+            error=error,
+        )
+        return []
+
 
 def get_action(action_id: str, tenant_id: str = "", columns: str = "*") -> dict:
     tid = tenant_id or get_tenant_id()
@@ -126,29 +149,6 @@ def get_action(action_id: str, tenant_id: str = "", columns: str = "*") -> dict:
             error=error,
         )
         return {}
-
-    try:
-        sb = get_client()
-        query = sb.table("actions").select("*").eq("tenant_id", tid).order("last_event_at", desc=True)
-
-        if employee_id:
-            query = query.eq("employee_id", str(employee_id))
-        if statuses:
-            normalized = [str(status or "").lower() for status in statuses if str(status or "").strip()]
-            if normalized:
-                query = query.in_("status", normalized)
-
-        result = query.execute()
-        return result.data or []
-    except Exception as error:
-        log_warn(
-            "repo_actions_list_failed",
-            "Repository action listing failed.",
-            tenant_id=tid,
-            context={"employee_id": str(employee_id or ""), "statuses": statuses or []},
-            error=error,
-        )
-        return []
 
 
 def update_action(action_id: str, updates: dict, tenant_id: str = "") -> dict:

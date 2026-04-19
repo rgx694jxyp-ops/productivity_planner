@@ -137,9 +137,11 @@ def fetch_precomputed_today_payload(
 
     payload_date = str(payload.get("as_of_date") or "")[:10]
     payload_tenant = str(payload.get("tenant_id") or "")
+    expected_tenant = str(tenant_id or "")
     if payload_date != today.isoformat():
         return None
-    if payload_tenant and payload_tenant != str(tenant_id or ""):
+    # Session fallback must be tenant-exact to prevent cross-tenant reuse.
+    if expected_tenant and payload_tenant != expected_tenant:
         return None
 
     if "home_sections" not in payload or "attention_summary" not in payload:

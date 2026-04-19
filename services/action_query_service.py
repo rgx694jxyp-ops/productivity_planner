@@ -22,13 +22,22 @@ from repositories import action_events_repo, actions_repo
 HIGH_PERFORMER_LOOKBACK_DAYS = 21
 OPEN_ACTION_STATUSES = OPEN_STATUSES
 
+
+def _tenant_today(tenant_id: str = "") -> date:
+    try:
+        from services.settings_service import get_tenant_local_now
+
+        return get_tenant_local_now(str(tenant_id or "")).date()
+    except Exception:
+        return date.today()
+
 def get_open_actions(
     tenant_id: str = "",
     employee_id: str = "",
     today: date | None = None,
 ) -> list[dict]:
     """Return all open actions (not resolved/deprioritized), enriched with runtime status."""
-    today = today or date.today()
+    today = today or _tenant_today(tenant_id)
     try:
         actions = actions_repo.list_actions(
             tenant_id=tenant_id,
@@ -49,7 +58,7 @@ def get_open_actions(
 
 def get_overdue_actions(tenant_id: str = "", today: date | None = None) -> list[dict]:
     """Return all actions with follow_up_due_at in the past."""
-    today = today or date.today()
+    today = today or _tenant_today(tenant_id)
     try:
         open_actions = get_open_actions(tenant_id=tenant_id, today=today)
         return [a for a in open_actions if a.get("_runtime_status") == "overdue"]
@@ -81,7 +90,7 @@ def get_employee_actions(
     today: date | None = None,
 ) -> list[dict]:
     """Return all actions for one employee, enriched with runtime status."""
-    today = today or date.today()
+    today = today or _tenant_today(tenant_id)
     try:
         actions = actions_repo.list_actions(
             tenant_id=tenant_id,

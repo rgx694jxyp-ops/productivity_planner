@@ -304,3 +304,42 @@ def test_read_precomputed_rebuilds_missing_decision_items(monkeypatch):
     assert precomputed is not None
     assert [item.employee_id for item in precomputed["decision_items"]] == ["E1"]
     assert precomputed["decision_summary"].total_evaluated == 1
+
+
+def test_read_precomputed_falls_back_to_transient_on_corrupt_payload(monkeypatch):
+    signal_date = date(2026, 4, 13)
+    corrupt_row = {
+        "payload": {
+            "queue_items": [],
+            "goal_status": [],
+            "import_summary": {"days": 1},
+            "home_sections": {"needs_attention": [123]},
+            "attention_summary": {"ranked_items": []},
+            "decision_items": [],
+        }
+    }
+
+    transient_payload = {
+        "tenant_id": "tenant-1",
+        "as_of_date": "2026-04-13",
+        "queue_items": [{"employee_id": "E1"}],
+        "goal_status": [],
+        "import_summary": {"days": 1},
+        "home_sections": {},
+        "attention_summary": AttentionSummary(
+            ranked_items=[],
+            is_healthy=True,
+            healthy_message="",
+            suppressed_count=0,
+            total_evaluated=0,
+        ),
+        "decision_items": [],
+        "decision_summary": build_decision_summary([]),
+    }
+
+    monkeypatch.setattr(dss, "list_daily_signals", lambda **kwargs: [corrupt_row])
+    monkeypatch.setattr(dss, "build_transient_today_payload", lambda **kwargs: transient_payload)
+
+    precomputed = dss.read_precomputed_today_signals(tenant_id="tenant-1", signal_date=signal_date)
+
+    assert precomputed is transient_payload

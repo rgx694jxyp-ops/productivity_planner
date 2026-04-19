@@ -14,6 +14,15 @@ _REPEAT_ISSUE_TYPES: frozenset[str] = frozenset({
     IssueType.REPEAT_NO_IMPROVEMENT,
 })
 
+
+def _tenant_today(tenant_id: str = "") -> date:
+    try:
+        from services.settings_service import get_tenant_local_now
+
+        return get_tenant_local_now(str(tenant_id or "")).date()
+    except Exception:
+        return date.today()
+
 def get_repeat_offenders(
     tenant_id: str = "",
     today: date | None = None,
@@ -32,7 +41,7 @@ def get_repeat_offenders(
     Each dict keys: employee_id, employee_name, department, open_action_count,
     coached_cycle_count, no_improvement_count, max_days_open, signals, actions.
     """
-    today = today or date.today()
+    today = today or _tenant_today(tenant_id)
     try:
         actions = open_actions
         if actions is None:
@@ -159,7 +168,7 @@ def get_ignored_high_performers(
     Keys: employee_id, employee_name, department, days_waiting, trigger_summary,
           action_id, action, signals.
     """
-    today = today or date.today()
+    today = today or _tenant_today(tenant_id)
     try:
         actions = open_actions
         if actions is None:
@@ -244,7 +253,7 @@ def get_action_factors(
 
     Returns dict with: factors (list[str]), reason, urgency.
     """
-    today = today or date.today()
+    today = today or _tenant_today(tenant_id)
     try:
         action_id = str(action.get("id") or "")
         issue_type = str(action.get("issue_type") or "")

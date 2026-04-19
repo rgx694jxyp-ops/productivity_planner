@@ -48,6 +48,14 @@ def _action_log_context(
         context.update(extra)
     return context
 
+def _tenant_today(tenant_id: str = "") -> date:
+    try:
+        from services.settings_service import get_tenant_local_now
+
+        return get_tenant_local_now(str(tenant_id or "")).date()
+    except Exception:
+        return date.today()
+
 def create_action(
     employee_id: str,
     employee_name: str,
@@ -292,7 +300,7 @@ def reopen_action(
 
 def refresh_action_statuses(tenant_id: str = "", today: date | None = None) -> int:
     """Scan open actions, persist derived runtime status updates, and return update count."""
-    today = today or date.today()
+    today = today or _tenant_today(tenant_id)
     try:
         actions = actions_repo.list_actions(
             tenant_id=tenant_id,
@@ -361,6 +369,8 @@ def log_action_event(
             next_follow_up_at=next_follow_up_at,
             tenant_id=tenant_id,
         )
+        if not result:
+            raise RuntimeError("Action event write returned no record.")
         if result:
             log_operational_event(
                 "action_event_created",
@@ -381,7 +391,7 @@ def log_action_event(
             context=_action_log_context(action_id=action_id, employee_id=employee_id, event_type=event_type),
             error=e,
         )
-        return {}
+        raise
 
 
 
@@ -415,6 +425,8 @@ def save_action_touchpoint(
             next_follow_up_at=next_follow_up_at,
             tenant_id=tenant_id,
         )
+        if not event:
+            raise RuntimeError("Action touchpoint event write failed.")
         return result or event
     except Exception as e:
         log_error(
@@ -424,7 +436,7 @@ def save_action_touchpoint(
             context=_action_log_context(action_id=action_id, event_type=event_type),
             error=e,
         )
-        return {}
+        raise
 
 
 def log_coaching_lifecycle_entry(
@@ -507,6 +519,8 @@ def log_coaching_lifecycle_entry(
             next_follow_up_at=expected_follow_up_date,
             tenant_id=tenant_id,
         )
+        if not event:
+            raise RuntimeError("Coaching lifecycle event write failed.")
 
         return {
             "action_id": action_id,
@@ -522,7 +536,7 @@ def log_coaching_lifecycle_entry(
             context=_action_log_context(employee_id=employee_id, extra={"existing_action_id": existing_action_id}),
             error=e,
         )
-        return {}
+        raise
 
 
 
@@ -551,6 +565,8 @@ def log_recognition_event(
             next_follow_up_at=next_follow_up_at,
             tenant_id=tenant_id,
         )
+        if not event:
+            raise RuntimeError("Recognition event write failed.")
         return event
     except Exception as e:
         log_error(
@@ -560,7 +576,7 @@ def log_recognition_event(
             context=_action_log_context(action_id=action_id, employee_id=employee_id),
             error=e,
         )
-        return {}
+        raise
 
 
 
@@ -607,7 +623,7 @@ def trigger_repeated_low_performance(
                     trigger_summary=f"Below baseline {low_count}/{lookback_shifts} shifts",
                     action_type="coaching",
                     success_metric=f"Reach {baseline:.0f}+ UPH consistently",
-                    follow_up_due_at=(date.today() + timedelta(days=7)).isoformat(),
+                    follow_up_due_at=(_tenant_today(tenant_id) + timedelta(days=7)).isoformat(),
                     baseline_uph=baseline,
                     latest_uph=latest_uph,
                     tenant_id=tenant_id,
@@ -641,7 +657,7 @@ def trigger_follow_up_due(
     
     Returns: {"overdue_count": int, "at_risk_count": int}
     """
-    today = today or date.today()
+    today = today or _tenant_today(tenant_id)
     result = {"overdue_count": 0, "at_risk_count": 0}
     try:
         open_actions = get_open_actions(tenant_id=tenant_id, today=today)
@@ -738,7 +754,7 @@ def trigger_ignored_high_performer(
         
         # Group by employee and check recent performance
         history_by_emp = _history_by_emp(history)
-        cutoff = date.today() - timedelta(days=lookback_days)
+        cutoff = _tenant_today(tenant_id) - timedelta(days=lookback_days)
         existing_actions = get_open_actions(tenant_id=tenant_id)
         active_emp_ids = {str(a.get("employee_id")) for a in existing_actions}
         
@@ -765,7 +781,7 @@ def trigger_ignored_high_performer(
                     trigger_summary=f"Top {int((1-top_percentile_threshold)*100)}% performer ({avg_recent:.0f} avg UPH)",
                     action_type="recognition",
                     success_metric="Recognize achievement and explore development opportunities",
-                    follow_up_due_at=(date.today() + timedelta(days=14)).isoformat(),
+                    follow_up_due_at=(_tenant_today(tenant_id) + timedelta(days=14)).isoformat(),
                     baseline_uph=threshold,
                     latest_uph=avg_recent,
                     tenant_id=tenant_id,

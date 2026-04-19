@@ -123,3 +123,20 @@ def test_get_today_signals_fallback_receives_session_payload_context(monkeypatch
 
     payload = ths.get_today_signals(tenant_id="tenant-1", as_of_date="2026-04-13")
     assert payload is not None
+
+
+def test_fetch_precomputed_today_payload_requires_exact_tenant_match():
+    payload = ths.fetch_precomputed_today_payload(
+        tenant_id="tenant-a",
+        today=date(2026, 4, 13),
+        session_state={
+            "_today_precomputed_payload": {
+                "tenant_id": "",
+                "as_of_date": "2026-04-13",
+                "home_sections": {},
+                "attention_summary": None,
+            }
+        },
+    )
+
+    assert payload is None

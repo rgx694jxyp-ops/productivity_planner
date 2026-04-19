@@ -22,6 +22,10 @@ def clear_billing_cache(*, clear_checkout_state: bool = False, clear_portal_feed
     for key in _BILLING_SESSION_KEYS:
         st.session_state.pop(key, None)
 
+    for key in list(st.session_state.keys()):
+        if key.startswith("_live_subscription_fallback_") or key.startswith("_live_subscription_fallback_ts_"):
+            st.session_state.pop(key, None)
+
     if clear_checkout_state:
         st.session_state.pop("_checkout_url", None)
         st.session_state.pop("_checkout_plan", None)

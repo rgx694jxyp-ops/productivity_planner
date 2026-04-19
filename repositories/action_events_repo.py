@@ -24,9 +24,21 @@ def log_action_event(
     """Append one immutable event to action_events."""
     tid = tenant_id or get_tenant_id()
     if not tid or not str(event_type or "").strip():
-        return {}
+        log_error(
+            "action_events_missing_fields",
+            "log_action_event called without tenant_id or event_type — event not written.",
+            detail=f"tid={repr(tid)}, event_type={repr(event_type)}, action_id={repr(action_id)}",
+            severity="warning",
+        )
+        raise ValueError("tenant_id and event_type are required for action event logging.")
     if not str(action_id or "").strip() and not str(employee_id or "").strip() and not str(linked_exception_id or "").strip():
-        return {}
+        log_error(
+            "action_events_missing_fields",
+            "log_action_event called without action_id, employee_id, or linked_exception_id — event not written.",
+            detail=f"tid={repr(tid)}, event_type={repr(event_type)}",
+            severity="warning",
+        )
+        raise ValueError("action_id, employee_id, or linked_exception_id is required for action event logging.")
 
     owner_value = str(owner or performed_by or "")[:120]
     detail_text = str(details or notes or "")[:2000]
@@ -68,7 +80,7 @@ def log_action_event(
             },
             error=error,
         )
-        return {}
+        raise RuntimeError("Action event write failed.") from error
 
 
 def list_action_events(

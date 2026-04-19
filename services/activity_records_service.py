@@ -61,7 +61,6 @@ def build_activity_records_from_import_rows(
 
         records.append(
             {
-                "tenant_id": str(row.get("tenant_id") or "").strip(),
                 "employee_id": employee_id,
                 "activity_date": activity_date,
                 "process_name": process_name,
@@ -155,7 +154,8 @@ def get_recent_activity_records(*, tenant_id: str = "", employee_id: str = "", d
     except Exception:
         pass
     
-    legacy_rows = import_repo.get_all_uph_history(days=days, limit=max(1, int(limit or 500)))
+    fetch_limit = 0 if employee_id else max(1, int(limit or 500))
+    legacy_rows = import_repo.get_all_uph_history(days=days, limit=fetch_limit)
     
     try:
         from core.dependencies import _log_operational_event

@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from repositories._common import get_client, log_error, tenant_fields, tenant_query
+from repositories._common import get_client, log_error, require_tenant, tenant_query
 
 
 def batch_upsert_daily_employee_snapshots(rows: list[dict]) -> None:
     if not rows:
         return
 
+    tid = require_tenant()
     payload = rows
     if not payload[0].get("tenant_id"):
-        fields = tenant_fields()
-        if fields:
-            payload = [{**row, **fields} for row in payload]
+        payload = [{**row, "tenant_id": tid} for row in payload]
 
     sb = get_client()
     for index in range(0, len(payload), 500):
@@ -34,6 +33,11 @@ def batch_upsert_daily_employee_snapshots(rows: list[dict]) -> None:
 
 
 def delete_daily_employee_snapshots(*, tenant_id: str = "", from_date: str = "", to_date: str = "", employee_id: str = "") -> None:
+    if not from_date and not to_date and not employee_id:
+        raise ValueError(
+            "delete_daily_employee_snapshots requires at least one of: from_date, to_date, or employee_id. "
+            "An unbounded delete would remove all snapshots for the tenant."
+        )
     sb = get_client()
     if tenant_id:
         query = sb.table("daily_employee_snapshots").delete().eq("tenant_id", tenant_id)

@@ -768,49 +768,61 @@ def _render_return_trigger(trigger: TodayReturnTriggerViewModel | None) -> None:
 
 
 def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bool:
-    """Rebuild snapshots then compute today's signals. Called on first load and post-import."""
+    """Rebuild snapshots then compute today's signals.
+    
+    Uses per-date recovery lock to prevent concurrent rebuilds during Streamlit reruns.
+    Returns True if recovery completed successfully, False if skipped or failed.
+    """
     recovery_lock_key = f"_today_recovery_in_progress_{today_value.isoformat()}"
     recovery_started_at_key = f"_today_recovery_started_at_{today_value.isoformat()}"
-    recovery_completed_at_key = f"_today_recovery_completed_at_{today_value.isoformat()}"
 
     now_ts = time.time()
     started_at = float(st.session_state.get(recovery_started_at_key, 0.0) or 0.0)
+
+    # If recovery is already in progress and not expired, skip
     if bool(st.session_state.get(recovery_lock_key)) and (now_ts - started_at) < _TODAY_RECOVERY_LOCK_TTL_SECONDS:
         return False
 
+    # Acquire lock before any work
     st.session_state[recovery_lock_key] = True
     st.session_state[recovery_started_at_key] = now_ts
+
     try:
         from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
         from services.daily_snapshot_service import get_latest_snapshot_goal_status, recompute_daily_employee_snapshots
 
-        snapshot_err = None
+        # Check if snapshots need recomputation
         latest_snapshot_date = ""
         try:
-            _goal_status, _history_rows, latest_snapshot_date = get_latest_snapshot_goal_status(
+            _, _, latest_snapshot_date = get_latest_snapshot_goal_status(
                 tenant_id=tenant_id,
                 days=30,
                 rebuild_if_missing=False,
             )
-        except Exception:
+        except Exception as e:
+            _log_app_error(
+                "recovery_snapshot_check",
+                f"Failed to check snapshot date: {e}",
+                severity="warning",
+            )
             latest_snapshot_date = ""
 
         should_recompute_snapshots = bool(
             st.session_state.get("_post_import_refresh_pending")
             or latest_snapshot_date != today_value.isoformat()
         )
+
         if should_recompute_snapshots:
             try:
                 recompute_daily_employee_snapshots(tenant_id=tenant_id, days=30)
             except Exception as snap_err:
-                # Log but continue: signal computation can still work with existing snapshots
-                snapshot_err = snap_err
                 _log_app_error(
-                    "today_recovery",
-                    f"Snapshot recompute failed during recovery (non-fatal): {snap_err}",
+                    "recovery_snapshot_recompute",
+                    f"Snapshot recompute failed (non-fatal, continuing): {snap_err}",
                     severity="warning",
                 )
 
+        # Compute daily signals
         try:
             compute_daily_signals(
                 signal_date=today_value,
@@ -820,6 +832,7 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
         except Exception as compute_err:
             message = str(compute_err or "")
             if "daily_signals" in message or "PGRST205" in message:
+                # Fallback to transient payload
                 st.session_state["_today_precomputed_payload"] = build_transient_today_payload(
                     signal_date=today_value,
                     tenant_id=tenant_id,
@@ -827,31 +840,93 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
             else:
                 raise
 
-        if hasattr(get_today_signals, "cache_clear"):
-            get_today_signals.cache_clear()
-        elif hasattr(get_today_signals, "clear"):
-            get_today_signals.clear()
-        try:
-            if hasattr(_cached_today_signals_payload, "clear"):
-                _cached_today_signals_payload.clear()
-            elif hasattr(_cached_today_signals_payload, "cache_clear"):
-                _cached_today_signals_payload.cache_clear()
-        except Exception:
-            pass
-        st.session_state[recovery_completed_at_key] = time.time()
+        # Clear caches to force re-read
+        for func in [get_today_signals, _cached_today_signals_payload]:
+            for method_name in ["cache_clear", "clear"]:
+                if hasattr(func, method_name):
+                    try:
+                        getattr(func, method_name)()
+                    except Exception as e:
+                        _log_app_error(
+                            "recovery_cache_clear",
+                            f"Failed to clear cache: {e}",
+                            severity="warning",
+                        )
+
         return True
+
     except Exception as recovery_err:
-        # Avoid retry loops that can make Today appear stuck after a failed recovery.
         st.session_state["_post_import_refresh_pending"] = False
         _log_app_error(
-            "today_recovery",
-            f"Today signal recovery failed: {recovery_err}",
+            "recovery_failed",
+            f"Signal recovery failed: {recovery_err}",
             severity="error",
         )
-        show_error_state(f"Today signal recovery failed: {recovery_err}")
+        show_error_state(f"Signal recovery failed: {recovery_err}")
         return False
+
     finally:
+        # Clear lock to allow future attempts
         st.session_state[recovery_lock_key] = False
+
+
+def _precomputed_payload_looks_stale(*, precomputed: dict[str, Any] | None, tenant_id: str, today_value: date) -> bool:
+    """Detect broken demo payloads where summary is inconsistent with imported rows.
+    
+    Returns True if:
+    - Demo mode + substantial rows (>100) + payload summary is suspiciously empty
+    - AND valid snapshots exist for today but aren't reflected in payload
+    """
+    payload = dict(precomputed or {})
+    import_summary = dict(payload.get("import_summary") or {})
+    source_mode = str(import_summary.get("source_mode") or "").strip().lower()
+    if source_mode != "demo":
+        return False
+
+    # Use explicit None checks for numeric fields
+    rows_processed = int(
+        import_summary.get("valid_rows")
+        if import_summary.get("valid_rows") is not None
+        else (import_summary.get("rows_processed") or 0)
+    )
+    emp_count = int(import_summary.get("emp_count") or 0)
+    days = int(import_summary.get("days") or 0)
+    queue_items = list(payload.get("queue_items") or [])
+
+    # Only check for substantial imports where inconsistency is obvious
+    if rows_processed < 100:
+        return False
+    if queue_items:
+        return False  # Has queue content
+
+    # Check consistency: with this many rows, emp_count and days must be reasonable
+    # Heuristic: expect minimum 2 rows/employee/day (conservative for demo)
+    min_expected_rows = emp_count * max(days, 1) * 2
+    if emp_count > 0 and days > 0 and rows_processed >= min_expected_rows:
+        return False  # Summary looks consistent
+
+    # Summary looks broken; check if today's snapshots actually exist
+    try:
+        from services.daily_snapshot_service import get_latest_snapshot_goal_status
+
+        goal_status, _, snapshot_date = get_latest_snapshot_goal_status(
+            tenant_id=tenant_id,
+            days=30,
+            rebuild_if_missing=False,
+        )
+        # If snapshots for today exist but payload is broken, payload is stale
+        if snapshot_date == today_value.isoformat() and len(goal_status) > 0:
+            return True
+    except Exception as e:
+        _log_app_error(
+            "stale_detection_snapshot_check",
+            f"Error checking snapshots during stale detection: {e}",
+            severity="warning",
+        )
+        # Conservative: if we can't verify snapshots, treat as potentially stale
+        # so recovery can be attempted (safer than showing broken state)
+
+    return False
 
 
 def _queue_counts(queue_items: list[dict]) -> dict[str, int]:
@@ -2080,11 +2155,21 @@ def page_today() -> None:
                     tenant_id=tenant_id,
                     as_of_date=today_value.isoformat(),
                 )
-                if not precomputed or force_recompute:
+                payload_stale = _precomputed_payload_looks_stale(
+                    precomputed=precomputed,
+                    tenant_id=tenant_id,
+                    today_value=today_value,
+                )
+                if not precomputed or force_recompute or payload_stale:
                     with st.spinner("Building today's signals…"):
-                        _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                        recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                    if recovery_succeeded:
+                        precomputed = get_today_signals(
+                            tenant_id=tenant_id,
+                            as_of_date=today_value.isoformat(),
+                        )
                     st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
-                    recovery_attempted = True
+                    recovery_attempted = recovery_succeeded
                 else:
                     st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
 
@@ -2093,10 +2178,23 @@ def page_today() -> None:
                 tenant_id=tenant_id,
                 as_of_date=today_value.isoformat(),
             )
+            if _precomputed_payload_looks_stale(
+                precomputed=precomputed,
+                tenant_id=tenant_id,
+                today_value=today_value,
+            ):
+                with st.spinner("Rebuilding today's demo summary…"):
+                    recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                if recovery_succeeded:
+                    precomputed = get_today_signals(
+                        tenant_id=tenant_id,
+                        as_of_date=today_value.isoformat(),
+                    )
             if not precomputed:
                 if not recovery_attempted:
                     with st.spinner("Preparing today's queue…"):
-                        recovery_attempted = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                        recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                        recovery_attempted = recovery_succeeded
                     if recovery_attempted:
                         precomputed = get_today_signals(
                             tenant_id=tenant_id,

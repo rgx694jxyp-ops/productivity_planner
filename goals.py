@@ -127,8 +127,8 @@ def load_goals(tenant_id: str = "") -> dict:
     try:
         from database import load_goals_db
         return _normalize_goals_payload(load_goals_db(tenant_id))
-    except Exception:
-        return _empty_goals()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load goals for tenant '{tenant_id}'") from exc
 
 
 def save_goals(data: dict, tenant_id: str = ""):
@@ -137,8 +137,8 @@ def save_goals(data: dict, tenant_id: str = ""):
     try:
         from database import save_goals_db
         save_goals_db(payload, tenant_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"Failed to save goals for tenant '{tenant_id}'") from exc
     try:
         from cache import bust_cache as _bust_cache
         _bust_cache()

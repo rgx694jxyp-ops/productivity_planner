@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from repositories import action_events_repo, actions_repo, billing_repo, operational_exceptions_repo
 
 
@@ -29,7 +31,7 @@ def test_actions_repo_create_action_returns_empty_dict_on_failure(monkeypatch):
     assert logged
 
 
-def test_action_events_repo_log_action_event_returns_empty_dict_on_failure(monkeypatch):
+def test_action_events_repo_log_action_event_raises_on_failure(monkeypatch):
     logged = []
 
     class _Client:
@@ -40,9 +42,9 @@ def test_action_events_repo_log_action_event_returns_empty_dict_on_failure(monke
     monkeypatch.setattr(action_events_repo, "get_tenant_id", lambda: "tenant-a")
     monkeypatch.setattr(action_events_repo, "log_error", lambda *args, **kwargs: logged.append((args, kwargs)))
 
-    out = action_events_repo.log_action_event("1", "created", "E1")
+    with pytest.raises(RuntimeError):
+        action_events_repo.log_action_event("1", "created", "E1")
 
-    assert out == {}
     assert logged
 
 

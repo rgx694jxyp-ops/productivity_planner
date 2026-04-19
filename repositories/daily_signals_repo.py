@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from repositories._common import get_client, log_error, tenant_fields, tenant_query
+from repositories._common import get_client, log_error, require_tenant, tenant_query
 
 
 def batch_upsert_daily_signals(rows: list[dict]) -> None:
     if not rows:
         return
 
-    payload = rows
-    if not payload[0].get("tenant_id"):
-        fields = tenant_fields()
-        if fields:
-            payload = [{**row, **fields} for row in payload]
+    tid = require_tenant()
+    # Force each row into the resolved tenant scope.
+    payload = [{**row, "tenant_id": tid} for row in rows]
 
     sb = get_client()
     for index in range(0, len(payload), 500):
@@ -33,7 +31,12 @@ def batch_upsert_daily_signals(rows: list[dict]) -> None:
             raise
 
 
-def delete_daily_signals(*, tenant_id: str = "", signal_date: str = "") -> None:
+def delete_daily_signals(*, tenant_id: str = "", signal_date: str = "", clear_all: bool = False) -> None:
+    if not signal_date and not clear_all:
+        raise ValueError(
+            "delete_daily_signals requires signal_date. "
+            "Pass clear_all=True to intentionally delete all signals for the tenant."
+        )
     sb = get_client()
     if tenant_id:
         query = sb.table("daily_signals").delete().eq("tenant_id", tenant_id)

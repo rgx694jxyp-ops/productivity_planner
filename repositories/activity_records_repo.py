@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-from repositories._common import get_client, get_tenant_id, log_error, tenant_fields, tenant_query
+from repositories._common import get_client, log_error, require_tenant, tenant_query
 
 
 def batch_upsert_activity_records(records: list[dict]) -> None:
     if not records:
         return
 
-    tenant_id = get_tenant_id()
+    tid = require_tenant()
     sb = get_client()
-    payload = records
-    if not payload[0].get("tenant_id"):
-        fields = tenant_fields()
-        if fields:
-            payload = [{**row, **fields} for row in payload]
+    payload = [{**row, "tenant_id": tid} for row in records]
 
     for index in range(0, len(payload), 500):
         chunk = payload[index : index + 500]
@@ -51,9 +47,9 @@ def list_activity_records(*, tenant_id: str = "", employee_id: str = "", days: i
         query = query.eq("employee_id", str(employee_id or ""))
 
     if days > 0:
-        from datetime import date, timedelta
+        from datetime import datetime, timedelta
 
-        cutoff = (date.today() - timedelta(days=days)).isoformat()
+        cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat()
         query = query.gte("activity_date", cutoff)
 
     result = query.order("activity_date", desc=True).limit(max(1, int(limit or 500))).execute()
