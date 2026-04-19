@@ -768,10 +768,17 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
 
         # Always rebuild snapshots first so compute_daily_signals has fresh goal_status.
         # This is the step that was previously missing, causing Today to show empty signals.
+        snapshot_err = None
         try:
             recompute_daily_employee_snapshots(tenant_id=tenant_id, days=30)
-        except Exception:
-            pass  # Non-fatal: signal computation will use whatever rows exist
+        except Exception as snap_err:
+            # Log but continue: signal computation can still work with existing snapshots
+            snapshot_err = snap_err
+            _log_app_error(
+                "today_recovery",
+                f"Snapshot recompute failed during recovery (non-fatal): {snap_err}",
+                severity="warning",
+            )
 
         try:
             compute_daily_signals(
@@ -797,6 +804,11 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
     except Exception as recovery_err:
         # Avoid retry loops that can make Today appear stuck after a failed recovery.
         st.session_state["_post_import_refresh_pending"] = False
+        _log_app_error(
+            "today_recovery",
+            f"Today signal recovery failed: {recovery_err}",
+            severity="error",
+        )
         show_error_state(f"Today signal recovery failed: {recovery_err}")
         return False
 

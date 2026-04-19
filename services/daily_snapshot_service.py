@@ -273,6 +273,16 @@ def recompute_daily_employee_snapshots(
     replace_existing: bool = True,
     source_limit: int = 5000,
 ) -> dict:
+    try:
+        from core.dependencies import _log_operational_event
+        _log_operational_event(
+            "snapshot_recompute_started",
+            status="started",
+            context={"tenant_id": str(tenant_id or ""), "from_date": str(from_date or ""), "to_date": str(to_date or ""), "days": int(days or 30)},
+        )
+    except Exception:
+        pass
+
     if from_date and to_date:
         start_date = _parse_date(from_date)
         end_date = _parse_date(to_date)
@@ -290,6 +300,16 @@ def recompute_daily_employee_snapshots(
         days=fetch_days,
         limit=max(500, int(source_limit or 5000)),
     )
+    try:
+        from core.dependencies import _log_operational_event
+        _log_operational_event(
+            "snapshot_activity_fetch_completed",
+            status="completed",
+            context={"tenant_id": str(tenant_id or ""), "activity_row_count": len(activity_rows or []), "fetch_days": int(fetch_days)},
+        )
+    except Exception:
+        pass
+
     snapshots = build_daily_employee_snapshots(
         activity_records=activity_rows,
         tenant_id=tenant_id,
@@ -312,6 +332,16 @@ def recompute_daily_employee_snapshots(
     if filtered_snapshots:
         daily_employee_snapshots_repo.batch_upsert_daily_employee_snapshots(filtered_snapshots)
     _clear_latest_snapshot_cache()
+
+    try:
+        from core.dependencies import _log_operational_event
+        _log_operational_event(
+            "snapshot_recompute_completed",
+            status="completed",
+            context={"tenant_id": str(tenant_id or ""), "inserted": len(filtered_snapshots), "from_date": (start_date.isoformat() if start_date else ""), "to_date": (end_date.isoformat() if end_date else "")},
+        )
+    except Exception:
+        pass
 
     return {
         "inserted": len(filtered_snapshots),
