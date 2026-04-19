@@ -129,10 +129,46 @@ def get_recent_activity_records(*, tenant_id: str = "", employee_id: str = "", d
         limit=limit,
     )
     if rows:
+        try:
+            from core.dependencies import _log_operational_event
+            _log_operational_event(
+                "activity_records_query",
+                status="success",
+                tenant_id=tenant_id,
+                detail="Activity records found",
+                context={"row_count": len(rows), "source": "activity_records_table"},
+            )
+        except Exception:
+            pass
         return rows
 
     # Legacy compatibility fallback while older rows remain only in uph_history.
+    try:
+        from core.dependencies import _log_operational_event
+        _log_operational_event(
+            "activity_records_fallback",
+            status="started",
+            tenant_id=tenant_id,
+            detail="Activity records table empty, falling back to uph_history",
+            context={"tenant_id": tenant_id},
+        )
+    except Exception:
+        pass
+    
     legacy_rows = import_repo.get_all_uph_history(days=days, limit=max(1, int(limit or 500)))
+    
+    try:
+        from core.dependencies import _log_operational_event
+        _log_operational_event(
+            "activity_records_fallback",
+            status="completed",
+            tenant_id=tenant_id,
+            detail="Legacy uph_history query completed",
+            context={"row_count": len(legacy_rows), "source": "uph_history_fallback"},
+        )
+    except Exception:
+        pass
+    
     out: list[dict] = []
     for row in legacy_rows:
         legacy_emp_id = str(row.get("emp_id") or "").strip()
