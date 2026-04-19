@@ -505,7 +505,23 @@ def read_precomputed_today_signals(*, tenant_id: str, signal_date: date) -> dict
         limit=5,
     )
     if not rows:
-        return None
+        # Demo fallback: when no payload exists for today, look for the most recent
+        # stored payload from any date. If it belongs to a demo session, reuse it
+        # so demo users see their data every day without requiring a daily recompute.
+        recent_rows = list_daily_signals(
+            tenant_id=tenant_id,
+            signal_type="today_payload",
+            limit=5,
+        )
+        if recent_rows:
+            recent_payload_raw = dict((recent_rows[0].get("payload") or {}))
+            recent_import_summary = dict(recent_payload_raw.get("import_summary") or {})
+            if str(recent_import_summary.get("source_mode") or "").strip().lower() == "demo":
+                rows = recent_rows
+            else:
+                return None
+        else:
+            return None
 
     payload = dict((rows[0].get("payload") or {}))
     home_sections_payload = dict(payload.get("home_sections") or {})

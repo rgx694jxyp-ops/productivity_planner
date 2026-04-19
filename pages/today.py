@@ -90,6 +90,11 @@ from services.demo_data_service import is_demo_upload_row as _is_demo_upload_row
 
 
 _READ_CACHE_TTL_SECONDS = 45
+_TODAY_ACTION_STATE_LOOKUP_MAX_EMPLOYEE_IDS = 96
+_TODAY_ACTION_STATE_LOOKUP_MAX_RANKED_ITEMS = 32
+_TODAY_ACTION_STATE_LOOKUP_MAX_DECISION_ITEMS = 48
+_TODAY_ACTION_STATE_LOOKUP_MAX_SECTION_ITEMS = 24
+_TODAY_ACTION_STATE_LOOKUP_MAX_SNAPSHOT_ITEMS = 24
 
 
 def _log_heavy_render_compute(name: str) -> None:
@@ -751,9 +756,17 @@ def _render_return_trigger(trigger: TodayReturnTriggerViewModel | None) -> None:
 
 
 def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bool:
-    """Try to rebuild today's payload once when it is missing or deferred."""
+    """Rebuild snapshots then compute today's signals. Called on first load and post-import."""
     try:
         from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
+        from services.daily_snapshot_service import recompute_daily_employee_snapshots
+
+        # Always rebuild snapshots first so compute_daily_signals has fresh goal_status.
+        # This is the step that was previously missing, causing Today to show empty signals.
+        try:
+            recompute_daily_employee_snapshots(tenant_id=tenant_id, days=30)
+        except Exception:
+            pass  # Non-fatal: signal computation will use whatever rows exist
 
         try:
             compute_daily_signals(
@@ -1910,30 +1923,32 @@ def _today_action_state_employee_ids(
     snapshot_cards: list[TodayQueueCardViewModel] | None,
 ) -> tuple[str, ...]:
     employee_ids: list[str] = []
+    seen: set[str] = set()
 
-    for item in list(attention.ranked_items or []):
-        employee_id = str(getattr(item, "employee_id", "") or "").strip()
-        if employee_id:
-            employee_ids.append(employee_id)
+    def _append_employee_id(raw_value: Any) -> None:
+        if len(employee_ids) >= _TODAY_ACTION_STATE_LOOKUP_MAX_EMPLOYEE_IDS:
+            return
+        employee_id = str(raw_value or "").strip()
+        if not employee_id or employee_id in seen:
+            return
+        seen.add(employee_id)
+        employee_ids.append(employee_id)
 
-    for item in list(decision_items or []):
-        employee_id = str(getattr(item, "employee_id", "") or "").strip()
-        if employee_id:
-            employee_ids.append(employee_id)
+    for item in list(attention.ranked_items or [])[:_TODAY_ACTION_STATE_LOOKUP_MAX_RANKED_ITEMS]:
+        _append_employee_id(getattr(item, "employee_id", ""))
+
+    for item in list(decision_items or [])[:_TODAY_ACTION_STATE_LOOKUP_MAX_DECISION_ITEMS]:
+        _append_employee_id(getattr(item, "employee_id", ""))
 
     for section_key in ("suppressed_signals", "top_insight_cards"):
-        for card in list(home_sections.get(section_key) or []):
+        for card in list(home_sections.get(section_key) or [])[:_TODAY_ACTION_STATE_LOOKUP_MAX_SECTION_ITEMS]:
             if isinstance(card, InsightCardContract):
-                employee_id = str(card.drill_down.entity_id or "").strip()
-                if employee_id:
-                    employee_ids.append(employee_id)
+                _append_employee_id(card.drill_down.entity_id)
 
-    for card in list(snapshot_cards or []):
-        employee_id = str(getattr(card, "employee_id", "") or "").strip()
-        if employee_id:
-            employee_ids.append(employee_id)
+    for card in list(snapshot_cards or [])[:_TODAY_ACTION_STATE_LOOKUP_MAX_SNAPSHOT_ITEMS]:
+        _append_employee_id(getattr(card, "employee_id", ""))
 
-    return tuple(sorted({employee_id for employee_id in employee_ids if employee_id}))
+    return tuple(sorted(employee_ids))
 
 
 def page_today() -> None:
@@ -1995,14 +2010,26 @@ def page_today() -> None:
             tenant_id = str(st.session_state.get("tenant_id", "") or "")
             recovery_attempted = False
 
-            # If large-import refresh was deferred, recover payload here so Today never stalls.
-            if bool(st.session_state.get("_post_import_refresh_pending")):
-                with st.spinner("Finalizing imported signals for Today…"):
-                    _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
-                recovery_attempted = True
+            # Eagerly recover when deferred from import OR whenever no payload exists.
+            # This ensures demo mode always auto-builds on first entry without user action.
+            needs_recovery = (
+                bool(st.session_state.get("_post_import_refresh_pending"))
+                or not bool(st.session_state.get("_today_recovery_attempted_" + today_value.isoformat()))
+            )
+            if needs_recovery:
+                precomputed = get_today_signals(
+                    tenant_id=tenant_id,
+                    as_of_date=today_value.isoformat(),
+                )
+                if not precomputed:
+                    with st.spinner("Building today's signals…"):
+                        _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                    st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
+                    recovery_attempted = True
+                else:
+                    st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
 
-            # Today page is read-only: it renders precomputed signals and summaries
-            # and does not run trigger pipelines, trend computation, or scoring.
+            # Today page is read-only: renders precomputed signals and summaries.
             precomputed = get_today_signals(
                 tenant_id=tenant_id,
                 as_of_date=today_value.isoformat(),
