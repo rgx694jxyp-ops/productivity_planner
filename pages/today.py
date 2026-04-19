@@ -165,6 +165,30 @@ def _cached_today_signals_payload(*, tenant_id: str, as_of_date: str) -> dict[st
     return get_today_signals(tenant_id=tenant_id, as_of_date=as_of_date)
 
 
+def _invalidate_today_write_caches() -> None:
+    """Clear Today read caches after a successful write-side mutation."""
+    for func in [
+        _cached_today_action_state_lookup,
+        _cached_today_signals_payload,
+        get_today_signals,
+    ]:
+        for method_name in ["cache_clear", "clear"]:
+            if hasattr(func, method_name):
+                try:
+                    getattr(func, method_name)()
+                except Exception:
+                    pass
+
+
+def _tenant_today_value(tenant_id: str = "") -> date:
+    try:
+        from services.settings_service import get_tenant_local_now
+
+        return get_tenant_local_now(str(tenant_id or "")).date()
+    except Exception:
+        return date.today()
+
+
 def _apply_today_styles() -> None:
     st.markdown(
         """
@@ -1434,6 +1458,7 @@ def _render_open_exceptions(*, tenant_id: str) -> None:
                             tenant_id=tenant_id,
                         )
                         if result:
+                            _invalidate_today_write_caches()
                             set_flash_message("Follow-through saved.")
                             st.rerun()
                         else:
@@ -1652,6 +1677,7 @@ def _render_signal_status_controls(*, card: TodayQueueCardViewModel, key_prefix:
         tenant_id=tenant_id,
     )
     if saved:
+        _invalidate_today_write_caches()
         set_flash_message("Marked reviewed." if selected == SIGNAL_STATUS_LOOKED_AT else "Flagged for follow-up.")
         st.rerun()
 
@@ -1667,7 +1693,7 @@ def _save_today_quick_note(*, card: TodayQueueCardViewModel, note_text: str) -> 
     department = str(card.process_id or (name_parts[1] if len(name_parts) > 1 else "")).strip()
     performed_by = str(st.session_state.get("user_name") or st.session_state.get("user_email") or "").strip()
     tenant_id = str(st.session_state.get("tenant_id") or "").strip()
-    expected_follow_up_date = (date.today() + timedelta(days=7)).isoformat()
+    expected_follow_up_date = (_tenant_today_value(tenant_id) + timedelta(days=7)).isoformat()
 
     write_result = log_coaching_lifecycle_entry(
         employee_id=employee_id,
@@ -1684,6 +1710,8 @@ def _save_today_quick_note(*, card: TodayQueueCardViewModel, note_text: str) -> 
     )
     if not write_result:
         return False
+
+    _invalidate_today_write_caches()
 
     # Preserve existing coaching journal flow while action lifecycle remains canonical.
     journal_note = (

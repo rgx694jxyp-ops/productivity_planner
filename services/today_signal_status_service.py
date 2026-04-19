@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from repositories import action_events_repo
+from repositories._common import get_client, get_tenant_id
 
 
 SIGNAL_STATUS_LOOKED_AT = "looked_at"
@@ -98,26 +99,47 @@ def list_latest_signal_statuses(*, signal_keys: set[str], tenant_id: str = "") -
     if not wanted:
         return {}
 
-    rows = action_events_repo.list_action_events(
-        action_id="",
-        tenant_id=tenant_id,
-        limit=max(200, min(2000, len(wanted) * 10)),
-        newest_first=True,
-    )
+    tid = str(tenant_id or get_tenant_id() or "").strip()
+    if not tid:
+        return {}
+
+    page_size = max(200, min(1000, len(wanted) * 5))
+    max_scan_rows = max(2000, min(20000, len(wanted) * 200))
+    scanned = 0
+    offset = 0
 
     by_signal: dict[str, dict[str, str]] = {}
-    for row in rows:
-        if str(row.get("event_type") or "") != _SIGNAL_STATUS_EVENT_TYPE:
-            continue
-        signal_key, signal_status = _parse_status_payload(row.get("details"))
-        if not signal_key or signal_key not in wanted or signal_key in by_signal:
-            continue
-        by_signal[signal_key] = {
-            "status": signal_status,
-            "owner": str(row.get("owner") or row.get("performed_by") or "").strip(),
-            "event_at": str(row.get("event_at") or "").strip(),
-        }
-        if len(by_signal) >= len(wanted):
+    while scanned < max_scan_rows and len(by_signal) < len(wanted):
+        upper = offset + page_size - 1
+        result = (
+            get_client()
+            .table("action_events")
+            .select("event_type, details, owner, performed_by, event_at")
+            .eq("tenant_id", tid)
+            .eq("event_type", _SIGNAL_STATUS_EVENT_TYPE)
+            .order("event_at", desc=True)
+            .range(offset, upper)
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
             break
+
+        for row in rows:
+            signal_key, signal_status = _parse_status_payload(row.get("details"))
+            if not signal_key or signal_key not in wanted or signal_key in by_signal:
+                continue
+            by_signal[signal_key] = {
+                "status": signal_status,
+                "owner": str(row.get("owner") or row.get("performed_by") or "").strip(),
+                "event_at": str(row.get("event_at") or "").strip(),
+            }
+            if len(by_signal) >= len(wanted):
+                break
+
+        scanned += len(rows)
+        if len(rows) < page_size:
+            break
+        offset += page_size
 
     return by_signal

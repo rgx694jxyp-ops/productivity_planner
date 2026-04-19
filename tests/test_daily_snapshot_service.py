@@ -181,3 +181,65 @@ def test_recompute_daily_employee_snapshots_uses_tenant_local_date_for_defaults(
 
     assert result["to_date"] == "2026-04-19"
     assert result["from_date"] == "2026-04-17"
+
+
+def test_snapshots_to_goal_status_rows_uses_explicit_tenant_lookup(monkeypatch):
+    calls = {"tenant_eq": ""}
+
+    class _EmployeesQuery:
+        def __init__(self):
+            self._tenant = ""
+
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, field, value):
+            if field == "tenant_id":
+                self._tenant = str(value)
+                calls["tenant_eq"] = self._tenant
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            class _Resp:
+                data = [{"emp_id": "E1", "name": "Alex", "department": "Packing"}] if self._tenant == "tenant-a" else []
+
+            return _Resp()
+
+    class _FakeClient:
+        def table(self, name):
+            assert name == "employees"
+            return _EmployeesQuery()
+
+    monkeypatch.setattr("repositories._common.get_client", lambda: _FakeClient())
+
+    snapshot_rows = [
+        {
+            "snapshot_date": "2026-04-03",
+            "employee_id": "E1",
+            "process_name": "Packing",
+            "performance_uph": 94,
+            "recent_average_uph": 90,
+            "prior_average_uph": 82,
+            "expected_uph": 95,
+            "goal_status": "below_goal",
+            "trend_state": "improving",
+            "recent_trend_history": [],
+            "recent_goal_status_history": [],
+            "included_day_count": 3,
+            "workload_units": 470,
+            "workload_hours": 5,
+            "confidence_label": "Medium",
+            "data_completeness_note": "Partial data",
+            "repeat_count": 2,
+            "pattern_marker": "similar_pattern",
+            "raw_metrics": {"target_context": {"target_source_label": "process target"}},
+        }
+    ]
+
+    goal_status = snapshots_to_goal_status_rows(snapshot_rows, tenant_id="tenant-a")
+
+    assert calls["tenant_eq"] == "tenant-a"
+    assert goal_status[0]["Employee Name"] == "Alex"

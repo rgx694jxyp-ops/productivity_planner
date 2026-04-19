@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from datetime import date
 
 from pages.today import _render_attention_card
 from services.today_view_model_service import TodayQueueCardViewModel
@@ -58,6 +59,7 @@ def test_today_card_quick_note_saves_without_navigation(monkeypatch):
     lifecycle_calls: list[dict] = []
     warnings: list[str] = []
     rerun_called = {"value": False}
+    invalidation_calls = {"count": 0}
 
     monkeypatch.setattr("pages.today.st.container", _noop_container)
     monkeypatch.setattr("pages.today.st.expander", _noop_expander)
@@ -74,6 +76,8 @@ def test_today_card_quick_note_saves_without_navigation(monkeypatch):
     monkeypatch.setattr("pages.today.log_coaching_lifecycle_entry", _fake_log_coaching_lifecycle_entry)
     monkeypatch.setattr("pages.today.add_coaching_note", lambda emp_id, note, created_by: journal_calls.append((str(emp_id), str(note), str(created_by))))
     monkeypatch.setattr("pages.today.set_flash_message", lambda msg: flash_messages.append(str(msg)))
+    monkeypatch.setattr("pages.today._invalidate_today_write_caches", lambda: invalidation_calls.__setitem__("count", invalidation_calls["count"] + 1))
+    monkeypatch.setattr("pages.today._tenant_today_value", lambda tenant_id="": date(2026, 4, 19))
 
     def _fake_rerun():
         rerun_called["value"] = True
@@ -90,8 +94,10 @@ def test_today_card_quick_note_saves_without_navigation(monkeypatch):
     assert rerun_called["value"] is True
     assert flash_messages == ["Quick note saved."]
     assert len(lifecycle_calls) == 1
+    assert lifecycle_calls[0]["expected_follow_up_date"] == "2026-04-26"
     assert len(journal_calls) == 1
     assert journal_calls[0][0] == "E1"
     assert "Today queue quick note" in journal_calls[0][1]
     assert "Checked conveyor calibration" in journal_calls[0][1]
+    assert invalidation_calls["count"] == 1
     assert warnings == []

@@ -360,16 +360,33 @@ def recompute_daily_employee_snapshots(
     }
 
 
-def _employee_lookup() -> dict[str, dict]:
+def _employee_lookup(*, tenant_id: str = "") -> dict[str, dict]:
+    tid = str(tenant_id or "").strip()
+    if not tid:
+        return {
+            str(row.get("emp_id") or "").strip(): row
+            for row in (get_employees() or [])
+            if str(row.get("emp_id") or "").strip()
+        }
+
+    try:
+        from repositories._common import get_client
+
+        sb = get_client()
+        result = sb.table("employees").select("emp_id,name,department").eq("tenant_id", tid).order("name").execute()
+        rows = result.data or []
+    except Exception:
+        rows = []
+
     return {
         str(row.get("emp_id") or "").strip(): row
-        for row in (get_employees() or [])
+        for row in rows
         if str(row.get("emp_id") or "").strip()
     }
 
 
-def snapshots_to_goal_status_rows(snapshot_rows: list[dict]) -> list[dict]:
-    employee_lookup = _employee_lookup()
+def snapshots_to_goal_status_rows(snapshot_rows: list[dict], *, tenant_id: str = "") -> list[dict]:
+    employee_lookup = _employee_lookup(tenant_id=tenant_id)
     out: list[dict] = []
     for row in snapshot_rows or []:
         employee_id = str(row.get("employee_id") or "").strip()
@@ -450,7 +467,7 @@ def get_latest_snapshot_goal_status(*, tenant_id: str = "", days: int = 30, rebu
 
     latest_date = max(str(row.get("snapshot_date") or "")[:10] for row in snapshot_rows if str(row.get("snapshot_date") or "").strip())
     latest_rows = [row for row in snapshot_rows if str(row.get("snapshot_date") or "")[:10] == latest_date]
-    result = (snapshots_to_goal_status_rows(latest_rows), snapshots_to_history_rows(snapshot_rows), latest_date)
+    result = (snapshots_to_goal_status_rows(latest_rows, tenant_id=tenant_id), snapshots_to_history_rows(snapshot_rows), latest_date)
     _LATEST_SNAPSHOT_CACHE[cache_key] = (now_ts, result)
     return result
 

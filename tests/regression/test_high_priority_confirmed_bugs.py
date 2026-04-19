@@ -4,6 +4,8 @@ from core import app_flow
 from core import billing_cache
 import cache as app_cache
 import goals
+from repositories import actions_repo
+import database
 from services import daily_snapshot_service
 from services import today_home_service
 
@@ -159,3 +161,76 @@ def test_save_goals_raises_when_storage_write_fails(monkeypatch):
 
     with pytest.raises(RuntimeError):
         goals.save_goals({"dept_targets": {"Packing": 90}}, "tenant-a")
+
+
+def test_update_action_returns_truthful_success_when_side_effects_fail(monkeypatch):
+    """Protects against false failure signals when action row commit succeeds but side effects fail."""
+
+    class _FakeActionsTable:
+        def update(self, _patch):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            class _Resp:
+                data = [{"id": "a-1", "status": "resolved"}]
+
+            return _Resp()
+
+    class _FakeClient:
+        def table(self, name):
+            assert name == "actions"
+            return _FakeActionsTable()
+
+    monkeypatch.setattr(actions_repo, "get_client", lambda: _FakeClient())
+    monkeypatch.setattr(
+        actions_repo,
+        "get_action",
+        lambda *args, **kwargs: {
+            "id": "a-1",
+            "employee_id": "E1",
+            "employee_name": "Alex",
+            "department": "Packing",
+            "trigger_summary": "summary",
+            "follow_up_due_at": "2026-04-20",
+        },
+    )
+    monkeypatch.setattr(actions_repo, "log_action_event", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("event failed")))
+    monkeypatch.setattr(actions_repo, "log_error", lambda *args, **kwargs: None)
+
+    out = actions_repo.update_action("a-1", {"status": "resolved"}, tenant_id="tenant-a")
+
+    assert out.get("id") == "a-1"
+    assert "side_effect_error" in out
+
+
+def test_followup_mirror_writes_raise_when_database_write_fails(monkeypatch):
+    """Protects against print-only follow-up mirror write failures."""
+
+    class _FailingFollowupsTable:
+        def upsert(self, *_args, **_kwargs):
+            raise RuntimeError("upsert failed")
+
+        def delete(self):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            raise RuntimeError("delete failed")
+
+    class _FakeClient:
+        def table(self, name):
+            assert name == "coaching_followups"
+            return _FailingFollowupsTable()
+
+    monkeypatch.setattr(database, "get_client", lambda: _FakeClient())
+
+    with pytest.raises(RuntimeError):
+        database.add_followup_db("E1", "Alex", "Packing", "2026-04-20", tenant_id="tenant-a")
+
+    with pytest.raises(RuntimeError):
+        database.remove_followup_db("E1", "2026-04-20", tenant_id="tenant-a")

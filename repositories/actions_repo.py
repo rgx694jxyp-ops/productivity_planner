@@ -180,24 +180,40 @@ def update_action(action_id: str, updates: dict, tenant_id: str = "") -> dict:
             .eq("id", action_id)
             .execute()
         )
+        updated_row = result.data[0] if result.data else {}
+    except Exception as error:
+        log_error(
+            "repo_actions_update_failed",
+            "Repository action update failed.",
+            tenant_id=tid,
+            context={
+                "action_id": str(action_id),
+                "status": status,
+                "update_keys": sorted(list(patch.keys())),
+            },
+            error=error,
+        )
+        return {}
 
-        due = str(patch.get("follow_up_due_at") or current.get("follow_up_due_at") or "")[:10]
-        emp_code = str(current.get("employee_id") or "")
-        emp_name = str(current.get("employee_name") or "")
-        dept = str(current.get("department") or "")
-        summary = str(current.get("trigger_summary") or "")
+    due = str(patch.get("follow_up_due_at") or current.get("follow_up_due_at") or "")[:10]
+    emp_code = str(current.get("employee_id") or "")
+    emp_name = str(current.get("employee_name") or "")
+    dept = str(current.get("department") or "")
+    summary = str(current.get("trigger_summary") or "")
 
-        status_to_event = {
-            "resolved": "resolved",
-            "escalated": "escalated",
-            "deprioritized": "deprioritized",
-            "in_progress": "coached",
-            "follow_up_due": "follow_up_logged",
-        }
-        event_type = status_to_event.get(status) or ("follow_up_logged" if patch.get("follow_up_due_at") else "coached")
-        note_text = str(patch.get("note") or patch.get("resolution_note") or "")
-        outcome_val = str(patch.get("resolution_type") or "") or None
+    status_to_event = {
+        "resolved": "resolved",
+        "escalated": "escalated",
+        "deprioritized": "deprioritized",
+        "in_progress": "coached",
+        "follow_up_due": "follow_up_logged",
+    }
+    event_type = status_to_event.get(status) or ("follow_up_logged" if patch.get("follow_up_due_at") else "coached")
+    note_text = str(patch.get("note") or patch.get("resolution_note") or "")
+    outcome_val = str(patch.get("resolution_type") or "") or None
 
+    side_effect_error = ""
+    try:
         log_action_event(
             action_id=str(action_id),
             event_type=event_type,
@@ -216,18 +232,23 @@ def update_action(action_id: str, updates: dict, tenant_id: str = "") -> dict:
                 database.remove_followup_db(emp_code, due, tenant_id=tid)
         elif due and emp_code:
             database.add_followup_db(emp_code, emp_name, dept, due, summary[:80], tenant_id=tid)
-
-        return result.data[0] if result.data else {}
     except Exception as error:
+        side_effect_error = str(error)
         log_error(
-            "repo_actions_update_failed",
-            "Repository action update failed.",
+            "repo_actions_update_side_effect_failed",
+            "Action row updated but event/follow-up side effects failed.",
             tenant_id=tid,
             context={
                 "action_id": str(action_id),
                 "status": status,
-                "update_keys": sorted(list(patch.keys())),
+                "event_type": event_type,
             },
             error=error,
         )
-        return {}
+
+    if side_effect_error:
+        if not updated_row:
+            updated_row = {"id": str(action_id)}
+        updated_row = dict(updated_row)
+        updated_row["side_effect_error"] = side_effect_error
+    return updated_row

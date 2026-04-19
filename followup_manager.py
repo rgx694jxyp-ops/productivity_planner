@@ -9,6 +9,15 @@ Storage: Supabase coaching_followups table only.
 from datetime import date, timedelta
 
 
+def _tenant_today(tenant_id: str = "") -> date:
+    try:
+        from services.settings_service import get_tenant_local_now
+
+        return get_tenant_local_now(str(tenant_id or "")).date()
+    except Exception:
+        return date.today()
+
+
 def add_followup(
     emp_id: str,
     name: str,
@@ -25,8 +34,9 @@ def add_followup(
 
 def get_followups_for_range(from_date: str = None, to_date: str = None, tenant_id: str = "") -> list[dict]:
     """Return all follow-ups within an inclusive date range, sorted by date."""
-    _from = from_date or date.today().isoformat()
-    _to   = to_date   or (date.today() + timedelta(days=30)).isoformat()
+    today_value = _tenant_today(tenant_id)
+    _from = from_date or today_value.isoformat()
+    _to   = to_date   or (today_value + timedelta(days=30)).isoformat()
     from database import get_followups_db
 
     return list(get_followups_db(_from, _to, tenant_id=tenant_id))
@@ -44,15 +54,16 @@ def get_followups_for_employee(
 
 
 def get_followups_due_today(tenant_id: str = "") -> list[dict]:
+    today_value = _tenant_today(tenant_id)
     return get_followups_for_range(
-        from_date=date.today().isoformat(),
-        to_date=date.today().isoformat(),
+        from_date=today_value.isoformat(),
+        to_date=today_value.isoformat(),
         tenant_id=tenant_id,
     )
 
 
 def get_followups_this_week(tenant_id: str = "") -> list[dict]:
-    today  = date.today()
+    today = _tenant_today(tenant_id)
     sunday = today + timedelta(days=(6 - today.weekday()))
     return get_followups_for_range(
         from_date=today.isoformat(),

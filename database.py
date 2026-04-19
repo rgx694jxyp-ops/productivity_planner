@@ -1260,7 +1260,7 @@ def add_followup_db(emp_id: str, name: str, dept: str, followup_date: str,
             "added_on": date.today().isoformat(),
         }, on_conflict="tenant_id,emp_id,followup_date").execute()
     except Exception as e:
-        print(f"[Warning] Could not save follow-up to DB: {e}")
+        raise RuntimeError("Could not save follow-up to DB.") from e
 
 
 def get_followups_db(from_date: str = "", to_date: str = "", tenant_id: str = "") -> list[dict]:
@@ -1304,7 +1304,7 @@ def remove_followup_db(emp_id: str, followup_date: str, tenant_id: str = "") -> 
             .execute()
         )
     except Exception as e:
-        print(f"[Warning] Could not remove follow-up from DB: {e}")
+        raise RuntimeError("Could not remove follow-up from DB.") from e
 
 
 # ── Actions (DB-backed) ──────────────────────────────────────────
