@@ -539,6 +539,11 @@ def _render_demo_reset_controls(*, import_summary: dict[str, Any], tenant_id: st
                     elif hasattr(get_today_signals, "clear"):
                         get_today_signals.clear()
                     st.session_state.pop("_today_precomputed_payload", None)
+                    st.session_state.pop("_post_import_refresh_pending", None)
+                    st.session_state.pop("_import_step3_preview_cache", None)
+                    for _key in list(st.session_state.keys()):
+                        if str(_key).startswith("_today_recovery_attempted_"):
+                            st.session_state.pop(_key, None)
                     st.session_state[confirm_key] = False
 
                 reset_count = int(outcome.get("demo_uploads_reset", 0) or 0)

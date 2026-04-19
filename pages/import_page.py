@@ -371,7 +371,34 @@ def _emit_first_insight_rendered_once(*, tenant_id: str, summary: dict) -> None:
     st.session_state[key] = True
 
 
+def _clear_today_demo_recovery_state() -> None:
+    """Clear Today/import transient state so demo reload can rebuild deterministically."""
+    st.session_state.pop("_today_precomputed_payload", None)
+    st.session_state.pop("_post_import_refresh_pending", None)
+    st.session_state.pop("_import_step3_preview_cache", None)
+    for _key in list(st.session_state.keys()):
+        if str(_key).startswith("_today_recovery_attempted_"):
+            st.session_state.pop(_key, None)
+
+
+def _tenant_has_uph_history(*, tenant_id: str) -> bool:
+    """Return True only when tenant has at least one persisted history row."""
+    try:
+        from database import get_client as _db_get_client
+
+        _sb = _db_get_client()
+        _q = _sb.table("uph_history").select("id").limit(1)
+        if str(tenant_id or "").strip():
+            _q = _q.eq("tenant_id", str(tenant_id or "").strip())
+        _res = _q.execute()
+        return bool(_res.data)
+    except Exception:
+        return False
+
+
 def _load_sample_demo_into_import_state(*, tenant_id: str, trigger: str = "manual") -> bool:
+    _clear_today_demo_recovery_state()
+
     if str(tenant_id or "").strip():
         try:
             reset_demo_uploads(tenant_id=str(tenant_id or ""))
@@ -2086,10 +2113,13 @@ def _import_step3(tenant_id: str):
 
     _auto_run_sample_pipeline = _consume_auto_run_sample_pipeline_once()
     if _preview_exact_duplicate_import and _infer_import_path(sessions=sessions) == "sample":
-        _redirect_existing_sample_data_to_today(
-            tenant_id=tenant_id,
-            candidate_rows=len(_candidate_preview_rows or []),
-        )
+        if _tenant_has_uph_history(tenant_id=tenant_id):
+            _redirect_existing_sample_data_to_today(
+                tenant_id=tenant_id,
+                candidate_rows=len(_candidate_preview_rows or []),
+            )
+        else:
+            st.info("Rebuilding demo history for this workspace.")
     _confirm_preview = st.checkbox(
         "I reviewed the preview and want to write this data to history",
         key="confirm_import_preview",
