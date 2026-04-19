@@ -79,6 +79,7 @@ from services.today_view_model_service import (
 )
 from services.signal_traceability_service import traceability_payload_from_card
 from services.plain_language_service import signal_wording
+from services.perf_profile import profile_block
 from ui.state_panels import (
     consume_flash_message,
     set_flash_message,
@@ -130,12 +131,20 @@ def _cached_manager_outcome_stats(*, tenant_id: str, lookback_days: int, today_i
 
 @st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
 def _cached_weekly_manager_activity_summary(*, tenant_id: str, lookback_days: int, today_iso: str) -> dict[str, int]:
-    _log_heavy_render_compute("get_weekly_manager_activity_summary")
-    try:
-        today_value = date.fromisoformat(str(today_iso or "")[:10])
-    except Exception:
-        today_value = date.today()
-    return dict(get_weekly_manager_activity_summary(tenant_id=tenant_id, lookback_days=lookback_days, today=today_value) or {})
+    with profile_block(
+        "today.cache_miss.weekly_activity_summary",
+        tenant_id=str(tenant_id or ""),
+        context={"lookback_days": int(lookback_days or 0), "today_iso": str(today_iso or "")},
+    ) as profile:
+        _log_heavy_render_compute("get_weekly_manager_activity_summary")
+        profile.cache_miss("weekly_activity_summary")
+        try:
+            today_value = date.fromisoformat(str(today_iso or "")[:10])
+        except Exception:
+            today_value = date.today()
+        result = dict(get_weekly_manager_activity_summary(tenant_id=tenant_id, lookback_days=lookback_days, today=today_value) or {})
+        profile.set("reviewed_issues", int(result.get("reviewed_issues", 0) or 0))
+        return result
 
 
 @st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
@@ -145,24 +154,63 @@ def _cached_today_action_state_lookup(
     employee_ids: tuple[str, ...],
     today_iso: str,
 ) -> dict[str, dict[str, Any]]:
-    _log_heavy_render_compute("build_employee_action_state_lookup")
-    try:
-        today_value = date.fromisoformat(str(today_iso or "")[:10])
-    except Exception:
-        today_value = date.today()
-    return dict(
-        build_employee_action_state_lookup(
-            employee_ids,
-            tenant_id=tenant_id,
-            today=today_value,
+    with profile_block(
+        "today.cache_miss.action_state_lookup",
+        tenant_id=str(tenant_id or ""),
+        context={"employee_ids": len(employee_ids or ()), "today_iso": str(today_iso or "")},
+    ) as profile:
+        _log_heavy_render_compute("build_employee_action_state_lookup")
+        profile.cache_miss("today_action_state_lookup")
+        try:
+            today_value = date.fromisoformat(str(today_iso or "")[:10])
+        except Exception:
+            today_value = date.today()
+        result = dict(
+            build_employee_action_state_lookup(
+                employee_ids,
+                tenant_id=tenant_id,
+                today=today_value,
+            )
+            or {}
         )
-        or {}
-    )
+        profile.set("action_state_rows", len(result or {}))
+        return result
 
 
 @st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
 def _cached_today_signals_payload(*, tenant_id: str, as_of_date: str) -> dict[str, Any] | None:
-    return get_today_signals(tenant_id=tenant_id, as_of_date=as_of_date)
+    with profile_block(
+        "today.cache_miss.signals_payload",
+        tenant_id=str(tenant_id or ""),
+        context={"as_of_date": str(as_of_date or "")},
+    ) as profile:
+        profile.cache_miss("today_signals_payload")
+        result = get_today_signals(tenant_id=tenant_id, as_of_date=as_of_date)
+        if isinstance(result, dict):
+            profile.set("queue_items", len(result.get("queue_items") or []))
+            profile.set("goal_status_rows", len(result.get("goal_status") or []))
+        return result
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_today_signal_status_map(
+    *,
+    tenant_id: str,
+    signal_keys_sorted: tuple[str, ...],
+    today_iso: str,
+) -> dict[str, dict[str, str]]:
+    with profile_block(
+        "today.cache_miss.signal_status_map",
+        tenant_id=str(tenant_id or ""),
+        context={"signal_keys": len(signal_keys_sorted or ()), "today_iso": str(today_iso or "")},
+    ) as profile:
+        profile.cache_miss("today_signal_status_map")
+        result = list_latest_signal_statuses(
+            signal_keys=set(signal_keys_sorted or ()),
+            tenant_id=str(tenant_id or "").strip(),
+        )
+        profile.set("found_signal_keys", len(result or {}))
+        return dict(result or {})
 
 
 def _invalidate_today_write_caches() -> None:
@@ -170,6 +218,7 @@ def _invalidate_today_write_caches() -> None:
     for func in [
         _cached_today_action_state_lookup,
         _cached_today_signals_payload,
+        _cached_today_signal_status_map,
         get_today_signals,
     ]:
         for method_name in ["cache_clear", "clear"]:
@@ -1845,8 +1894,9 @@ def _render_unified_attention_queue(
     snapshot_cards: list[TodayQueueCardViewModel] | None = None,
     last_action_lookup: dict[str, str] | None = None,
     action_state_lookup: dict[str, dict[str, Any]] | None = None,
+    render_plan: TodayQueueRenderPlan | None = None,
 ) -> None:
-    plan: TodayQueueRenderPlan = build_today_queue_render_plan(
+    plan: TodayQueueRenderPlan = render_plan or build_today_queue_render_plan(
         attention=attention,
         decision_items=decision_items,
         suppressed_cards=suppressed_cards,
@@ -1875,9 +1925,10 @@ def _render_unified_attention_queue(
         for card in (list(plan.primary_cards) + list(plan.secondary_cards))
         if str(getattr(card, "signal_key", "") or "").strip()
     }
-    signal_status_map = list_latest_signal_statuses(
-        signal_keys=all_signal_keys,
+    signal_status_map = _cached_today_signal_status_map(
         tenant_id=str(st.session_state.get("tenant_id") or "").strip(),
+        signal_keys_sorted=tuple(sorted(all_signal_keys)),
+        today_iso=date.today().isoformat(),
     )
 
     if plan.primary_placeholder:
@@ -2081,10 +2132,7 @@ def _render_home_section(
 
 def _today_action_state_employee_ids(
     *,
-    attention: AttentionSummary,
-    decision_items: list[Any] | None,
-    home_sections: dict[str, Any],
-    snapshot_cards: list[TodayQueueCardViewModel] | None,
+    plan: TodayQueueRenderPlan,
 ) -> tuple[str, ...]:
     employee_ids: list[str] = []
     seen: set[str] = set()
@@ -2098,21 +2146,56 @@ def _today_action_state_employee_ids(
         seen.add(employee_id)
         employee_ids.append(employee_id)
 
-    for item in list(attention.ranked_items or [])[:_TODAY_ACTION_STATE_LOOKUP_MAX_RANKED_ITEMS]:
-        _append_employee_id(getattr(item, "employee_id", ""))
-
-    for item in list(decision_items or [])[:_TODAY_ACTION_STATE_LOOKUP_MAX_DECISION_ITEMS]:
-        _append_employee_id(getattr(item, "employee_id", ""))
-
-    for section_key in ("suppressed_signals", "top_insight_cards"):
-        for card in list(home_sections.get(section_key) or [])[:_TODAY_ACTION_STATE_LOOKUP_MAX_SECTION_ITEMS]:
-            if isinstance(card, InsightCardContract):
-                _append_employee_id(card.drill_down.entity_id)
-
-    for card in list(snapshot_cards or [])[:_TODAY_ACTION_STATE_LOOKUP_MAX_SNAPSHOT_ITEMS]:
+    for card in list(plan.primary_cards or []):
         _append_employee_id(getattr(card, "employee_id", ""))
 
+    if bool(plan.secondary_expanded):
+        for card in list(plan.secondary_cards or [])[:20]:
+            _append_employee_id(getattr(card, "employee_id", ""))
+
     return tuple(sorted(employee_ids))
+
+
+def _enrich_render_plan_action_state(
+    *,
+    plan: TodayQueueRenderPlan,
+    today_value: date,
+    last_action_lookup: dict[str, str] | None,
+    action_state_lookup: dict[str, dict[str, Any]] | None,
+) -> TodayQueueRenderPlan:
+    if not action_state_lookup:
+        return plan
+
+    enriched_primary = [
+        enrich_today_queue_card_action_context(
+            card=card,
+            today=today_value,
+            last_action_lookup=last_action_lookup,
+            action_state_lookup=action_state_lookup,
+        )
+        for card in list(plan.primary_cards or [])
+    ]
+    enriched_secondary = [
+        enrich_today_queue_card_action_context(
+            card=card,
+            today=today_value,
+            last_action_lookup=last_action_lookup,
+            action_state_lookup=action_state_lookup,
+        )
+        for card in list(plan.secondary_cards or [])
+    ]
+
+    return TodayQueueRenderPlan(
+        section_title=plan.section_title,
+        weak_data_note=plan.weak_data_note,
+        start_note=plan.start_note,
+        primary_cards=enriched_primary,
+        secondary_cards=enriched_secondary,
+        primary_placeholder=plan.primary_placeholder,
+        secondary_caption=plan.secondary_caption,
+        secondary_expanded=plan.secondary_expanded,
+        suppressed_debug_rows=list(plan.suppressed_debug_rows or []),
+    )
 
 
 def page_today() -> None:
@@ -2126,341 +2209,375 @@ def page_today() -> None:
 
         today_value = date.today()
 
-        _apply_today_styles()
+        with profile_block(
+            "today.page_today",
+            tenant_id=str(st.session_state.get("tenant_id", "") or ""),
+            user_email=str(st.session_state.get("user_email", "") or ""),
+            context={"today_iso": today_value.isoformat()},
+            execution_key=f"_perf_profile_today_page_today_{today_value.isoformat()}",
+        ) as profile:
+            with profile.stage("init_ui"):
+                _apply_today_styles()
 
-        _trace_ctx = st.session_state.get("_drill_traceability_context") or {}
-        if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"today", ""}:
-            render_traceability_panel(_trace_ctx, heading="Signal source context")
+                _trace_ctx = st.session_state.get("_drill_traceability_context") or {}
+                if _trace_ctx and str(_trace_ctx.get("drill_down_screen", "")) in {"today", ""}:
+                    render_traceability_panel(_trace_ctx, heading="Signal source context")
 
-        _show_flash_message()
+                _show_flash_message()
 
-        refresh_col, _ = st.columns([1, 4])
-        with refresh_col:
-            if st.button("Refresh signals", key="today_refresh_precomputed_signals", use_container_width=True):
-                try:
-                    from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
+            refresh_col, _ = st.columns([1, 4])
+            with refresh_col:
+                if st.button("Refresh signals", key="today_refresh_precomputed_signals", use_container_width=True):
+                    try:
+                        from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
 
-                    loading_slot = st.empty()
-                    with loading_slot.container():
-                        show_loading_state("Refreshing precomputed signals for Today…")
-                    with st.spinner("Refreshing signals…"):
-                        _tenant = str(st.session_state.get("tenant_id", "") or "")
-                        try:
-                            compute_daily_signals(
-                                signal_date=today_value,
-                                tenant_id=_tenant,
-                            )
-                        except Exception as _compute_err:
-                            _msg = str(_compute_err or "")
-                            if "daily_signals" in _msg or "PGRST205" in _msg:
-                                st.session_state["_today_precomputed_payload"] = build_transient_today_payload(
-                                    signal_date=today_value,
-                                    tenant_id=_tenant,
-                                )
-                            else:
-                                raise
-                    loading_slot.empty()
-                    if hasattr(get_today_signals, "cache_clear"):
-                        get_today_signals.cache_clear()
-                    elif hasattr(get_today_signals, "clear"):
-                        get_today_signals.clear()
-                    st.success("Signals refreshed.")
-                    st.rerun()
-                except Exception as _refresh_err:
-                    show_error_state(f"Signal refresh failed: {_refresh_err}")
-                    return
+                        with profile.stage("manual_refresh"):
+                            loading_slot = st.empty()
+                            with loading_slot.container():
+                                show_loading_state("Refreshing precomputed signals for Today…")
+                            with st.spinner("Refreshing signals…"):
+                                _tenant = str(st.session_state.get("tenant_id", "") or "")
+                                try:
+                                    compute_daily_signals(
+                                        signal_date=today_value,
+                                        tenant_id=_tenant,
+                                    )
+                                    profile.query(count=1)
+                                except Exception as _compute_err:
+                                    _msg = str(_compute_err or "")
+                                    if "daily_signals" in _msg or "PGRST205" in _msg:
+                                        st.session_state["_today_precomputed_payload"] = build_transient_today_payload(
+                                            signal_date=today_value,
+                                            tenant_id=_tenant,
+                                        )
+                                    else:
+                                        raise
+                            loading_slot.empty()
+                            if hasattr(get_today_signals, "cache_clear"):
+                                get_today_signals.cache_clear()
+                            elif hasattr(get_today_signals, "clear"):
+                                get_today_signals.clear()
+                        st.success("Signals refreshed.")
+                        st.rerun()
+                    except Exception as _refresh_err:
+                        show_error_state(f"Signal refresh failed: {_refresh_err}")
+                        return
 
-        try:
-            tenant_id = str(st.session_state.get("tenant_id", "") or "")
-            recovery_attempted = False
+            try:
+                tenant_id = str(st.session_state.get("tenant_id", "") or "")
+                profile.set("tenant_id_present", bool(tenant_id))
+                recovery_attempted = False
 
-            # Eagerly recover when deferred from import OR whenever no payload exists.
-            # This ensures demo mode always auto-builds on first entry without user action.
-            force_recompute = bool(st.session_state.get("_post_import_refresh_pending"))
-            needs_recovery = (
-                force_recompute
-                or not bool(st.session_state.get("_today_recovery_attempted_" + today_value.isoformat()))
-            )
-            if needs_recovery:
-                precomputed = get_today_signals(
-                    tenant_id=tenant_id,
-                    as_of_date=today_value.isoformat(),
-                )
-                payload_stale = _precomputed_payload_looks_stale(
-                    precomputed=precomputed,
-                    tenant_id=tenant_id,
-                    today_value=today_value,
-                )
-                if not precomputed or force_recompute or payload_stale:
-                    with st.spinner("Building today's signals…"):
-                        recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
-                    if recovery_succeeded:
-                        precomputed = get_today_signals(
-                            tenant_id=tenant_id,
-                            as_of_date=today_value.isoformat(),
-                        )
-                    st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
-                    recovery_attempted = recovery_succeeded
-                else:
-                    st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
-
-            # Today page is read-only: renders precomputed signals and summaries.
-            precomputed = get_today_signals(
-                tenant_id=tenant_id,
-                as_of_date=today_value.isoformat(),
-            )
-            if _precomputed_payload_looks_stale(
-                precomputed=precomputed,
-                tenant_id=tenant_id,
-                today_value=today_value,
-            ):
-                with st.spinner("Rebuilding today's demo summary…"):
-                    recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
-                if recovery_succeeded:
-                    precomputed = get_today_signals(
+                def _load_today_signals() -> dict[str, Any] | None:
+                    profile.increment("today_signals_request_count", 1)
+                    return get_today_signals(
                         tenant_id=tenant_id,
                         as_of_date=today_value.isoformat(),
                     )
-            if not precomputed:
-                if not recovery_attempted:
-                    with st.spinner("Preparing today's queue…"):
-                        recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
-                        recovery_attempted = recovery_succeeded
-                    if recovery_attempted:
-                        precomputed = get_today_signals(
+
+                with profile.stage("load_precomputed"):
+                    precomputed = _load_today_signals()
+                    force_recompute = bool(st.session_state.get("_post_import_refresh_pending"))
+                    needs_recovery = (
+                        force_recompute
+                        or not bool(st.session_state.get("_today_recovery_attempted_" + today_value.isoformat()))
+                    )
+                    profile.set("force_recompute", bool(force_recompute))
+                    profile.set("needs_recovery", bool(needs_recovery))
+                    if needs_recovery:
+                        payload_stale = _precomputed_payload_looks_stale(
+                            precomputed=precomputed,
                             tenant_id=tenant_id,
-                            as_of_date=today_value.isoformat(),
+                            today_value=today_value,
+                        )
+                        if not precomputed or force_recompute or payload_stale:
+                            profile.increment("recovery_attempt_count", 1)
+                            with st.spinner("Building today's signals…"):
+                                recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                            profile.set("initial_recovery_succeeded", bool(recovery_succeeded))
+                            if recovery_succeeded:
+                                precomputed = _load_today_signals()
+                            st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
+                            recovery_attempted = recovery_succeeded
+                        else:
+                            st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
+                    if _precomputed_payload_looks_stale(
+                        precomputed=precomputed,
+                        tenant_id=tenant_id,
+                        today_value=today_value,
+                    ):
+                        profile.increment("recovery_attempt_count", 1)
+                        with st.spinner("Rebuilding today's demo summary…"):
+                            recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                        profile.set("stale_recovery_succeeded", bool(recovery_succeeded))
+                        if recovery_succeeded:
+                            precomputed = _load_today_signals()
+                    if not precomputed:
+                        if not recovery_attempted:
+                            profile.increment("recovery_attempt_count", 1)
+                            with st.spinner("Preparing today's queue…"):
+                                recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                                recovery_attempted = recovery_succeeded
+                            profile.set("fallback_recovery_succeeded", bool(recovery_succeeded))
+                            if recovery_attempted:
+                                precomputed = _load_today_signals()
+
+                        if not precomputed:
+                            st.info("Today's queue is still preparing. Use Refresh signals if this does not clear shortly.")
+                            return
+
+                    queue_items = list(precomputed.get("queue_items") or [])
+                    counts = _queue_counts(queue_items)
+                    goal_status = list(precomputed.get("goal_status") or [])
+                    import_summary = dict(precomputed.get("import_summary") or {})
+                    home_sections = dict(precomputed.get("home_sections") or {})
+                    attention_summary = precomputed.get("attention_summary")
+                    if not isinstance(attention_summary, AttentionSummary):
+                        attention_summary = AttentionSummary(
+                            ranked_items=[],
+                            is_healthy=True,
+                            healthy_message="No important changes surfaced today.",
+                            suppressed_count=0,
+                            total_evaluated=0,
                         )
 
-                if not precomputed:
-                    st.info("Today's queue is still preparing. Use Refresh signals if this does not clear shortly.")
-                    return
+                    if not isinstance(home_sections, dict):
+                        home_sections = {}
+                    suppressed_cards = home_sections.get("suppressed_signals") or []
+                    if not isinstance(suppressed_cards, list):
+                        suppressed_cards = []
+                    home_sections["suppressed_signals"] = [
+                        item for item in suppressed_cards if isinstance(item, InsightCardContract)
+                    ]
 
-            queue_items = list(precomputed.get("queue_items") or [])
-            counts = _queue_counts(queue_items)
-            goal_status = list(precomputed.get("goal_status") or [])
-            import_summary = dict(precomputed.get("import_summary") or {})
-            home_sections = dict(precomputed.get("home_sections") or {})
-            attention_summary = precomputed.get("attention_summary")
-            if not isinstance(attention_summary, AttentionSummary):
-                attention_summary = AttentionSummary(
-                ranked_items=[],
-                is_healthy=True,
-                healthy_message="No important changes surfaced today.",
-                suppressed_count=0,
-                total_evaluated=0,
+                    queue_items = [item for item in queue_items if isinstance(item, dict)]
+                    counts = _queue_counts(queue_items)
+                    profile.set("queue_items", len(queue_items or []))
+                    profile.set("goal_status_rows", len(goal_status or []))
+                    profile.set("suppressed_cards", len(home_sections.get("suppressed_signals") or []))
+                    if not import_summary:
+                        import_summary = st.session_state.get("_import_complete_summary") or {}
+                    if not isinstance(import_summary, dict):
+                        import_summary = {}
+
+                    if not goal_status:
+                        goal_status = []
+            except Exception as exc:
+                show_error_state(f"Today screen data could not load cleanly: {exc}")
+                return
+
+            with profile.stage("build_meaning"):
+                meaning = build_today_surface_meaning(
+                    goal_status=goal_status,
+                    import_summary=import_summary,
+                    home_sections=home_sections,
+                    has_queue_items=counts.get("all", 0) > 0,
+                    as_of_date=str(precomputed.get("as_of_date") or ""),
+                    today_value=today_value,
                 )
 
-            if not isinstance(home_sections, dict):
-                home_sections = {}
-            suppressed_cards = home_sections.get("suppressed_signals") or []
-            if not isinstance(suppressed_cards, list):
-                suppressed_cards = []
-            home_sections["suppressed_signals"] = [
-                item for item in suppressed_cards if isinstance(item, InsightCardContract)
-            ]
-
-            queue_items = [item for item in queue_items if isinstance(item, dict)]
-
-            counts = _queue_counts(queue_items)
-            if not import_summary:
-                import_summary = st.session_state.get("_import_complete_summary") or {}
-            if not isinstance(import_summary, dict):
-                import_summary = {}
-
-            if not goal_status:
-                goal_status = []
-        except Exception as exc:
-            show_error_state(f"Today screen data could not load cleanly: {exc}")
-            return
-
-        meaning = build_today_surface_meaning(
-            goal_status=goal_status,
-            import_summary=import_summary,
-            home_sections=home_sections,
-            has_queue_items=counts.get("all", 0) > 0,
-            as_of_date=str(precomputed.get("as_of_date") or ""),
-            today_value=today_value,
-        )
-
-        if not _has_today_data(
-            queue_items=queue_items,
-            goal_status=goal_status,
-            home_sections=home_sections,
-            import_summary=import_summary,
-        ):
-            _render_first_value_screen()
-            return
-
-        _emit_today_loaded_with_data_once(
-            tenant_id=tenant_id,
-            import_summary=import_summary,
-            queue_count=int(counts.get("all", 0) or 0),
-        )
-
-        _render_top_status_area(meaning=meaning)
-
-        previous_precomputed = _cached_today_signals_payload(
-            tenant_id=tenant_id,
-            as_of_date=(today_value - timedelta(days=1)).isoformat(),
-        )
-        return_trigger = build_today_return_trigger(
-            queue_items=queue_items,
-            today=today_value,
-            previous_queue_items=list((previous_precomputed or {}).get("queue_items") or []),
-            previous_as_of_date=str((previous_precomputed or {}).get("as_of_date") or ""),
-        )
-        _render_return_trigger(return_trigger)
-
-        # Build snapshot fallback cards when trend history is too thin.
-        signal_mode = meaning.signal_mode
-        snapshot_cards = None
-        if signal_mode in (SignalMode.EARLY_SIGNAL, SignalMode.LIMITED_DATA):
-            snapshot_cards = build_snapshot_fallback_cards(
+            if not _has_today_data(
+                queue_items=queue_items,
                 goal_status=goal_status,
-                today=today_value,
-            ) or None
+                home_sections=home_sections,
+                import_summary=import_summary,
+            ):
+                _render_first_value_screen()
+                return
 
-        last_action_lookup = _build_last_action_lookup(queue_items)
-        decision_items = list(precomputed.get("decision_items") or [])
-        decision_summary = precomputed.get("decision_summary") or attention_summary
-        action_state_employee_ids = _today_action_state_employee_ids(
-            attention=decision_summary,
-            decision_items=decision_items,
-            home_sections=home_sections,
-            snapshot_cards=snapshot_cards,
-        )
-        action_state_lookup: dict[str, dict[str, Any]] = {}
-        should_load_action_state_lookup = bool(
-            action_state_employee_ids
-            and (
+            _emit_today_loaded_with_data_once(
+                tenant_id=tenant_id,
+                import_summary=import_summary,
+                queue_count=int(counts.get("all", 0) or 0),
+            )
+
+            with profile.stage("render_header"):
+                _render_top_status_area(meaning=meaning)
+                previous_precomputed = _cached_today_signals_payload(
+                    tenant_id=tenant_id,
+                    as_of_date=(today_value - timedelta(days=1)).isoformat(),
+                )
+                return_trigger = build_today_return_trigger(
+                    queue_items=queue_items,
+                    today=today_value,
+                    previous_queue_items=list((previous_precomputed or {}).get("queue_items") or []),
+                    previous_as_of_date=str((previous_precomputed or {}).get("as_of_date") or ""),
+                )
+                _render_return_trigger(return_trigger)
+
+            signal_mode = meaning.signal_mode
+            snapshot_cards = None
+            if signal_mode in (SignalMode.EARLY_SIGNAL, SignalMode.LIMITED_DATA):
+                with profile.stage("build_snapshot_fallback"):
+                    snapshot_cards = build_snapshot_fallback_cards(
+                        goal_status=goal_status,
+                        today=today_value,
+                    ) or None
+                profile.set("snapshot_cards", len(snapshot_cards or []))
+
+            with profile.stage("build_action_state_context"):
+                last_action_lookup = _build_last_action_lookup(queue_items)
+                decision_items = list(precomputed.get("decision_items") or [])
+                decision_summary = precomputed.get("decision_summary") or attention_summary
+                render_plan_build_count = 0
+                render_plan_build_ms = 0
+                render_plan_enrich_ms = 0
+                render_plan_second_build_count = 0
+                render_plan_build_started = time.perf_counter()
+                pre_action_render_plan = build_today_queue_render_plan(
+                    attention=decision_summary,
+                    decision_items=decision_items,
+                    suppressed_cards=home_sections.get("suppressed_signals", []),
+                    today_value=today_value,
+                    is_stale=bool(meaning.state_flags.get("stale_data")),
+                    weak_data_mode=bool(meaning.weak_data_mode),
+                    show_secondary_open=bool(st.session_state.get("_first_import_just_completed")),
+                    snapshot_cards=snapshot_cards,
+                    last_action_lookup=last_action_lookup,
+                    action_state_lookup=None,
+                )
+                render_plan_build_ms += int(max(0.0, (time.perf_counter() - render_plan_build_started) * 1000))
+                render_plan_build_count += 1
+                action_state_employee_ids = _today_action_state_employee_ids(
+                    plan=pre_action_render_plan,
+                )
+                profile.set("action_state_employee_ids", len(action_state_employee_ids or ()))
+                action_state_lookup: dict[str, dict[str, Any]] = {}
+                should_load_action_state_lookup = bool(action_state_employee_ids)
+                if should_load_action_state_lookup:
+                    action_state_lookup = _cached_today_action_state_lookup(
+                        tenant_id=tenant_id,
+                        employee_ids=action_state_employee_ids,
+                        today_iso=today_value.isoformat(),
+                    )
+                render_plan = pre_action_render_plan
+                if action_state_lookup:
+                    render_plan_enrich_started = time.perf_counter()
+                    render_plan = _enrich_render_plan_action_state(
+                        plan=pre_action_render_plan,
+                        today_value=today_value,
+                        last_action_lookup=last_action_lookup,
+                        action_state_lookup=action_state_lookup,
+                    )
+                    render_plan_enrich_ms = int(max(0.0, (time.perf_counter() - render_plan_enrich_started) * 1000))
+                profile.set("render_plan_build_count", int(render_plan_build_count))
+                profile.set("render_plan_build_ms", int(render_plan_build_ms))
+                profile.set("render_plan_second_build_count", int(render_plan_second_build_count))
+                profile.set("render_plan_enrich_ms", int(render_plan_enrich_ms))
+
+            orientation_state = meaning.surface_state
+            if (
+                orientation_state == TodaySurfaceState.NO_STRONG_SIGNALS
+                and signal_mode in {SignalMode.EARLY_SIGNAL, SignalMode.LIMITED_DATA}
+                and snapshot_cards
+            ):
+                orientation_state = TodaySurfaceState.EARLY_SIGNAL
+
+            with profile.stage("render_queue_orientation"):
+                orientation_model = build_queue_orientation(attention_summary)
+                if decision_summary.ranked_items:
+                    orientation_model = build_queue_orientation(decision_summary)
+                if snapshot_cards and orientation_model.total_shown <= 0:
+                    orientation_model = TodayQueueOrientationModel(
+                        total_shown=len(snapshot_cards),
+                        declining_count=orientation_model.declining_count,
+                        repeat_count=orientation_model.repeat_count,
+                        limited_confidence_count=orientation_model.limited_confidence_count,
+                        distinct_processes=orientation_model.distinct_processes,
+                        total_evaluated=orientation_model.total_evaluated,
+                    )
+
+                _render_queue_orientation_block(
+                    orientation_model,
+                    meaning=meaning,
+                    surface_state=orientation_state,
+                    signal_mode=signal_mode,
+                )
+
+            should_load_weekly_activity = bool(
                 int(counts.get("all", 0) or 0) > 0
                 or bool(snapshot_cards)
                 or bool(getattr(decision_summary, "ranked_items", []))
             )
-        )
-        if should_load_action_state_lookup:
-            action_state_lookup = _cached_today_action_state_lookup(
-                tenant_id=tenant_id,
-                employee_ids=action_state_employee_ids,
-                today_iso=today_value.isoformat(),
-            )
-        if snapshot_cards:
-            snapshot_cards = [
-                enrich_today_queue_card_action_context(
-                    card=card,
+            with profile.stage("weekly_activity"):
+                if should_load_weekly_activity:
+                    weekly_activity = _cached_weekly_manager_activity_summary(
+                        tenant_id=tenant_id,
+                        lookback_days=7,
+                        today_iso=today_value.isoformat(),
+                    )
+                else:
+                    weekly_activity = {
+                        "reviewed_issues": 0,
+                        "follow_up_touchpoints": 0,
+                        "closed_issues": 0,
+                        "improved_outcomes": 0,
+                        "reviewed_today": 0,
+                        "touchpoints_logged_today": 0,
+                        "follow_ups_scheduled_today": 0,
+                    }
+
+            with profile.stage("render_queue"):
+                attention_strip = build_today_attention_strip(
+                    attention=decision_summary,
+                    queue_items=queue_items,
                     today=today_value,
+                    same_day_activity=weekly_activity,
+                )
+                _render_attention_summary_strip(attention_strip)
+
+                _render_unified_attention_queue(
+                    decision_summary,
+                    decision_items=decision_items,
+                    suppressed_cards=home_sections.get("suppressed_signals", []),
+                    is_stale=bool(meaning.state_flags.get("stale_data")),
+                    show_secondary_open=bool(st.session_state.get("_first_import_just_completed")),
+                    weak_data_mode=bool(meaning.weak_data_mode),
+                    snapshot_cards=snapshot_cards,
                     last_action_lookup=last_action_lookup,
                     action_state_lookup=action_state_lookup,
+                    render_plan=render_plan,
                 )
-                for card in list(snapshot_cards or [])
-            ]
 
-        orientation_state = meaning.surface_state
-        if (
-            orientation_state == TodaySurfaceState.NO_STRONG_SIGNALS
-            and signal_mode in {SignalMode.EARLY_SIGNAL, SignalMode.LIMITED_DATA}
-            and snapshot_cards
-        ):
-            orientation_state = TodaySurfaceState.EARLY_SIGNAL
+            with profile.stage("render_weekly_summary"):
+                weekly_summary = build_today_weekly_summary_view_model(
+                    reviewed_issues=int(weekly_activity.get("reviewed_issues", 0) or 0),
+                    follow_up_touchpoints=int(weekly_activity.get("follow_up_touchpoints", 0) or 0),
+                    closed_issues=int(weekly_activity.get("closed_issues", 0) or 0),
+                    improved_outcomes=int(weekly_activity.get("improved_outcomes", 0) or 0),
+                )
+                _render_weekly_summary_block(weekly_summary)
 
-        orientation_model = build_queue_orientation(attention_summary)
-        if decision_summary.ranked_items:
-            orientation_model = build_queue_orientation(decision_summary)
-        if snapshot_cards and orientation_model.total_shown <= 0:
-            orientation_model = TodayQueueOrientationModel(
-                total_shown=len(snapshot_cards),
-                declining_count=orientation_model.declining_count,
-                repeat_count=orientation_model.repeat_count,
-                limited_confidence_count=orientation_model.limited_confidence_count,
-                distinct_processes=orientation_model.distinct_processes,
-                total_evaluated=orientation_model.total_evaluated,
-            )
-
-        _render_queue_orientation_block(
-            orientation_model,
-            meaning=meaning,
-            surface_state=orientation_state,
-            signal_mode=signal_mode,
-        )
-
-        should_load_weekly_activity = bool(
-            int(counts.get("all", 0) or 0) > 0
-            or bool(snapshot_cards)
-            or bool(getattr(decision_summary, "ranked_items", []))
-        )
-        if should_load_weekly_activity:
-            weekly_activity = _cached_weekly_manager_activity_summary(
-                tenant_id=tenant_id,
-                lookback_days=7,
-                today_iso=today_value.isoformat(),
-            )
-        else:
-            weekly_activity = {
-                "reviewed_issues": 0,
-                "follow_up_touchpoints": 0,
-                "closed_issues": 0,
-                "improved_outcomes": 0,
-                "reviewed_today": 0,
-                "touchpoints_logged_today": 0,
-                "follow_ups_scheduled_today": 0,
-            }
-        attention_strip = build_today_attention_strip(
-            attention=decision_summary,
-            queue_items=queue_items,
-            today=today_value,
-            same_day_activity=weekly_activity,
-        )
-        _render_attention_summary_strip(attention_strip)
-
-        _render_unified_attention_queue(
-            decision_summary,
-            decision_items=decision_items,
-            suppressed_cards=home_sections.get("suppressed_signals", []),
-            is_stale=bool(meaning.state_flags.get("stale_data")),
-            show_secondary_open=bool(st.session_state.get("_first_import_just_completed")),
-            weak_data_mode=bool(meaning.weak_data_mode),
-            snapshot_cards=snapshot_cards,
-            last_action_lookup=last_action_lookup,
-            action_state_lookup=action_state_lookup,
-        )
-
-        weekly_summary = build_today_weekly_summary_view_model(
-            reviewed_issues=int(weekly_activity.get("reviewed_issues", 0) or 0),
-            follow_up_touchpoints=int(weekly_activity.get("follow_up_touchpoints", 0) or 0),
-            closed_issues=int(weekly_activity.get("closed_issues", 0) or 0),
-            improved_outcomes=int(weekly_activity.get("improved_outcomes", 0) or 0),
-        )
-        _render_weekly_summary_block(weekly_summary)
-
-        _supporting_context_key = "_today_supporting_context_loaded"
-        if bool(st.session_state.get("_first_import_just_completed")):
-            st.session_state[_supporting_context_key] = True
-
-        _show_supporting_context = bool(st.session_state.get(_supporting_context_key, False))
-        if _show_supporting_context:
-            value_strip = build_today_value_strip_view_model(
-                goal_status=goal_status,
-                import_summary=meaning.import_summary,
-            )
-            if value_strip.cards:
-                with st.expander("Supporting context", expanded=bool(st.session_state.get("_first_import_just_completed"))):
-                    _render_today_value_strip(
-                        value_strip,
-                        freshness_note=meaning.freshness_note,
-                        is_stale=bool(meaning.state_flags.get("stale_data")),
-                        subdued=True,
-                    )
-                    if st.button("Hide supporting context", key="today_hide_supporting_context", type="secondary"):
-                        st.session_state[_supporting_context_key] = False
-                        st.rerun()
-        else:
-            st.info("Supporting context is available on demand to keep Today reruns responsive.")
-            if st.button("Load supporting context", key="today_load_supporting_context", type="secondary"):
+            _supporting_context_key = "_today_supporting_context_loaded"
+            if bool(st.session_state.get("_first_import_just_completed")):
                 st.session_state[_supporting_context_key] = True
-                st.rerun()
 
-        if bool(st.session_state.get("_first_import_just_completed")):
-            st.session_state["_first_import_just_completed"] = False
+            with profile.stage("supporting_context"):
+                _show_supporting_context = bool(st.session_state.get(_supporting_context_key, False))
+                if _show_supporting_context:
+                    value_strip = build_today_value_strip_view_model(
+                        goal_status=goal_status,
+                        import_summary=meaning.import_summary,
+                    )
+                    profile.set("supporting_context_cards", len(value_strip.cards or []))
+                    if value_strip.cards:
+                        with st.expander("Supporting context", expanded=bool(st.session_state.get("_first_import_just_completed"))):
+                            _render_today_value_strip(
+                                value_strip,
+                                freshness_note=meaning.freshness_note,
+                                is_stale=bool(meaning.state_flags.get("stale_data")),
+                                subdued=True,
+                            )
+                            if st.button("Hide supporting context", key="today_hide_supporting_context", type="secondary"):
+                                st.session_state[_supporting_context_key] = False
+                                st.rerun()
+                else:
+                    st.info("Supporting context is available on demand to keep Today reruns responsive.")
+                    if st.button("Load supporting context", key="today_load_supporting_context", type="secondary"):
+                        st.session_state[_supporting_context_key] = True
+                        st.rerun()
+
+            if bool(st.session_state.get("_first_import_just_completed")):
+                st.session_state["_first_import_just_completed"] = False
     finally:
         st.session_state["_ui_render_guard_active"] = False

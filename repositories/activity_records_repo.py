@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import time
+
 from repositories._common import get_client, log_error, require_tenant, tenant_query
+from services.observability import log_operational_event
 
 
-def batch_upsert_activity_records(records: list[dict]) -> None:
+_ACTIVITY_RECORDS_UPSERT_CHUNK_SIZE = 2000
+
+
+def batch_upsert_activity_records(records: list[dict], *, tenant_id: str = "") -> None:
     if not records:
         return
 
-    tid = require_tenant()
+    tid = require_tenant(tenant_id)
     sb = get_client()
     payload = [{**row, "tenant_id": tid} for row in records]
+    started_at = time.perf_counter()
+    chunk_count = 0
 
-    for index in range(0, len(payload), 500):
-        chunk = payload[index : index + 500]
+    for index in range(0, len(payload), _ACTIVITY_RECORDS_UPSERT_CHUNK_SIZE):
+        chunk = payload[index : index + _ACTIVITY_RECORDS_UPSERT_CHUNK_SIZE]
+        chunk_count += 1
         try:
             sb.table("activity_records").upsert(
                 chunk,
@@ -28,6 +37,21 @@ def batch_upsert_activity_records(records: list[dict]) -> None:
                 severity="error",
             )
             raise
+
+    try:
+        log_operational_event(
+            "activity_records_batch_upsert_completed",
+            status="completed",
+            tenant_id=tid,
+            context={
+                "row_count": len(payload),
+                "chunk_count": chunk_count,
+                "chunk_size": _ACTIVITY_RECORDS_UPSERT_CHUNK_SIZE,
+                "duration_ms": int((time.perf_counter() - started_at) * 1000),
+            },
+        )
+    except Exception:
+        pass
 
 
 def list_activity_records(*, tenant_id: str = "", employee_id: str = "", days: int = 30, limit: int = 500) -> list[dict]:

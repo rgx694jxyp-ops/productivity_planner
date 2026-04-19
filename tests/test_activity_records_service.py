@@ -41,19 +41,22 @@ def test_build_activity_records_from_import_rows_maps_import_context():
 def test_ingest_activity_records_from_import_calls_repo(monkeypatch):
     captured = {}
 
-    def _batch_upsert(records):
+    def _batch_upsert(records, *, tenant_id=""):
         captured["records"] = records
+        captured["tenant_id"] = tenant_id
 
     monkeypatch.setattr("services.activity_records_service.activity_records_repo.batch_upsert_activity_records", _batch_upsert)
 
     count = ingest_activity_records_from_import(
         uph_rows=[{"tenant_id": "tenant-a", "emp_id": "E1", "work_date": "2026-04-10", "department": "Packing", "uph": 88}],
+        tenant_id="tenant-a",
         source_import_job_id="import-2",
         data_quality_status="partial",
     )
 
     assert count == 1
     assert len(captured["records"]) == 1
+    assert captured["tenant_id"] == "tenant-a"
     assert captured["records"][0]["source_import_job_id"] == "import-2"
 
 
@@ -135,7 +138,7 @@ def test_batch_upsert_stamps_tenant_id_from_session(monkeypatch):
             return _FakeTable()
 
     monkeypatch.setattr("repositories.activity_records_repo.get_client", lambda: _FakeSB())
-    monkeypatch.setattr("repositories.activity_records_repo.require_tenant", lambda: "session-tenant")
+    monkeypatch.setattr("repositories.activity_records_repo.require_tenant", lambda tenant_id="": "session-tenant")
 
     from repositories.activity_records_repo import batch_upsert_activity_records
 
@@ -148,6 +151,46 @@ def test_batch_upsert_stamps_tenant_id_from_session(monkeypatch):
         assert row["tenant_id"] == "session-tenant", (
             f"Expected session-tenant but got {row['tenant_id']!r}"
         )
+
+
+def test_batch_upsert_uses_large_chunks_for_commit_path(monkeypatch):
+    captured_chunks = []
+
+    class _FakeTable:
+        def upsert(self, chunk, on_conflict=None):
+            captured_chunks.append((len(chunk), on_conflict))
+
+            class _Q:
+                def execute(self):
+                    pass
+
+            return _Q()
+
+    class _FakeSB:
+        def table(self, name):
+            assert name == "activity_records"
+            return _FakeTable()
+
+    monkeypatch.setattr("repositories.activity_records_repo.get_client", lambda: _FakeSB())
+    monkeypatch.setattr("repositories.activity_records_repo.require_tenant", lambda tenant_id="": "session-tenant")
+
+    from repositories.activity_records_repo import batch_upsert_activity_records
+
+    records = [
+        {
+            "employee_id": f"E{index}",
+            "activity_date": "2026-04-10",
+            "process_name": "Pack",
+        }
+        for index in range(2501)
+    ]
+
+    batch_upsert_activity_records(records)
+
+    assert captured_chunks == [
+        (2000, "tenant_id,employee_id,activity_date,process_name"),
+        (501, "tenant_id,employee_id,activity_date,process_name"),
+    ]
 
 
 # --------------------------------------------------------------------------- #

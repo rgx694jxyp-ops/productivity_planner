@@ -48,7 +48,7 @@ from services.import_pipeline.mapping_profiles import (
     get_recent_mapping_profile as _get_recent_mapping_profile,
 )
 from services.import_trust_service import build_import_trust_summary, build_import_warning_summary
-from jobs.entrypoints import run_import_postprocess_job, run_import_preview_job
+from jobs.entrypoints import run_import_postprocess_job_deferred, run_import_preview_job
 from services.import_quality_service import (
     ISSUE_HANDLING_CHOICES,
     ISSUE_HANDLING_LABELS,
@@ -2805,8 +2805,7 @@ def _import_step3(tenant_id: str):
                                 "events": int(_demo_seed_result.get("events") or 0),
                             },
                         )
-                    # Defer medium+ imports so pipeline completion stays responsive.
-                    # Today already has a pending-refresh recovery path on entry.
+                    # Snapshot recompute is still deferred for medium+ imports.
                     _should_defer_snapshot_recompute = len(uph_batch) >= 500
                     if _should_defer_snapshot_recompute:
                         _log_operational_event(
@@ -2819,10 +2818,9 @@ def _import_step3(tenant_id: str):
                                 "to_date": _valid_dates[-1] if _valid_dates else "",
                             },
                         )
-                    else:
-                        bar.progress(90, text="Rebuilding daily snapshots for Today…")
+                    bar.progress(90, text="Scheduling post-import processing…")
 
-                    run_import_postprocess_job(
+                    _deferred_postprocess = run_import_postprocess_job_deferred(
                         uph_rows=uph_batch,
                         tenant_id=tenant_id,
                         source_import_job_id=str(_import_job.job_id),
@@ -2842,6 +2840,16 @@ def _import_step3(tenant_id: str):
                         ingest_activity=True,
                         snapshot_source_limit=5000,
                     )
+                    if not bool(_deferred_postprocess.get("deferred")):
+                        _log_operational_event(
+                            "import_postprocess_fallback_sync",
+                            status="started",
+                            tenant_id=tenant_id,
+                            context={
+                                "row_count": len(uph_batch),
+                                "reason": "deferred_runner_unavailable",
+                            },
+                        )
 
                     if len(uph_batch) > 0 and (_new_row_ids or _undo_previous_rows):
                         st.session_state["_last_import_undo"] = {

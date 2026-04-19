@@ -2,6 +2,7 @@
 
 from jobs.entrypoints import (
     run_activity_ingest_job,
+    run_import_postprocess_job_deferred,
     run_import_postprocess_job,
     run_import_preview_job,
     run_snapshot_recompute_job,
@@ -19,4 +20,5 @@ __all__ = [
     "run_activity_ingest_job",
     "run_snapshot_recompute_job",
     "run_import_postprocess_job",
+    "run_import_postprocess_job_deferred",
 ]

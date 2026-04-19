@@ -143,6 +143,55 @@ def test_preview_import_has_no_warning_summary_for_clean_rows(monkeypatch):
     assert result.trust_summary.warning_summary == ""
 
 
+def test_find_matching_upload_by_fingerprint_reuses_cached_result(monkeypatch):
+    calls = {"execute": 0}
+
+    class _UploadedFilesQuery:
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def gte(self, *_args, **_kwargs):
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            calls["execute"] += 1
+
+            class _Resp:
+                data = [
+                    {
+                        "id": 101,
+                        "header_mapping": {"data_fingerprint": "fp-1"},
+                        "is_active": True,
+                        "created_at": "2026-04-10T12:00:00",
+                    }
+                ]
+
+            return _Resp()
+
+    class _FakeClient:
+        def table(self, name):
+            assert name == "uploaded_files"
+            return _UploadedFilesQuery()
+
+    monkeypatch.setattr(orchestrator, "get_client", lambda: _FakeClient())
+    monkeypatch.setattr(orchestrator, "tenant_query", lambda query: query)
+    monkeypatch.setattr("services.settings_service.get_tenant_local_now", lambda tenant_id: date(2026, 4, 10))
+    monkeypatch.setattr(orchestrator, "_UPLOAD_FINGERPRINT_CACHE", {})
+
+    first = orchestrator._find_matching_upload_by_fingerprint("tenant-a", "fp-1")
+    second = orchestrator._find_matching_upload_by_fingerprint("tenant-a", "fp-1")
+
+    assert first["id"] == 101
+    assert second["id"] == 101
+    assert calls["execute"] == 1
+
+
 def test_preview_import_surfaces_fallback_date_warning_summary(monkeypatch):
     monkeypatch.setattr(
         orchestrator,

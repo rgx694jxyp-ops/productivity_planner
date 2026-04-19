@@ -96,6 +96,7 @@ def build_activity_records_from_import_rows(
 def ingest_activity_records_from_import(
     *,
     uph_rows: list[dict],
+    tenant_id: str = "",
     source_import_job_id: str = "",
     source_import_file: str = "",
     source_upload_id: str = "",
@@ -116,7 +117,7 @@ def ingest_activity_records_from_import(
     )
     if not records:
         return 0
-    activity_records_repo.batch_upsert_activity_records(records)
+    activity_records_repo.batch_upsert_activity_records(records, tenant_id=tenant_id)
     return len(records)
 
 

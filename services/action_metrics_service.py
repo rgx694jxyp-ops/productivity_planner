@@ -11,6 +11,7 @@ from typing import Any
 
 from domain.actions import OPEN_STATUSES, runtime_status
 from repositories import action_events_repo, actions_repo
+from services.perf_profile import profile_block
 
 
 _TODAY_SIGNAL_STATUS_EVENT_TYPE = "today_signal_status_set"
@@ -135,74 +136,86 @@ def get_manager_outcome_stats(
       - "outcome_percentages": {"improved": float, ...}
     """
     today = today or date.today()
-    try:
-        cutoff = (today - timedelta(days=lookback_days)).isoformat()
+    with profile_block(
+        "action_metrics.manager_outcome_stats",
+        tenant_id=str(tenant_id or ""),
+        context={"lookback_days": int(lookback_days or 0)},
+        execution_key="_perf_profile_action_metrics_manager_outcome_stats",
+    ) as profile:
+        try:
+            cutoff = (today - timedelta(days=lookback_days)).isoformat()
 
-        # Load all events in the lookback window with outcomes
-        all_actions = actions_repo.list_actions(tenant_id=tenant_id)
-        total_events = 0
-        outcomes_count: dict[str, int] = {
-            "improved": 0,
-            "no_change": 0,
-            "worse": 0,
-            "pending": 0,
-            "not_applicable": 0,
-        }
-        by_issue_type: dict[str, dict[str, int]] = {}
+            with profile.stage("list_actions"):
+                all_actions = actions_repo.list_actions(tenant_id=tenant_id)
+            profile.query(rows=len(all_actions or []))
+            profile.set("actions_scanned", len(all_actions or []))
 
-        for action in all_actions or []:
-            action_id = str(action.get("id") or "")
-            issue_type = str(action.get("issue_type") or "unknown")
-            if issue_type not in by_issue_type:
-                by_issue_type[issue_type] = {
-                    "improved": 0,
-                    "no_change": 0,
-                    "worse": 0,
-                    "pending": 0,
-                    "not_applicable": 0,
-                }
+            total_events = 0
+            outcomes_count: dict[str, int] = {
+                "improved": 0,
+                "no_change": 0,
+                "worse": 0,
+                "pending": 0,
+                "not_applicable": 0,
+            }
+            by_issue_type: dict[str, dict[str, int]] = {}
 
-            events = action_events_repo.list_action_events(
-                action_id=action_id,
-                tenant_id=tenant_id,
-            )
-            for ev in events or []:
-                ev_at = str(ev.get("event_at") or "")
-                if ev_at < cutoff:
-                    continue  # before lookback window
-                ev_type = str(ev.get("event_type") or "")
-                ev_outcome = str(ev.get("outcome") or "")
+            with profile.stage("scan_action_events"):
+                for action in all_actions or []:
+                    action_id = str(action.get("id") or "")
+                    issue_type = str(action.get("issue_type") or "unknown")
+                    if issue_type not in by_issue_type:
+                        by_issue_type[issue_type] = {
+                            "improved": 0,
+                            "no_change": 0,
+                            "worse": 0,
+                            "pending": 0,
+                            "not_applicable": 0,
+                        }
 
-                # Only count when there's an explicit outcome
-                if ev_type in {"coached", "follow_up_logged", "recognized"} and ev_outcome:
-                    total_events += 1
-                    outcomes_count[ev_outcome] = outcomes_count.get(ev_outcome, 0) + 1
-                    by_issue_type[issue_type][ev_outcome] = (
-                        by_issue_type[issue_type].get(ev_outcome, 0) + 1
+                    events = action_events_repo.list_action_events(
+                        action_id=action_id,
+                        tenant_id=tenant_id,
                     )
+                    profile.query(rows=len(events or []))
+                    profile.increment("action_event_query_count", 1)
+                    profile.increment("events_scanned", len(events or []))
+                    for ev in events or []:
+                        ev_at = str(ev.get("event_at") or "")
+                        if ev_at < cutoff:
+                            continue
+                        ev_type = str(ev.get("event_type") or "")
+                        ev_outcome = str(ev.get("outcome") or "")
 
-        # Compute percentages
-        outcome_percentages: dict[str, float] = {}
-        if total_events > 0:
-            for outcome, count in outcomes_count.items():
-                outcome_percentages[outcome] = round(100.0 * count / total_events, 1)
+                        if ev_type in {"coached", "follow_up_logged", "recognized"} and ev_outcome:
+                            total_events += 1
+                            outcomes_count[ev_outcome] = outcomes_count.get(ev_outcome, 0) + 1
+                            by_issue_type[issue_type][ev_outcome] = (
+                                by_issue_type[issue_type].get(ev_outcome, 0) + 1
+                            )
 
-        return {
-            "total_events": total_events,
-            "outcomes": outcomes_count,
-            "by_issue_type": by_issue_type,
-            "outcome_percentages": outcome_percentages,
-            "lookback_days": lookback_days,
-        }
-    except Exception as e:
-        print(f"[Error] get_manager_outcome_stats failed: {e}")
-        return {
-            "total_events": 0,
-            "outcomes": {},
-            "by_issue_type": {},
-            "outcome_percentages": {},
-            "lookback_days": lookback_days,
-        }
+            outcome_percentages: dict[str, float] = {}
+            if total_events > 0:
+                for outcome, count in outcomes_count.items():
+                    outcome_percentages[outcome] = round(100.0 * count / total_events, 1)
+
+            profile.set("counted_outcome_events", total_events)
+            return {
+                "total_events": total_events,
+                "outcomes": outcomes_count,
+                "by_issue_type": by_issue_type,
+                "outcome_percentages": outcome_percentages,
+                "lookback_days": lookback_days,
+            }
+        except Exception as e:
+            print(f"[Error] get_manager_outcome_stats failed: {e}")
+            return {
+                "total_events": 0,
+                "outcomes": {},
+                "by_issue_type": {},
+                "outcome_percentages": {},
+                "lookback_days": lookback_days,
+            }
 
 
 

@@ -9,6 +9,8 @@ from typing import Any
 
 from repositories import daily_employee_snapshots_repo
 from services.activity_records_service import get_recent_activity_records
+from services.observability import log_operational_event
+from services.perf_profile import profile_block
 from services.signal_interpretation_service import derive_confidence_from_coverage_policy
 from services.signal_pattern_memory_service import detect_pattern_memory_from_goal_row
 from services.target_service import normalize_process_name, resolve_target_context
@@ -17,6 +19,13 @@ from services.trend_classification_service import classify_trend_state, normaliz
 
 _SNAPSHOT_READ_CACHE_TTL_SECONDS = 30
 _LATEST_SNAPSHOT_CACHE: dict[tuple[str, int], tuple[float, tuple[list[dict], list[dict], str]]] = {}
+
+
+def _emit_snapshot_operational_event(event_type: str, *, status: str, context: dict[str, Any]) -> None:
+    try:
+        log_operational_event(event_type, status=status, context=context, tenant_id=str(context.get("tenant_id") or ""))
+    except Exception:
+        pass
 
 
 def _tenant_today(tenant_id: str = "") -> date:
@@ -282,82 +291,98 @@ def recompute_daily_employee_snapshots(
     replace_existing: bool = True,
     source_limit: int = 5000,
 ) -> dict:
-    try:
-        from core.dependencies import _log_operational_event
-        _log_operational_event(
+    with profile_block(
+        "daily_snapshot.recompute",
+        tenant_id=str(tenant_id or ""),
+        context={
+            "days": int(days or 30),
+            "lookback_days": int(lookback_days or 0),
+            "comparison_days": int(comparison_days or 0),
+            "replace_existing": bool(replace_existing),
+        },
+        execution_key=f"_perf_profile_snapshot_recompute_{str(tenant_id or '').strip()}",
+    ) as profile:
+        _emit_snapshot_operational_event(
             "snapshot_recompute_started",
             status="started",
             context={"tenant_id": str(tenant_id or ""), "from_date": str(from_date or ""), "to_date": str(to_date or ""), "days": int(days or 30)},
         )
-    except Exception:
-        pass
 
-    if from_date and to_date:
-        start_date = _parse_date(from_date)
-        end_date = _parse_date(to_date)
-        if start_date and end_date and end_date < start_date:
-            start_date, end_date = end_date, start_date
-        span_days = max(1, (end_date - start_date).days + 1) if start_date and end_date else max(1, int(days or 30))
-        fetch_days = span_days + (lookback_days * 3)
-    else:
-        end_date = _tenant_today(tenant_id)
-        fetch_days = max(1, int(days or 30)) + (lookback_days * 3)
-        start_date = end_date - timedelta(days=max(0, int(days or 30) - 1))
+        if from_date and to_date:
+            start_date = _parse_date(from_date)
+            end_date = _parse_date(to_date)
+            if start_date and end_date and end_date < start_date:
+                start_date, end_date = end_date, start_date
+            span_days = max(1, (end_date - start_date).days + 1) if start_date and end_date else max(1, int(days or 30))
+            fetch_days = span_days + (lookback_days * 3)
+        else:
+            end_date = _tenant_today(tenant_id)
+            fetch_days = max(1, int(days or 30)) + (lookback_days * 3)
+            start_date = end_date - timedelta(days=max(0, int(days or 30) - 1))
 
-    activity_rows = get_recent_activity_records(
-        tenant_id=tenant_id,
-        days=fetch_days,
-        limit=max(500, int(source_limit or 5000)),
-    )
-    try:
-        from core.dependencies import _log_operational_event
-        _log_operational_event(
+        profile.set("fetch_days", int(fetch_days or 0))
+        with profile.stage("fetch_activity_rows"):
+            activity_rows = get_recent_activity_records(
+                tenant_id=tenant_id,
+                days=fetch_days,
+                limit=max(500, int(source_limit or 5000)),
+            )
+        profile.query(rows=len(activity_rows or []))
+        profile.set("activity_rows", len(activity_rows or []))
+        _emit_snapshot_operational_event(
             "snapshot_activity_fetch_completed",
             status="completed",
             context={"tenant_id": str(tenant_id or ""), "activity_row_count": len(activity_rows or []), "fetch_days": int(fetch_days)},
         )
-    except Exception:
-        pass
 
-    snapshots = build_daily_employee_snapshots(
-        activity_records=activity_rows,
-        tenant_id=tenant_id,
-        lookback_days=lookback_days,
-        comparison_days=comparison_days,
-    )
-    filtered_snapshots = [
-        row
-        for row in snapshots
-        if (not start_date or (_parse_date(row.get("snapshot_date")) or date.min) >= start_date)
-        and (not end_date or (_parse_date(row.get("snapshot_date")) or date.max) <= end_date)
-    ]
+        with profile.stage("build_snapshots"):
+            snapshots = build_daily_employee_snapshots(
+                activity_records=activity_rows,
+                tenant_id=tenant_id,
+                lookback_days=lookback_days,
+                comparison_days=comparison_days,
+            )
+        profile.set("snapshots_built", len(snapshots or []))
 
-    if replace_existing and start_date and end_date:
-        daily_employee_snapshots_repo.delete_daily_employee_snapshots(
-            tenant_id=tenant_id,
-            from_date=start_date.isoformat(),
-            to_date=end_date.isoformat(),
-        )
-    if filtered_snapshots:
-        daily_employee_snapshots_repo.batch_upsert_daily_employee_snapshots(filtered_snapshots)
-    _clear_latest_snapshot_cache()
+        with profile.stage("filter_snapshots"):
+            filtered_snapshots = [
+                row
+                for row in snapshots
+                if (not start_date or (_parse_date(row.get("snapshot_date")) or date.min) >= start_date)
+                and (not end_date or (_parse_date(row.get("snapshot_date")) or date.max) <= end_date)
+            ]
+        profile.set("snapshots_filtered", len(filtered_snapshots or []))
 
-    try:
-        from core.dependencies import _log_operational_event
-        _log_operational_event(
+        if replace_existing and start_date and end_date:
+            with profile.stage("delete_existing"):
+                daily_employee_snapshots_repo.delete_daily_employee_snapshots(
+                    tenant_id=tenant_id,
+                    from_date=start_date.isoformat(),
+                    to_date=end_date.isoformat(),
+                )
+            profile.query(count=1)
+
+        if filtered_snapshots:
+            with profile.stage("upsert_snapshots"):
+                daily_employee_snapshots_repo.batch_upsert_daily_employee_snapshots(filtered_snapshots)
+            profile.query(count=max(1, (len(filtered_snapshots) + 499) // 500), rows=len(filtered_snapshots))
+            profile.set("upsert_batch_count", max(1, (len(filtered_snapshots) + 499) // 500))
+
+        with profile.stage("clear_snapshot_cache"):
+            _clear_latest_snapshot_cache()
+
+        _emit_snapshot_operational_event(
             "snapshot_recompute_completed",
             status="completed",
             context={"tenant_id": str(tenant_id or ""), "inserted": len(filtered_snapshots), "from_date": (start_date.isoformat() if start_date else ""), "to_date": (end_date.isoformat() if end_date else "")},
         )
-    except Exception:
-        pass
 
-    return {
-        "inserted": len(filtered_snapshots),
-        "from_date": start_date.isoformat() if start_date else "",
-        "to_date": end_date.isoformat() if end_date else "",
-        "source_rows": len(activity_rows),
-    }
+        return {
+            "inserted": len(filtered_snapshots),
+            "from_date": start_date.isoformat() if start_date else "",
+            "to_date": end_date.isoformat() if end_date else "",
+            "source_rows": len(activity_rows),
+        }
 
 
 def _employee_lookup(*, tenant_id: str = "") -> dict[str, dict]:

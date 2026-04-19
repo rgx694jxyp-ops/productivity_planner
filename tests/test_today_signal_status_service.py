@@ -203,3 +203,51 @@ def test_list_latest_signal_statuses_scans_beyond_previous_max_scan_rows(monkeyp
     status_map = list_latest_signal_statuses(signal_keys={signal_key}, tenant_id="tenant-a")
 
     assert status_map[signal_key]["status"] == SIGNAL_STATUS_LOOKED_AT
+
+
+def test_list_latest_signal_statuses_reuses_cached_results(monkeypatch):
+    signal_key = "today-signal:e10:pack:below_expected:stable_trend:2026-04-12"
+    call_count = {"execute": 0}
+
+    class _FakeTable:
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def range(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            call_count["execute"] += 1
+
+            class _Resp:
+                data = [
+                    {
+                        "event_type": "today_signal_status_set",
+                        "details": '{"scope":"today_queue_signal_status","signal_key":"%s","signal_status":"looked_at"}' % signal_key,
+                        "owner": "lead@example.com",
+                        "event_at": "2026-04-12T10:00:00Z",
+                    }
+                ]
+
+            return _Resp()
+
+    class _FakeClient:
+        def table(self, name):
+            assert name == "action_events"
+            return _FakeTable()
+
+    monkeypatch.setattr("services.today_signal_status_service.get_client", lambda: _FakeClient())
+    monkeypatch.setattr("services.today_signal_status_service._LATEST_SIGNAL_STATUS_CACHE", {})
+
+    first = list_latest_signal_statuses(signal_keys={signal_key}, tenant_id="tenant-a")
+    second = list_latest_signal_statuses(signal_keys={signal_key}, tenant_id="tenant-a")
+
+    assert first[signal_key]["status"] == SIGNAL_STATUS_LOOKED_AT
+    assert second[signal_key]["status"] == SIGNAL_STATUS_LOOKED_AT
+    assert call_count["execute"] == 1
