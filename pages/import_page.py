@@ -379,6 +379,14 @@ def _clear_today_demo_recovery_state() -> None:
     for _key in list(st.session_state.keys()):
         if str(_key).startswith("_today_recovery_attempted_"):
             st.session_state.pop(_key, None)
+    # Purge stale daily_signals payloads so Today recovery always rebuilds from scratch.
+    try:
+        tenant_id = str(st.session_state.get("tenant_id", "") or "").strip()
+        if tenant_id:
+            from repositories.daily_signals_repo import delete_daily_signals
+            delete_daily_signals(tenant_id=tenant_id)
+    except Exception:
+        pass
 
 
 def _tenant_has_uph_history(*, tenant_id: str) -> bool:
@@ -479,6 +487,28 @@ def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
     if not actions_path.exists() or not events_path.exists():
         return {"status": "missing_seed_files", "actions": 0, "events": 0}
 
+    def _normalize_seed_payload(*, row: dict, timestamp_fields: tuple[str, ...], required_default_fields: tuple[str, ...] = ()) -> dict:
+        """Normalize demo seed rows so optional timestamp blanks don't break inserts."""
+        payload = dict(row or {})
+        for field in timestamp_fields:
+            if field not in payload:
+                continue
+            raw_value = payload.get(field)
+            if raw_value is None:
+                payload.pop(field, None)
+                continue
+            text_value = str(raw_value).strip()
+            if not text_value:
+                payload.pop(field, None)
+        for field in required_default_fields:
+            raw_value = payload.get(field)
+            if raw_value is None:
+                payload.pop(field, None)
+                continue
+            if not str(raw_value).strip():
+                payload.pop(field, None)
+        return payload
+
     try:
         from database import get_client as _db_get_client
 
@@ -504,7 +534,11 @@ def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
         seed_to_db_id: dict[int, str] = {}
         inserted_actions = 0
         for action in actions_seed or []:
-            payload = {k: v for k, v in dict(action or {}).items() if k != "id"}
+            payload = _normalize_seed_payload(
+                row={k: v for k, v in dict(action or {}).items() if k != "id"},
+                timestamp_fields=_DEMO_ACTION_TIMESTAMP_FIELDS,
+                required_default_fields=("last_event_at", "created_at"),
+            )
             payload["tenant_id"] = tid
             result = sb.table("actions").insert(payload).execute()
             rows = result.data or []
@@ -525,7 +559,10 @@ def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
             db_action_id = seed_to_db_id.get(seed_action_id)
             if not db_action_id:
                 continue
-            payload = {k: v for k, v in dict(event or {}).items() if k != "id"}
+            payload = _normalize_seed_payload(
+                row={k: v for k, v in dict(event or {}).items() if k != "id"},
+                timestamp_fields=_DEMO_EVENT_TIMESTAMP_FIELDS,
+            )
             payload["tenant_id"] = tid
             payload["action_id"] = db_action_id
             result = sb.table("action_events").insert(payload).execute()
@@ -533,7 +570,12 @@ def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
                 inserted_events += 1
 
         return {"status": "seeded", "actions": inserted_actions, "events": inserted_events}
-    except Exception:
+    except Exception as _seed_err:
+        try:
+            from core.dependencies import _log_app_error
+            _log_app_error("demo_action_seed", f"Demo seed failed: {_seed_err}", severity="warning")
+        except Exception:
+            pass
         return {"status": "error", "actions": 0, "events": 0}
 
 

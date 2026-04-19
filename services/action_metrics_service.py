@@ -61,13 +61,14 @@ def get_weekly_manager_activity_summary(
         follow_up_touchpoints = 0
         touchpoints_logged_today = 0
         follow_ups_scheduled_today = 0
+        improved_outcomes = 0
 
         all_events = action_events_repo.list_action_events(
             action_id="",
             tenant_id=tenant_id,
             limit=5000,
             newest_first=True,
-            columns="event_type, event_at, details, next_follow_up_at, due_date",
+            columns="event_type, event_at, details, next_follow_up_at, due_date, outcome",
         )
         for event in all_events or []:
             event_date = _parse_date(event.get("event_at"))
@@ -90,18 +91,17 @@ def get_weekly_manager_activity_summary(
                     if next_follow_up_at:
                         follow_ups_scheduled_today += 1
 
-        manager_outcomes = get_manager_outcome_stats(
-            tenant_id=tenant_id,
-            lookback_days=lookback_days,
-            today=today,
-        )
+            outcome = str(event.get("outcome") or "").strip().lower()
+            if outcome == "improved":
+                improved_outcomes += 1
+
         recent_closed = _recent_action_outcomes(lookback_days=lookback_days, tenant_id=tenant_id)
 
         return {
             "reviewed_issues": len(reviewed_signal_keys),
             "follow_up_touchpoints": int(follow_up_touchpoints),
             "closed_issues": len(list(recent_closed or [])),
-            "improved_outcomes": int((manager_outcomes.get("outcomes") or {}).get("improved", 0) or 0),
+            "improved_outcomes": int(improved_outcomes),
             "reviewed_today": len(reviewed_today_signal_keys),
             "touchpoints_logged_today": int(touchpoints_logged_today),
             "follow_ups_scheduled_today": int(follow_ups_scheduled_today),

@@ -5,6 +5,7 @@ Queue-first supervisor workflow focused on daily follow-through.
 
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -89,12 +90,13 @@ from ui.traceability_panel import render_traceability_panel
 from services.demo_data_service import is_demo_upload_row as _is_demo_upload_row, reset_demo_uploads as _reset_demo_uploads
 
 
-_READ_CACHE_TTL_SECONDS = 45
-_TODAY_ACTION_STATE_LOOKUP_MAX_EMPLOYEE_IDS = 96
-_TODAY_ACTION_STATE_LOOKUP_MAX_RANKED_ITEMS = 32
-_TODAY_ACTION_STATE_LOOKUP_MAX_DECISION_ITEMS = 48
-_TODAY_ACTION_STATE_LOOKUP_MAX_SECTION_ITEMS = 24
-_TODAY_ACTION_STATE_LOOKUP_MAX_SNAPSHOT_ITEMS = 24
+_READ_CACHE_TTL_SECONDS = 300
+_TODAY_RECOVERY_LOCK_TTL_SECONDS = 90
+_TODAY_ACTION_STATE_LOOKUP_MAX_EMPLOYEE_IDS = 24
+_TODAY_ACTION_STATE_LOOKUP_MAX_RANKED_ITEMS = 12
+_TODAY_ACTION_STATE_LOOKUP_MAX_DECISION_ITEMS = 18
+_TODAY_ACTION_STATE_LOOKUP_MAX_SECTION_ITEMS = 12
+_TODAY_ACTION_STATE_LOOKUP_MAX_SNAPSHOT_ITEMS = 12
 
 
 def _log_heavy_render_compute(name: str) -> None:
@@ -156,6 +158,11 @@ def _cached_today_action_state_lookup(
         )
         or {}
     )
+
+
+@st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_today_signals_payload(*, tenant_id: str, as_of_date: str) -> dict[str, Any] | None:
+    return get_today_signals(tenant_id=tenant_id, as_of_date=as_of_date)
 
 
 def _apply_today_styles() -> None:
@@ -762,23 +769,47 @@ def _render_return_trigger(trigger: TodayReturnTriggerViewModel | None) -> None:
 
 def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bool:
     """Rebuild snapshots then compute today's signals. Called on first load and post-import."""
+    recovery_lock_key = f"_today_recovery_in_progress_{today_value.isoformat()}"
+    recovery_started_at_key = f"_today_recovery_started_at_{today_value.isoformat()}"
+    recovery_completed_at_key = f"_today_recovery_completed_at_{today_value.isoformat()}"
+
+    now_ts = time.time()
+    started_at = float(st.session_state.get(recovery_started_at_key, 0.0) or 0.0)
+    if bool(st.session_state.get(recovery_lock_key)) and (now_ts - started_at) < _TODAY_RECOVERY_LOCK_TTL_SECONDS:
+        return False
+
+    st.session_state[recovery_lock_key] = True
+    st.session_state[recovery_started_at_key] = now_ts
     try:
         from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
-        from services.daily_snapshot_service import recompute_daily_employee_snapshots
+        from services.daily_snapshot_service import get_latest_snapshot_goal_status, recompute_daily_employee_snapshots
 
-        # Always rebuild snapshots first so compute_daily_signals has fresh goal_status.
-        # This is the step that was previously missing, causing Today to show empty signals.
         snapshot_err = None
+        latest_snapshot_date = ""
         try:
-            recompute_daily_employee_snapshots(tenant_id=tenant_id, days=30)
-        except Exception as snap_err:
-            # Log but continue: signal computation can still work with existing snapshots
-            snapshot_err = snap_err
-            _log_app_error(
-                "today_recovery",
-                f"Snapshot recompute failed during recovery (non-fatal): {snap_err}",
-                severity="warning",
+            _goal_status, _history_rows, latest_snapshot_date = get_latest_snapshot_goal_status(
+                tenant_id=tenant_id,
+                days=30,
+                rebuild_if_missing=False,
             )
+        except Exception:
+            latest_snapshot_date = ""
+
+        should_recompute_snapshots = bool(
+            st.session_state.get("_post_import_refresh_pending")
+            or latest_snapshot_date != today_value.isoformat()
+        )
+        if should_recompute_snapshots:
+            try:
+                recompute_daily_employee_snapshots(tenant_id=tenant_id, days=30)
+            except Exception as snap_err:
+                # Log but continue: signal computation can still work with existing snapshots
+                snapshot_err = snap_err
+                _log_app_error(
+                    "today_recovery",
+                    f"Snapshot recompute failed during recovery (non-fatal): {snap_err}",
+                    severity="warning",
+                )
 
         try:
             compute_daily_signals(
@@ -800,6 +831,14 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
             get_today_signals.cache_clear()
         elif hasattr(get_today_signals, "clear"):
             get_today_signals.clear()
+        try:
+            if hasattr(_cached_today_signals_payload, "clear"):
+                _cached_today_signals_payload.clear()
+            elif hasattr(_cached_today_signals_payload, "cache_clear"):
+                _cached_today_signals_payload.cache_clear()
+        except Exception:
+            pass
+        st.session_state[recovery_completed_at_key] = time.time()
         return True
     except Exception as recovery_err:
         # Avoid retry loops that can make Today appear stuck after a failed recovery.
@@ -811,6 +850,8 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
         )
         show_error_state(f"Today signal recovery failed: {recovery_err}")
         return False
+    finally:
+        st.session_state[recovery_lock_key] = False
 
 
 def _queue_counts(queue_items: list[dict]) -> dict[str, int]:
@@ -2029,8 +2070,9 @@ def page_today() -> None:
 
             # Eagerly recover when deferred from import OR whenever no payload exists.
             # This ensures demo mode always auto-builds on first entry without user action.
+            force_recompute = bool(st.session_state.get("_post_import_refresh_pending"))
             needs_recovery = (
-                bool(st.session_state.get("_post_import_refresh_pending"))
+                force_recompute
                 or not bool(st.session_state.get("_today_recovery_attempted_" + today_value.isoformat()))
             )
             if needs_recovery:
@@ -2038,7 +2080,7 @@ def page_today() -> None:
                     tenant_id=tenant_id,
                     as_of_date=today_value.isoformat(),
                 )
-                if not precomputed:
+                if not precomputed or force_recompute:
                     with st.spinner("Building today's signals…"):
                         _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
                     st.session_state["_today_recovery_attempted_" + today_value.isoformat()] = True
@@ -2129,7 +2171,7 @@ def page_today() -> None:
 
         _render_top_status_area(meaning=meaning)
 
-        previous_precomputed = get_today_signals(
+        previous_precomputed = _cached_today_signals_payload(
             tenant_id=tenant_id,
             as_of_date=(today_value - timedelta(days=1)).isoformat(),
         )
@@ -2153,16 +2195,27 @@ def page_today() -> None:
         last_action_lookup = _build_last_action_lookup(queue_items)
         decision_items = list(precomputed.get("decision_items") or [])
         decision_summary = precomputed.get("decision_summary") or attention_summary
-        action_state_lookup = _cached_today_action_state_lookup(
-            tenant_id=tenant_id,
-            employee_ids=_today_action_state_employee_ids(
-                attention=decision_summary,
-                decision_items=decision_items,
-                home_sections=home_sections,
-                snapshot_cards=snapshot_cards,
-            ),
-            today_iso=today_value.isoformat(),
+        action_state_employee_ids = _today_action_state_employee_ids(
+            attention=decision_summary,
+            decision_items=decision_items,
+            home_sections=home_sections,
+            snapshot_cards=snapshot_cards,
         )
+        action_state_lookup: dict[str, dict[str, Any]] = {}
+        should_load_action_state_lookup = bool(
+            action_state_employee_ids
+            and (
+                int(counts.get("all", 0) or 0) > 0
+                or bool(snapshot_cards)
+                or bool(getattr(decision_summary, "ranked_items", []))
+            )
+        )
+        if should_load_action_state_lookup:
+            action_state_lookup = _cached_today_action_state_lookup(
+                tenant_id=tenant_id,
+                employee_ids=action_state_employee_ids,
+                today_iso=today_value.isoformat(),
+            )
         if snapshot_cards:
             snapshot_cards = [
                 enrich_today_queue_card_action_context(
@@ -2202,11 +2255,27 @@ def page_today() -> None:
             signal_mode=signal_mode,
         )
 
-        weekly_activity = _cached_weekly_manager_activity_summary(
-            tenant_id=tenant_id,
-            lookback_days=7,
-            today_iso=today_value.isoformat(),
+        should_load_weekly_activity = bool(
+            int(counts.get("all", 0) or 0) > 0
+            or bool(snapshot_cards)
+            or bool(getattr(decision_summary, "ranked_items", []))
         )
+        if should_load_weekly_activity:
+            weekly_activity = _cached_weekly_manager_activity_summary(
+                tenant_id=tenant_id,
+                lookback_days=7,
+                today_iso=today_value.isoformat(),
+            )
+        else:
+            weekly_activity = {
+                "reviewed_issues": 0,
+                "follow_up_touchpoints": 0,
+                "closed_issues": 0,
+                "improved_outcomes": 0,
+                "reviewed_today": 0,
+                "touchpoints_logged_today": 0,
+                "follow_ups_scheduled_today": 0,
+            }
         attention_strip = build_today_attention_strip(
             attention=decision_summary,
             queue_items=queue_items,
