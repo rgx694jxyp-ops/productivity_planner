@@ -17,6 +17,7 @@ from pages.common import get_user_timezone_now, _normalize_label_text
 from ui.components import diagnose_upload, show_diagnosis, show_manual_entry_form
 import json
 import hashlib
+from datetime import timedelta
 from pathlib import Path
 from data_loader import auto_detect as _auto_detect, parse_csv_bytes as _parse_csv
 from pages.employees import _build_archived_productivity
@@ -60,6 +61,8 @@ from models.import_quality_models import LatestImportSummary
 from services.trend_classification_service import normalize_trend_state
 from services.onboarding_service import build_first_import_insight
 from core.onboarding_intent import build_onboarding_event_context
+from services.demo_data_service import reset_demo_uploads
+from ui.state_panels import set_flash_message
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +87,17 @@ _DEMO_SAMPLE_FILES = [
 _DEMO_ACTIONS_FILE = "demo_actions_seed.json"
 _DEMO_ACTION_EVENTS_FILE = "demo_action_events_seed.json"
 _DEMO_SEED_OWNER = "demo.supervisor@example.com"
+_DEMO_ACTION_TIMESTAMP_FIELDS = (
+    "follow_up_due_at",
+    "last_event_at",
+    "resolved_at",
+    "escalated_at",
+    "created_at",
+)
+_DEMO_EVENT_TIMESTAMP_FIELDS = (
+    "event_at",
+    "next_follow_up_at",
+)
 _AUTO_LOAD_SAMPLE_ONBOARDING_FLAG = "_auto_load_sample_on_import_once"
 _AUTO_RUN_SAMPLE_PIPELINE_ONCE_FLAG = "_sample_onboarding_auto_run_pipeline_once"
 _FOCUS_FIRST_INSIGHT_ONCE_FLAG = "_sample_onboarding_focus_first_insight_once"
@@ -120,6 +134,113 @@ def _build_step3_preview_cache_key(*, sessions: list[dict], work_date: date, ten
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def _compute_demo_row_date_shift_days(*, rows: list[dict], date_column: str, today_value: date | None = None) -> int:
+    """Shift demo row dates so the latest seed day aligns to today."""
+    column = str(date_column or "").strip()
+    if not column:
+        return 0
+
+    latest_seed_date: date | None = None
+    for row in list(rows or []):
+        raw_value = str((row or {}).get(column, "") or "").strip()
+        if not raw_value:
+            continue
+        try:
+            parsed = date.fromisoformat(raw_value[:10])
+        except Exception:
+            continue
+        if latest_seed_date is None or parsed > latest_seed_date:
+            latest_seed_date = parsed
+
+    if latest_seed_date is None:
+        return 0
+    anchor = today_value or date.today()
+    return int((anchor - latest_seed_date).days)
+
+
+def _shift_demo_rows_to_current_dates(*, rows: list[dict], date_column: str, today_value: date | None = None) -> list[dict]:
+    column = str(date_column or "").strip()
+    shift_days = _compute_demo_row_date_shift_days(rows=rows, date_column=column, today_value=today_value)
+    if not column or shift_days == 0:
+        return list(rows or [])
+
+    shifted_rows: list[dict] = []
+    for row in list(rows or []):
+        next_row = dict(row or {})
+        raw_value = str(next_row.get(column, "") or "").strip()
+        if raw_value:
+            try:
+                parsed = date.fromisoformat(raw_value[:10])
+                next_row[column] = (parsed + timedelta(days=shift_days)).isoformat()
+            except Exception:
+                pass
+        shifted_rows.append(next_row)
+    return shifted_rows
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        normalized = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        return None
+
+
+def _shift_iso_datetime_text(value: str, *, shift_days: int) -> str:
+    raw = str(value or "")
+    if shift_days == 0:
+        return raw
+    parsed = _parse_iso_datetime(raw)
+    if parsed is None:
+        return raw
+    shifted = parsed + timedelta(days=shift_days)
+    if raw.strip().endswith("Z"):
+        return shifted.isoformat().replace("+00:00", "Z")
+    return shifted.isoformat()
+
+
+def _compute_demo_seed_shift_days(*, actions_seed: list[dict], events_seed: list[dict], today_value: date | None = None) -> int:
+    latest_seed_date: date | None = None
+    for record in list(actions_seed or []):
+        for field in _DEMO_ACTION_TIMESTAMP_FIELDS:
+            parsed = _parse_iso_datetime(str((record or {}).get(field, "") or ""))
+            if parsed is None:
+                continue
+            as_date = parsed.date()
+            if latest_seed_date is None or as_date > latest_seed_date:
+                latest_seed_date = as_date
+    for record in list(events_seed or []):
+        for field in _DEMO_EVENT_TIMESTAMP_FIELDS:
+            parsed = _parse_iso_datetime(str((record or {}).get(field, "") or ""))
+            if parsed is None:
+                continue
+            as_date = parsed.date()
+            if latest_seed_date is None or as_date > latest_seed_date:
+                latest_seed_date = as_date
+
+    if latest_seed_date is None:
+        return 0
+    anchor = today_value or date.today()
+    return int((anchor - latest_seed_date).days)
+
+
+def _shift_seed_timestamp_fields(*, records: list[dict], fields: tuple[str, ...], shift_days: int) -> list[dict]:
+    if shift_days == 0:
+        return [dict(item or {}) for item in list(records or [])]
+
+    shifted_records: list[dict] = []
+    for record in list(records or []):
+        next_record = dict(record or {})
+        for field in fields:
+            if field in next_record:
+                next_record[field] = _shift_iso_datetime_text(str(next_record.get(field, "") or ""), shift_days=shift_days)
+        shifted_records.append(next_record)
+    return shifted_records
+
+
 def _build_sample_demo_sessions(*, tenant_id: str) -> list[dict]:
     sessions: list[dict] = []
     seed_dir = Path(__file__).resolve().parents[1] / "demo_data"
@@ -133,12 +254,13 @@ def _build_sample_demo_sessions(*, tenant_id: str) -> list[dict]:
             continue
 
         auto = _auto_detect(headers)
+        shifted_rows = _shift_demo_rows_to_current_dates(rows=rows, date_column=str(auto.get("Date", "") or ""))
         sessions.append(
             {
                 "filename": f"sample/{file_name}",
-                "rows": rows,
+                "rows": shifted_rows,
                 "headers": headers,
-                "row_count": len(rows),
+                "row_count": len(shifted_rows),
                 "mapping": {
                     "Date": auto.get("Date", ""),
                     "EmployeeID": auto.get("EmployeeID", ""),
@@ -250,6 +372,13 @@ def _emit_first_insight_rendered_once(*, tenant_id: str, summary: dict) -> None:
 
 
 def _load_sample_demo_into_import_state(*, tenant_id: str, trigger: str = "manual") -> bool:
+    if str(tenant_id or "").strip():
+        try:
+            reset_demo_uploads(tenant_id=str(tenant_id or ""))
+            _bust_cache()
+        except Exception:
+            pass
+
     sessions = _build_sample_demo_sessions(tenant_id=tenant_id)
     if not sessions:
         st.error("Sample files are not available. Ensure demo_data files are present in this workspace.")
@@ -287,6 +416,26 @@ def _consume_auto_run_sample_pipeline_once() -> bool:
     return auto_run
 
 
+def _redirect_existing_sample_data_to_today(*, tenant_id: str, candidate_rows: int) -> None:
+    set_flash_message(
+        f"Sample data is already available in this workspace. Reusing {int(candidate_rows or 0):,} prepared rows and opening Today."
+    )
+    st.session_state["_first_import_just_completed"] = True
+    st.session_state["goto_page"] = "today"
+    st.session_state.pop("_import_complete_summary", None)
+    _emit_import_funnel_event(
+        "import_preview_completed",
+        tenant_id=tenant_id,
+        context={
+            "candidate_rows": int(candidate_rows or 0),
+            "duplicates": int(candidate_rows or 0),
+            "continue_path": "existing_sample_data",
+            "exact_duplicate_import": True,
+        },
+    )
+    st.rerun()
+
+
 def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
     """Seed curated demo actions/events for one tenant.
 
@@ -309,6 +458,17 @@ def _seed_demo_action_storyline(*, tenant_id: str) -> dict[str, int | str]:
         sb = _db_get_client()
         actions_seed = json.loads(actions_path.read_text(encoding="utf-8"))
         events_seed = json.loads(events_path.read_text(encoding="utf-8"))
+        shift_days = _compute_demo_seed_shift_days(actions_seed=actions_seed, events_seed=events_seed)
+        actions_seed = _shift_seed_timestamp_fields(
+            records=actions_seed,
+            fields=_DEMO_ACTION_TIMESTAMP_FIELDS,
+            shift_days=shift_days,
+        )
+        events_seed = _shift_seed_timestamp_fields(
+            records=events_seed,
+            fields=_DEMO_EVENT_TIMESTAMP_FIELDS,
+            shift_days=shift_days,
+        )
 
         # Remove prior demo-seeded records for deterministic reruns.
         sb.table("action_events").delete().eq("tenant_id", tid).eq("performed_by", _DEMO_SEED_OWNER).execute()
@@ -1925,6 +2085,11 @@ def _import_step3(tenant_id: str):
         )
 
     _auto_run_sample_pipeline = _consume_auto_run_sample_pipeline_once()
+    if _preview_exact_duplicate_import and _infer_import_path(sessions=sessions) == "sample":
+        _redirect_existing_sample_data_to_today(
+            tenant_id=tenant_id,
+            candidate_rows=len(_candidate_preview_rows or []),
+        )
     _confirm_preview = st.checkbox(
         "I reviewed the preview and want to write this data to history",
         key="confirm_import_preview",

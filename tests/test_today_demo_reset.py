@@ -1,4 +1,4 @@
-from pages.today import _is_demo_upload_row, _reset_demo_uploads
+from services.demo_data_service import is_demo_upload_row, reset_demo_uploads
 
 
 def test_is_demo_upload_row_requires_active_and_demo_mode(monkeypatch):
@@ -7,10 +7,10 @@ def test_is_demo_upload_row_requires_active_and_demo_mode(monkeypatch):
         lambda raw: raw if isinstance(raw, dict) else {},
     )
 
-    assert _is_demo_upload_row({"is_active": True, "header_mapping": {"source_mode": "demo"}})
-    assert not _is_demo_upload_row({"is_active": False, "header_mapping": {"source_mode": "demo"}})
-    assert not _is_demo_upload_row({"is_active": True, "header_mapping": {"source_mode": "real"}})
-    assert not _is_demo_upload_row(
+    assert is_demo_upload_row({"is_active": True, "header_mapping": {"source_mode": "demo"}})
+    assert not is_demo_upload_row({"is_active": False, "header_mapping": {"source_mode": "demo"}})
+    assert not is_demo_upload_row({"is_active": True, "header_mapping": {"source_mode": "real"}})
+    assert not is_demo_upload_row(
         {
             "is_active": True,
             "header_mapping": {
@@ -67,7 +67,7 @@ def test_reset_demo_uploads_rolls_back_only_demo_uploads(monkeypatch):
     monkeypatch.setattr("services.import_service._restore_uph_snapshot", _fake_restore)
     monkeypatch.setattr("services.import_service._deactivate_upload", _fake_deactivate)
 
-    out = _reset_demo_uploads(tenant_id="tenant-1")
+    out = reset_demo_uploads(tenant_id="tenant-1")
 
     assert out["demo_uploads_found"] == 1
     assert out["demo_uploads_reset"] == 1
@@ -108,7 +108,7 @@ def test_reset_demo_uploads_skips_demo_without_snapshot(monkeypatch):
         lambda tenant_id, upload_id, payload: (_ for _ in ()).throw(AssertionError("should not deactivate")),
     )
 
-    out = _reset_demo_uploads(tenant_id="tenant-1")
+    out = reset_demo_uploads(tenant_id="tenant-1")
 
     assert out["demo_uploads_found"] == 1
     assert out["demo_uploads_reset"] == 0
