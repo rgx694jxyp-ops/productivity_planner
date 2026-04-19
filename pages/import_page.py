@@ -2120,19 +2120,22 @@ def _import_step3(tenant_id: str):
             )
         else:
             st.info("Rebuilding demo history for this workspace.")
-    _confirm_preview = st.checkbox(
-        "I reviewed the preview and want to write this data to history",
-        key="confirm_import_preview",
-    )
+    
+    # Pre-set session state for auto-run before rendering the checkbox widget
     if _auto_run_sample_pipeline:
+        st.session_state["confirm_import_preview"] = True
         _emit_import_started_once(
             tenant_id=tenant_id,
             trigger="auto_onboarding_resume",
             sessions=sessions,
             context={"source_mode": "demo", "resume": True},
         )
-        _confirm_preview = True
         st.info("Loading sample data and preparing your first insight. This can take a few seconds.")
+    
+    _confirm_preview = st.checkbox(
+        "I reviewed the preview and want to write this data to history",
+        key="confirm_import_preview",
+    )
 
     if _auto_run_sample_pipeline or st.button("▶  Run pipeline now", type="primary", use_container_width=True, disabled=not _confirm_preview):
         _emit_import_funnel_event(
