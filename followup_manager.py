@@ -53,6 +53,32 @@ def get_followups_for_employee(
     return [row for row in rows if str(row.get("emp_id") or "").strip() == target]
 
 
+def get_followups_for_employees(
+    employee_ids: list[str] | tuple[str, ...],
+    from_date: str = None,
+    to_date: str = None,
+    tenant_id: str = "",
+    limit: int | None = None,
+    exists_only: bool = False,
+) -> list[dict]:
+    """Return follow-ups within range scoped to employee IDs."""
+    today_value = _tenant_today(tenant_id)
+    _from = from_date or today_value.isoformat()
+    _to = to_date or (today_value + timedelta(days=30)).isoformat()
+    from database import get_followups_for_employee_ids_db
+
+    return list(
+        get_followups_for_employee_ids_db(
+            employee_ids,
+            _from,
+            _to,
+            tenant_id=tenant_id,
+            limit=limit,
+            exists_only=exists_only,
+        )
+    )
+
+
 def get_followups_due_today(tenant_id: str = "") -> list[dict]:
     today_value = _tenant_today(tenant_id)
     return get_followups_for_range(

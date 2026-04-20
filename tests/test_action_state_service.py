@@ -1,7 +1,10 @@
 from datetime import date
 
+import services.perf_profile as perf_profile
+
 from services.action_state_service import (
     NormalizedActionState,
+    build_employee_action_state_lookup,
     build_employee_action_state_summary,
     interpret_follow_through_state,
     interpret_normalized_action_state,
@@ -16,6 +19,16 @@ from services.action_state_service import (
 
 
 TODAY = date(2026, 4, 13)
+
+
+def _last_lookup_profile_context(events: list[tuple[str, dict]]) -> dict:
+    for event_type, payload in reversed(events):
+        if event_type != "perf_profile":
+            continue
+        if str(payload.get("detail") or "") != "action_state.lookup_batched":
+            continue
+        return dict(payload.get("context") or {})
+    return {}
 
 
 def test_interpret_normalized_action_state_maps_legacy_statuses():
@@ -119,6 +132,415 @@ def test_build_employee_action_state_summary_uses_standalone_follow_through_when
     assert summary["summary"]["total_count"] == 1
     assert summary["states"][0]["source_type"] == "standalone_follow_through"
     assert summary["states"][0]["state"] == NormalizedActionState.FOLLOW_UP_SCHEDULED
+
+
+def test_build_employee_action_state_lookup_batches_reads_once(monkeypatch):
+    monkeypatch.setattr(
+        "services.action_state_service.get_employee_actions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("per-employee actions read should not be used")),
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_employee_action_timeline",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("per-employee timeline read should not be used")),
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_followups_for_employee",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("per-employee follow-up read should not be used")),
+    )
+
+    monkeypatch.setattr(
+        "services.action_state_service.actions_repo.list_actions_for_employee_ids",
+        lambda **kwargs: [
+            {
+                "id": "A1",
+                "employee_id": "E1",
+                "employee_name": "Alex",
+                "department": "Pack",
+                "status": "in_progress",
+                "follow_up_due_at": "2026-04-12",
+                "trigger_summary": "Coaching still open",
+                "note": "Initial coaching note",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_action_ids",
+        lambda **kwargs: [
+            {
+                "action_id": "A1",
+                "linked_exception_id": "",
+                "event_type": "coached",
+                "event_at": "2026-04-11T09:00:00Z",
+                "owner": "lead@example.com",
+                "performed_by": "lead@example.com",
+                "details": "Reviewed after coaching",
+                "notes": "Reviewed after coaching",
+                "outcome": "",
+                "due_date": "2026-04-12",
+                "next_follow_up_at": "2026-04-12",
+                "status": "pending",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_employee_ids",
+        lambda **kwargs: [
+            {
+                "action_id": "",
+                "employee_id": "E2",
+                "linked_exception_id": "",
+                "event_type": "follow_through_logged",
+                "event_at": "2026-04-12T10:00:00Z",
+                "owner": "lead@example.com",
+                "performed_by": "lead@example.com",
+                "details": "Checked blocker and scheduled revisit",
+                "notes": "Checked blocker and scheduled revisit",
+                "outcome": "",
+                "due_date": "2026-04-16",
+                "next_follow_up_at": "2026-04-16",
+                "status": "pending",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_followups_for_employees",
+        lambda **kwargs: [
+            {
+                "emp_id": "E1",
+                "name": "Alex",
+                "dept": "Pack",
+                "followup_date": "2026-04-18",
+                "note_preview": "Legacy scheduled check",
+            }
+        ],
+    )
+
+    lookup = build_employee_action_state_lookup(("E1", "E2"), tenant_id="tenant-a", today=TODAY)
+
+    assert lookup["E1"]["state"] == NormalizedActionState.FOLLOW_UP_SCHEDULED
+    assert lookup["E1"]["source_type"] == "action"
+    assert lookup["E2"]["state"] == NormalizedActionState.FOLLOW_UP_SCHEDULED
+    assert lookup["E2"]["source_type"] == "standalone_follow_through"
+
+
+def test_build_employee_action_state_lookup_skips_standalone_reads_for_invalid_tenant_when_actions_empty(monkeypatch):
+    calls = {"generic": 0, "followups": 0}
+
+    monkeypatch.setattr(
+        "services.action_state_service.actions_repo.list_actions_for_employee_ids",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_action_ids",
+        lambda **kwargs: [],
+    )
+
+    def _generic_events(**kwargs):
+        calls["generic"] += 1
+        return []
+
+    def _followups(**kwargs):
+        calls["followups"] += 1
+        return []
+
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_employee_ids",
+        _generic_events,
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_followups_for_employees",
+        _followups,
+    )
+
+    lookup = build_employee_action_state_lookup(("E1",), tenant_id="not-a-uuid", today=TODAY)
+
+    assert lookup == {}
+    assert calls["generic"] == 0
+    assert calls["followups"] == 0
+
+
+def test_build_employee_action_state_lookup_emits_skipped_query_telemetry(monkeypatch):
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        perf_profile,
+        "log_operational_event",
+        lambda event_type, **kwargs: events.append((event_type, kwargs)),
+    )
+
+    monkeypatch.setattr(
+        "services.action_state_service.actions_repo.list_actions_for_employee_ids",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_action_ids",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_employee_ids",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("generic employee-events read should be skipped")),
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_followups_for_employees",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("follow-up read should be skipped")),
+    )
+
+    build_employee_action_state_lookup(("E1",), tenant_id="not-a-uuid", today=TODAY)
+    context = _last_lookup_profile_context(events)
+
+    assert context["actions_query_skipped"] is False
+    assert context["generic_employee_events_query_skipped"] is True
+    assert context["followups_query_skipped"] is True
+    assert context["generic_employee_events_query_ms"] == 0
+    assert context["followups_query_ms"] == 0
+    assert context["generic_employee_event_rows"] == 0
+    assert context["followup_rows"] == 0
+    assert context["query_count"] == 1
+    assert context["visible_db_rows"] == 0
+
+
+def test_build_employee_action_state_lookup_valid_tenant_zero_actions_skips_full_standalone_reads_when_probes_empty(monkeypatch):
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        perf_profile,
+        "log_operational_event",
+        lambda event_type, **kwargs: events.append((event_type, kwargs)),
+    )
+
+    calls = {"generic": 0, "followups": 0}
+
+    monkeypatch.setattr(
+        "services.action_state_service.actions_repo.list_actions_for_employee_ids",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_action_ids",
+        lambda **kwargs: [],
+    )
+
+    def _generic_events(**kwargs):
+        calls["generic"] += 1
+        assert int(kwargs.get("limit") or 0) == 1
+        return []
+
+    def _followups(**kwargs):
+        calls["followups"] += 1
+        assert int(kwargs.get("limit") or 0) == 1
+        return []
+
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_employee_ids",
+        _generic_events,
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_followups_for_employees",
+        _followups,
+    )
+
+    lookup = build_employee_action_state_lookup(("E1",), tenant_id="7bda2683-769d-45a6-ae5f-0e965ae2b593", today=TODAY)
+    context = _last_lookup_profile_context(events)
+
+    assert lookup == {}
+    assert calls["generic"] == 1
+    assert calls["followups"] == 1
+    assert context["standalone_probe_ran"] is True
+    assert context["needs_followups_probe"] is True
+    assert context["needs_generic_employee_events_probe"] is True
+    assert context["standalone_probe_generic_rows"] == 0
+    assert context["standalone_probe_followup_rows"] == 0
+    assert context["generic_employee_events_query_skipped"] is True
+    assert context["followups_query_skipped"] is True
+    assert context["query_count"] == 3
+    assert context["visible_db_rows"] == 0
+
+
+def test_build_employee_action_state_lookup_valid_tenant_zero_actions_partially_skips_standalone_reads(monkeypatch):
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        perf_profile,
+        "log_operational_event",
+        lambda event_type, **kwargs: events.append((event_type, kwargs)),
+    )
+
+    calls = {"generic_probe": 0, "generic_full": 0, "followup_probe": 0, "followup_full": 0}
+
+    monkeypatch.setattr(
+        "services.action_state_service.actions_repo.list_actions_for_employee_ids",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_action_ids",
+        lambda **kwargs: [],
+    )
+
+    def _generic_events(**kwargs):
+        if int(kwargs.get("limit") or 0) == 1:
+            calls["generic_probe"] += 1
+            return [{"action_id": "", "employee_id": "E1", "event_type": "follow_through_logged", "status": "pending"}]
+        calls["generic_full"] += 1
+        return [{"action_id": "", "employee_id": "E1", "event_type": "follow_through_logged", "status": "pending"}]
+
+    def _followups(**kwargs):
+        if int(kwargs.get("limit") or 0) == 1:
+            calls["followup_probe"] += 1
+            return []
+        calls["followup_full"] += 1
+        return (_ for _ in ()).throw(AssertionError("full follow-up read should be skipped when probe is empty"))
+
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_employee_ids",
+        _generic_events,
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_followups_for_employees",
+        _followups,
+    )
+
+    lookup = build_employee_action_state_lookup(("E1",), tenant_id="7bda2683-769d-45a6-ae5f-0e965ae2b593", today=TODAY)
+    context = _last_lookup_profile_context(events)
+
+    assert lookup["E1"]["source_type"] == "standalone_follow_through"
+    assert calls["generic_probe"] == 1
+    assert calls["generic_full"] == 0
+    assert calls["followup_probe"] == 1
+    assert calls["followup_full"] == 0
+    assert context["needs_generic_employee_events_probe"] is True
+    assert context["needs_followups_probe"] is True
+
+
+def test_build_employee_action_state_lookup_singleton_followup_skips_generic_probe_and_read(monkeypatch):
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        perf_profile,
+        "log_operational_event",
+        lambda event_type, **kwargs: events.append((event_type, kwargs)),
+    )
+
+    calls = {"generic": 0, "followup_probe": 0, "followup_full": 0}
+
+    monkeypatch.setattr(
+        "services.action_state_service.actions_repo.list_actions_for_employee_ids",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_action_ids",
+        lambda **kwargs: [],
+    )
+
+    def _generic_events(**kwargs):
+        calls["generic"] += 1
+        return (_ for _ in ()).throw(AssertionError("generic probe/read should be skipped for singleton follow-up state"))
+
+    def _followups(**kwargs):
+        if int(kwargs.get("limit") or 0) == 1:
+            calls["followup_probe"] += 1
+            return [{"emp_id": "E1", "name": "Alex", "dept": "Pack", "followup_date": "2026-04-15", "note_preview": "Check in"}]
+        calls["followup_full"] += 1
+        return [{"emp_id": "E1", "name": "Alex", "dept": "Pack", "followup_date": "2026-04-15", "note_preview": "Check in"}]
+
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_employee_ids",
+        _generic_events,
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_followups_for_employees",
+        _followups,
+    )
+
+    lookup = build_employee_action_state_lookup(("E1",), tenant_id="7bda2683-769d-45a6-ae5f-0e965ae2b593", today=TODAY)
+    context = _last_lookup_profile_context(events)
+
+    assert lookup["E1"]["source_type"] == "scheduled_only"
+    assert calls["generic"] == 0
+    assert calls["followup_probe"] == 1
+    assert calls["followup_full"] == 0
+    assert context["needs_followups_probe"] is True
+    assert context["needs_generic_employee_events_probe"] is False
+    assert context["generic_employee_events_query_skipped"] is True
+    assert context["followups_query_skipped"] is True
+
+
+def test_build_employee_action_state_lookup_non_empty_shape_and_telemetry_accuracy(monkeypatch):
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        perf_profile,
+        "log_operational_event",
+        lambda event_type, **kwargs: events.append((event_type, kwargs)),
+    )
+
+    monkeypatch.setattr(
+        "services.action_state_service.actions_repo.list_actions_for_employee_ids",
+        lambda **kwargs: [
+            {
+                "id": "A1",
+                "employee_id": "E1",
+                "employee_name": "Alex",
+                "department": "Pack",
+                "status": "in_progress",
+                "follow_up_due_at": "2026-04-12",
+                "trigger_summary": "Coaching still open",
+                "note": "Initial coaching note",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_action_ids",
+        lambda **kwargs: [
+            {
+                "action_id": "A1",
+                "event_type": "coached",
+                "event_at": "2026-04-11T09:00:00Z",
+                "details": "Reviewed after coaching",
+                "due_date": "2026-04-12",
+                "status": "pending",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.action_events_repo.list_action_events_for_employee_ids",
+        lambda **kwargs: [
+            {
+                "action_id": "",
+                "employee_id": "E2",
+                "event_type": "follow_through_logged",
+                "event_at": "2026-04-12T10:00:00Z",
+                "details": "Checked blocker and scheduled revisit",
+                "due_date": "2026-04-16",
+                "status": "pending",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "services.action_state_service.get_followups_for_employees",
+        lambda **kwargs: [
+            {
+                "emp_id": "E1",
+                "name": "Alex",
+                "dept": "Pack",
+                "followup_date": "2026-04-18",
+                "note_preview": "Legacy scheduled check",
+            }
+        ],
+    )
+
+    lookup = build_employee_action_state_lookup(("E1", "E2"), tenant_id="tenant-a", today=TODAY)
+    context = _last_lookup_profile_context(events)
+
+    assert set(lookup["E1"].keys()) == {"state", "state_detail", "title", "is_open", "source_type"}
+    assert set(lookup["E2"].keys()) == {"state", "state_detail", "title", "is_open", "source_type"}
+    assert lookup["E1"]["source_type"] == "action"
+    assert lookup["E2"]["source_type"] == "standalone_follow_through"
+
+    assert context["actions_query_skipped"] is False
+    assert context["generic_employee_events_query_skipped"] is False
+    assert context["followups_query_skipped"] is False
+    assert context["needs_generic_employee_events_probe"] is False
+    assert context["needs_followups_probe"] is False
+    assert context["query_count"] == 3
+    assert context["visible_db_rows"] == (
+        int(context["actions_rows"])
+        + int(context["generic_employee_event_rows"])
+        + int(context["followup_rows"])
+    )
 
 
 def test_schedule_follow_up_for_employee_updates_existing_action(monkeypatch):

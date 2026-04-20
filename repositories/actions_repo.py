@@ -124,6 +124,48 @@ def list_actions(tenant_id: str = "", statuses: list[str] | None = None, employe
         return []
 
 
+def list_actions_for_employee_ids(
+    *,
+    employee_ids: list[str] | tuple[str, ...],
+    tenant_id: str = "",
+    statuses: list[str] | None = None,
+) -> list[dict]:
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return []
+
+    normalized_employee_ids = [str(employee_id or "").strip() for employee_id in (employee_ids or []) if str(employee_id or "").strip()]
+    if not normalized_employee_ids:
+        return []
+
+    try:
+        sb = get_client()
+        query = (
+            sb.table("actions")
+            .select("*")
+            .eq("tenant_id", tid)
+            .in_("employee_id", normalized_employee_ids)
+            .order("last_event_at", desc=True)
+        )
+
+        if statuses:
+            normalized = [str(status or "").lower() for status in statuses if str(status or "").strip()]
+            if normalized:
+                query = query.in_("status", normalized)
+
+        result = query.execute()
+        return result.data or []
+    except Exception as error:
+        log_warn(
+            "repo_actions_batch_list_failed",
+            "Repository batched action listing failed.",
+            tenant_id=tid,
+            context={"employee_id_count": len(normalized_employee_ids), "statuses": statuses or []},
+            error=error,
+        )
+        return []
+
+
 def get_action(action_id: str, tenant_id: str = "", columns: str = "*") -> dict:
     tid = tenant_id or get_tenant_id()
     if not tid or not str(action_id or "").strip():

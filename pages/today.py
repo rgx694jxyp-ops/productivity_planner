@@ -5,6 +5,9 @@ Queue-first supervisor workflow focused on daily follow-through.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
 import time
 from datetime import date, timedelta
 from typing import Any
@@ -147,6 +150,65 @@ def _cached_weekly_manager_activity_summary(*, tenant_id: str, lookback_days: in
         return result
 
 
+def _weekly_activity_page_cache_key(*, tenant_id: str, lookback_days: int, today_iso: str) -> str:
+    return "|".join([
+        str(tenant_id or "").strip(),
+        str(int(lookback_days or 0)),
+        str(today_iso or "").strip()[:10],
+    ])
+
+
+def _cached_weekly_manager_activity_summary_page(
+    *,
+    tenant_id: str,
+    lookback_days: int,
+    today_iso: str,
+) -> tuple[dict[str, int], bool]:
+    cache_key = _weekly_activity_page_cache_key(
+        tenant_id=tenant_id,
+        lookback_days=lookback_days,
+        today_iso=today_iso,
+    )
+    now_ts = float(time.time())
+    try:
+        page_cache = st.session_state.get("_today_weekly_activity_page_cache")
+        if not isinstance(page_cache, dict):
+            page_cache = {}
+            st.session_state["_today_weekly_activity_page_cache"] = page_cache
+        cached = page_cache.get(cache_key)
+        if isinstance(cached, dict):
+            expires_at = float(cached.get("expires_at", 0.0) or 0.0)
+            payload = cached.get("payload")
+            if expires_at >= now_ts and isinstance(payload, dict):
+                return dict(payload), True
+            page_cache.pop(cache_key, None)
+    except Exception:
+        page_cache = None
+
+    result = dict(
+        _cached_weekly_manager_activity_summary(
+            tenant_id=tenant_id,
+            lookback_days=lookback_days,
+            today_iso=today_iso,
+        )
+        or {}
+    )
+
+    if isinstance(page_cache, dict):
+        if len(page_cache) >= 16:
+            try:
+                oldest_key = next(iter(page_cache))
+                page_cache.pop(oldest_key, None)
+            except Exception:
+                pass
+        page_cache[cache_key] = {
+            "expires_at": now_ts + float(_READ_CACHE_TTL_SECONDS),
+            "payload": dict(result),
+        }
+
+    return result, False
+
+
 @st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
 def _cached_today_action_state_lookup(
     *,
@@ -159,22 +221,78 @@ def _cached_today_action_state_lookup(
         tenant_id=str(tenant_id or ""),
         context={"employee_ids": len(employee_ids or ()), "today_iso": str(today_iso or "")},
     ) as profile:
-        _log_heavy_render_compute("build_employee_action_state_lookup")
+        with profile.stage("render_guard_log"):
+            _log_heavy_render_compute("build_employee_action_state_lookup")
         profile.cache_miss("today_action_state_lookup")
-        try:
-            today_value = date.fromisoformat(str(today_iso or "")[:10])
-        except Exception:
-            today_value = date.today()
-        result = dict(
-            build_employee_action_state_lookup(
+        with profile.stage("today_iso_parse"):
+            try:
+                today_value = date.fromisoformat(str(today_iso or "")[:10])
+            except Exception:
+                today_value = date.today()
+        with profile.stage("action_state_lookup_service"):
+            lookup_payload = build_employee_action_state_lookup(
                 employee_ids,
                 tenant_id=tenant_id,
                 today=today_value,
             )
-            or {}
-        )
+        with profile.stage("lookup_result_materialize"):
+            result = dict(lookup_payload or {})
+        service_ms = int(profile.metrics.get("stage_action_state_lookup_service_ms", 0) or 0)
+        elapsed_ms = int(max(0.0, (time.perf_counter() - profile.started_at) * 1000))
+        profile.set("non_lookup_work_ms", int(max(0, elapsed_ms - service_ms)))
         profile.set("action_state_rows", len(result or {}))
         return result
+
+
+def _action_state_page_cache_key(*, tenant_id: str, employee_ids: tuple[str, ...], today_iso: str) -> str:
+    return "|".join([
+        str(tenant_id or "").strip(),
+        str(today_iso or "").strip()[:10],
+        ",".join(str(emp or "").strip() for emp in (employee_ids or ())),
+    ])
+
+
+def _cached_today_action_state_lookup_page(
+    *,
+    tenant_id: str,
+    employee_ids: tuple[str, ...],
+    today_iso: str,
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    cache_key = _action_state_page_cache_key(
+        tenant_id=tenant_id,
+        employee_ids=employee_ids,
+        today_iso=today_iso,
+    )
+    try:
+        page_cache = st.session_state.get("_today_action_state_page_cache")
+        if not isinstance(page_cache, dict):
+            page_cache = {}
+            st.session_state["_today_action_state_page_cache"] = page_cache
+        cached = page_cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached), True
+    except Exception:
+        page_cache = None
+
+    result = dict(
+        _cached_today_action_state_lookup(
+            tenant_id=tenant_id,
+            employee_ids=employee_ids,
+            today_iso=today_iso,
+        )
+        or {}
+    )
+
+    if isinstance(page_cache, dict):
+        if len(page_cache) >= 32:
+            try:
+                oldest_key = next(iter(page_cache))
+                page_cache.pop(oldest_key, None)
+            except Exception:
+                pass
+        page_cache[cache_key] = dict(result)
+
+    return result, False
 
 
 @st.cache_data(ttl=_READ_CACHE_TTL_SECONDS, show_spinner=False)
@@ -227,6 +345,30 @@ def _invalidate_today_write_caches() -> None:
                     getattr(func, method_name)()
                 except Exception:
                     pass
+    try:
+        page_cache = st.session_state.get("_today_action_state_page_cache")
+        if isinstance(page_cache, dict):
+            page_cache.clear()
+    except Exception:
+        pass
+    try:
+        weekly_page_cache = st.session_state.get("_today_weekly_activity_page_cache")
+        if isinstance(weekly_page_cache, dict):
+            weekly_page_cache.clear()
+    except Exception:
+        pass
+    try:
+        enriched_render_plan_cache = st.session_state.get("_today_enriched_render_plan_page_cache")
+        if isinstance(enriched_render_plan_cache, dict):
+            enriched_render_plan_cache.clear()
+    except Exception:
+        pass
+    try:
+        pre_action_render_plan_cache = st.session_state.get("_today_pre_action_render_plan_page_cache")
+        if isinstance(pre_action_render_plan_cache, dict):
+            pre_action_render_plan_cache.clear()
+    except Exception:
+        pass
 
 
 def _tenant_today_value(tenant_id: str = "") -> date:
@@ -1021,6 +1163,25 @@ def _queue_counts(queue_items: list[dict]) -> dict[str, int]:
         if item.get("_is_recognition_opportunity"):
             counts["recognition"] += 1
     return counts
+
+
+def _should_load_previous_payload_for_return_trigger(*, queue_items: list[dict], today_value: date) -> bool:
+    """Return True when return-trigger comparison needs previous-day payload.
+
+    This keeps header behavior for meaningful queue states while skipping
+    low-value previous-day reads when no trigger-relevant signals are present.
+    """
+    today_iso = today_value.isoformat()
+    for item in list(queue_items or []):
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("_queue_status") or "").strip().lower()
+        if status in {"overdue", "due_today"}:
+            return True
+        created_at_prefix = str(item.get("created_at") or "").strip()[:10]
+        if created_at_prefix == today_iso:
+            return True
+    return False
 
 
 def _build_last_action_lookup(queue_items: list[dict]) -> dict[str, str]:
@@ -2156,6 +2317,235 @@ def _today_action_state_employee_ids(
     return tuple(sorted(employee_ids))
 
 
+def _today_action_state_actionable_card_count(*, plan: TodayQueueRenderPlan) -> int:
+    actionable_count = 0
+    for card in list(plan.primary_cards or []):
+        if str(getattr(card, "employee_id", "") or "").strip():
+            actionable_count += 1
+
+    if bool(plan.secondary_expanded):
+        for card in list(plan.secondary_cards or [])[:20]:
+            if str(getattr(card, "employee_id", "") or "").strip():
+                actionable_count += 1
+
+    return int(actionable_count)
+
+
+def _today_rendered_card_count(*, plan: TodayQueueRenderPlan) -> int:
+    return int(len(list(plan.primary_cards or [])) + len(list(plan.secondary_cards or [])[:20]))
+
+
+def _fingerprintable_payload(value: Any) -> Any:
+    if dataclasses.is_dataclass(value):
+        return _fingerprintable_payload(dataclasses.asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _fingerprintable_payload(val) for key, val in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_fingerprintable_payload(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(_fingerprintable_payload(item) for item in value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _payload_fingerprint(value: Any) -> str:
+    serialized = json.dumps(
+        _fingerprintable_payload(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()[:24]
+
+
+def _today_pre_action_render_plan_input_fingerprint(
+    *,
+    attention: AttentionSummary,
+    decision_items: list[Any] | None,
+    suppressed_cards: list[InsightCardContract] | None,
+    snapshot_cards: list[Any] | None,
+    last_action_lookup: dict[str, str] | None,
+    today_iso: str,
+    is_stale: bool,
+    weak_data_mode: bool,
+    show_secondary_open: bool,
+) -> str:
+    return _payload_fingerprint(
+        {
+            "attention": attention,
+            "decision_items": list(decision_items or []),
+            "suppressed_cards": list(suppressed_cards or []),
+            "snapshot_cards": list(snapshot_cards or []),
+            "last_action_lookup": dict(last_action_lookup or {}),
+            "today_iso": str(today_iso or "")[:10],
+            "is_stale": bool(is_stale),
+            "weak_data_mode": bool(weak_data_mode),
+            "show_secondary_open": bool(show_secondary_open),
+        }
+    )
+
+
+def _pre_action_render_plan_page_cache_key(
+    *,
+    tenant_id: str,
+    today_iso: str,
+    context_day_key: str,
+    queue_fingerprint: str,
+    surface_flags: str,
+) -> str:
+    return "|".join(
+        [
+            str(tenant_id or "").strip(),
+            str(today_iso or "").strip()[:10],
+            str(context_day_key or "").strip()[:10],
+            str(queue_fingerprint or "").strip(),
+            str(surface_flags or "").strip(),
+        ]
+    )
+
+
+def _get_cached_pre_action_render_plan_page(*, cache_key: str) -> TodayQueueRenderPlan | None:
+    now_ts = float(time.time())
+    try:
+        page_cache = st.session_state.get("_today_pre_action_render_plan_page_cache")
+        if not isinstance(page_cache, dict):
+            return None
+        cached = page_cache.get(str(cache_key or ""))
+        if not isinstance(cached, dict):
+            return None
+        expires_at = float(cached.get("expires_at", 0.0) or 0.0)
+        payload = cached.get("payload")
+        if expires_at >= now_ts and isinstance(payload, TodayQueueRenderPlan):
+            return payload
+        page_cache.pop(str(cache_key or ""), None)
+    except Exception:
+        return None
+    return None
+
+
+def _set_cached_pre_action_render_plan_page(*, cache_key: str, plan: TodayQueueRenderPlan) -> None:
+    try:
+        page_cache = st.session_state.get("_today_pre_action_render_plan_page_cache")
+        if not isinstance(page_cache, dict):
+            page_cache = {}
+            st.session_state["_today_pre_action_render_plan_page_cache"] = page_cache
+        if len(page_cache) >= 16:
+            try:
+                oldest_key = next(iter(page_cache))
+                page_cache.pop(oldest_key, None)
+            except Exception:
+                pass
+        page_cache[str(cache_key or "")] = {
+            "expires_at": float(time.time()) + float(_READ_CACHE_TTL_SECONDS),
+            "payload": plan,
+        }
+    except Exception:
+        pass
+
+
+def _today_render_plan_fingerprint(*, plan: TodayQueueRenderPlan) -> str:
+    parts: list[str] = [
+        str(plan.section_title or ""),
+        str(plan.weak_data_note or ""),
+        str(plan.start_note or ""),
+        str(plan.primary_placeholder or ""),
+        str(plan.secondary_caption or ""),
+        str(bool(plan.secondary_expanded)),
+    ]
+
+    for card in list(plan.primary_cards or []):
+        parts.extend(
+            [
+                str(getattr(card, "employee_id", "") or ""),
+                str(getattr(card, "process_id", "") or ""),
+                str(getattr(card, "state", "") or ""),
+                str(getattr(card, "signal_key", "") or ""),
+                str(getattr(card, "line_1", "") or ""),
+                str(getattr(card, "line_2", "") or ""),
+                str(getattr(card, "line_3", "") or ""),
+                str(getattr(card, "line_4", "") or ""),
+                str(getattr(card, "line_5", "") or ""),
+            ]
+        )
+
+    for card in list(plan.secondary_cards or []):
+        parts.extend(
+            [
+                str(getattr(card, "employee_id", "") or ""),
+                str(getattr(card, "process_id", "") or ""),
+                str(getattr(card, "state", "") or ""),
+                str(getattr(card, "signal_key", "") or ""),
+                str(getattr(card, "line_1", "") or ""),
+                str(getattr(card, "line_2", "") or ""),
+                str(getattr(card, "line_3", "") or ""),
+                str(getattr(card, "line_4", "") or ""),
+                str(getattr(card, "line_5", "") or ""),
+            ]
+        )
+
+    digest = hashlib.sha1("\x1e".join(parts).encode("utf-8")).hexdigest()
+    return str(digest[:24])
+
+
+def _enriched_render_plan_page_cache_key(
+    *,
+    tenant_id: str,
+    today_iso: str,
+    context_day_key: str,
+    visible_employee_ids: tuple[str, ...],
+    render_plan_fingerprint: str,
+) -> str:
+    return "|".join(
+        [
+            str(tenant_id or "").strip(),
+            str(today_iso or "").strip()[:10],
+            str(context_day_key or "").strip()[:10],
+            ",".join(str(emp or "").strip() for emp in (visible_employee_ids or ())),
+            str(render_plan_fingerprint or "").strip(),
+        ]
+    )
+
+
+def _get_cached_enriched_render_plan_page(*, cache_key: str) -> TodayQueueRenderPlan | None:
+    now_ts = float(time.time())
+    try:
+        page_cache = st.session_state.get("_today_enriched_render_plan_page_cache")
+        if not isinstance(page_cache, dict):
+            return None
+        cached = page_cache.get(str(cache_key or ""))
+        if not isinstance(cached, dict):
+            return None
+        expires_at = float(cached.get("expires_at", 0.0) or 0.0)
+        payload = cached.get("payload")
+        if expires_at >= now_ts and isinstance(payload, TodayQueueRenderPlan):
+            return payload
+        page_cache.pop(str(cache_key or ""), None)
+    except Exception:
+        return None
+    return None
+
+
+def _set_cached_enriched_render_plan_page(*, cache_key: str, plan: TodayQueueRenderPlan) -> None:
+    try:
+        page_cache = st.session_state.get("_today_enriched_render_plan_page_cache")
+        if not isinstance(page_cache, dict):
+            page_cache = {}
+            st.session_state["_today_enriched_render_plan_page_cache"] = page_cache
+        if len(page_cache) >= 16:
+            try:
+                oldest_key = next(iter(page_cache))
+                page_cache.pop(oldest_key, None)
+            except Exception:
+                pass
+        page_cache[str(cache_key or "")] = {
+            "expires_at": float(time.time()) + float(_READ_CACHE_TTL_SECONDS),
+            "payload": plan,
+        }
+    except Exception:
+        pass
+
+
 def _enrich_render_plan_action_state(
     *,
     plan: TodayQueueRenderPlan,
@@ -2393,16 +2783,26 @@ def page_today() -> None:
 
             with profile.stage("render_header"):
                 _render_top_status_area(meaning=meaning)
-                previous_precomputed = _cached_today_signals_payload(
-                    tenant_id=tenant_id,
-                    as_of_date=(today_value - timedelta(days=1)).isoformat(),
-                )
-                return_trigger = build_today_return_trigger(
+                return_trigger = None
+                should_load_previous_payload = _should_load_previous_payload_for_return_trigger(
                     queue_items=queue_items,
-                    today=today_value,
-                    previous_queue_items=list((previous_precomputed or {}).get("queue_items") or []),
-                    previous_as_of_date=str((previous_precomputed or {}).get("as_of_date") or ""),
+                    today_value=today_value,
                 )
+                profile.set("header_return_trigger_candidate", bool(should_load_previous_payload))
+                if should_load_previous_payload:
+                    previous_precomputed = _cached_today_signals_payload(
+                        tenant_id=tenant_id,
+                        as_of_date=(today_value - timedelta(days=1)).isoformat(),
+                    )
+                    profile.set("header_previous_payload_loaded", bool(previous_precomputed))
+                    return_trigger = build_today_return_trigger(
+                        queue_items=queue_items,
+                        today=today_value,
+                        previous_queue_items=list((previous_precomputed or {}).get("queue_items") or []),
+                        previous_as_of_date=str((previous_precomputed or {}).get("as_of_date") or ""),
+                    )
+                else:
+                    profile.set("header_previous_payload_skipped", True)
                 _render_return_trigger(return_trigger)
 
             signal_mode = meaning.signal_mode
@@ -2416,54 +2816,155 @@ def page_today() -> None:
                 profile.set("snapshot_cards", len(snapshot_cards or []))
 
             with profile.stage("build_action_state_context"):
-                last_action_lookup = _build_last_action_lookup(queue_items)
-                decision_items = list(precomputed.get("decision_items") or [])
-                decision_summary = precomputed.get("decision_summary") or attention_summary
-                render_plan_build_count = 0
-                render_plan_build_ms = 0
-                render_plan_enrich_ms = 0
-                render_plan_second_build_count = 0
-                render_plan_build_started = time.perf_counter()
-                pre_action_render_plan = build_today_queue_render_plan(
-                    attention=decision_summary,
-                    decision_items=decision_items,
-                    suppressed_cards=home_sections.get("suppressed_signals", []),
-                    today_value=today_value,
-                    is_stale=bool(meaning.state_flags.get("stale_data")),
-                    weak_data_mode=bool(meaning.weak_data_mode),
-                    show_secondary_open=bool(st.session_state.get("_first_import_just_completed")),
-                    snapshot_cards=snapshot_cards,
-                    last_action_lookup=last_action_lookup,
-                    action_state_lookup=None,
-                )
-                render_plan_build_ms += int(max(0.0, (time.perf_counter() - render_plan_build_started) * 1000))
-                render_plan_build_count += 1
-                action_state_employee_ids = _today_action_state_employee_ids(
-                    plan=pre_action_render_plan,
-                )
-                profile.set("action_state_employee_ids", len(action_state_employee_ids or ()))
-                action_state_lookup: dict[str, dict[str, Any]] = {}
-                should_load_action_state_lookup = bool(action_state_employee_ids)
-                if should_load_action_state_lookup:
-                    action_state_lookup = _cached_today_action_state_lookup(
-                        tenant_id=tenant_id,
-                        employee_ids=action_state_employee_ids,
-                        today_iso=today_value.isoformat(),
-                    )
-                render_plan = pre_action_render_plan
-                if action_state_lookup:
-                    render_plan_enrich_started = time.perf_counter()
-                    render_plan = _enrich_render_plan_action_state(
-                        plan=pre_action_render_plan,
-                        today_value=today_value,
-                        last_action_lookup=last_action_lookup,
-                        action_state_lookup=action_state_lookup,
-                    )
-                    render_plan_enrich_ms = int(max(0.0, (time.perf_counter() - render_plan_enrich_started) * 1000))
-                profile.set("render_plan_build_count", int(render_plan_build_count))
-                profile.set("render_plan_build_ms", int(render_plan_build_ms))
-                profile.set("render_plan_second_build_count", int(render_plan_second_build_count))
-                profile.set("render_plan_enrich_ms", int(render_plan_enrich_ms))
+                with profile_block(
+                    "today.action_state_wrapper",
+                    tenant_id=str(tenant_id or ""),
+                    user_email=str(st.session_state.get("user_email", "") or ""),
+                    context={
+                        "today_iso": today_value.isoformat(),
+                        "queue_items": len(queue_items or []),
+                    },
+                ) as action_wrapper_profile:
+                    with action_wrapper_profile.stage("build_action_state_context"):
+                        last_action_lookup = _build_last_action_lookup(queue_items)
+                        decision_items = list(precomputed.get("decision_items") or [])
+                        decision_summary = precomputed.get("decision_summary") or attention_summary
+                        suppressed_cards = home_sections.get("suppressed_signals", [])
+                        is_stale = bool(meaning.state_flags.get("stale_data"))
+                        weak_data_mode = bool(meaning.weak_data_mode)
+                        show_secondary_open = bool(st.session_state.get("_first_import_just_completed"))
+                        render_plan_build_count = 0
+                        render_plan_build_ms = 0
+                        render_plan_enrich_ms = 0
+                        render_plan_second_build_count = 0
+                        pre_action_render_plan_cache_hit = 0
+                        pre_action_render_plan_cache_miss = 0
+                        pre_action_render_plan_cache_skipped = 0
+                        enriched_render_plan_cache_hit = 0
+                        enriched_render_plan_cache_miss = 0
+                        enriched_render_plan_cache_skipped = 0
+                        pre_action_queue_fingerprint = _today_pre_action_render_plan_input_fingerprint(
+                            attention=decision_summary,
+                            decision_items=decision_items,
+                            suppressed_cards=suppressed_cards,
+                            snapshot_cards=snapshot_cards,
+                            last_action_lookup=last_action_lookup,
+                            today_iso=today_value.isoformat(),
+                            is_stale=is_stale,
+                            weak_data_mode=weak_data_mode,
+                            show_secondary_open=show_secondary_open,
+                        )
+                        pre_action_cache_key = _pre_action_render_plan_page_cache_key(
+                            tenant_id=tenant_id,
+                            today_iso=today_value.isoformat(),
+                            context_day_key=str(precomputed.get("as_of_date") or today_value.isoformat()),
+                            queue_fingerprint=pre_action_queue_fingerprint,
+                            surface_flags="|".join(
+                                [
+                                    f"stale:{int(is_stale)}",
+                                    f"weak:{int(weak_data_mode)}",
+                                    f"secondary:{int(show_secondary_open)}",
+                                ]
+                            ),
+                        )
+                        pre_action_render_plan = _get_cached_pre_action_render_plan_page(cache_key=pre_action_cache_key)
+                        if isinstance(pre_action_render_plan, TodayQueueRenderPlan):
+                            pre_action_render_plan_cache_hit = 1
+                        else:
+                            pre_action_render_plan_cache_miss = 1
+                            render_plan_build_started = time.perf_counter()
+                            pre_action_render_plan = build_today_queue_render_plan(
+                                attention=decision_summary,
+                                decision_items=decision_items,
+                                suppressed_cards=suppressed_cards,
+                                today_value=today_value,
+                                is_stale=is_stale,
+                                weak_data_mode=weak_data_mode,
+                                show_secondary_open=show_secondary_open,
+                                snapshot_cards=snapshot_cards,
+                                last_action_lookup=last_action_lookup,
+                                action_state_lookup=None,
+                            )
+                            render_plan_build_ms += int(max(0.0, (time.perf_counter() - render_plan_build_started) * 1000))
+                            render_plan_build_count += 1
+                            _set_cached_pre_action_render_plan_page(cache_key=pre_action_cache_key, plan=pre_action_render_plan)
+
+                        with action_wrapper_profile.stage("visible_employee_ids_build"):
+                            action_state_employee_ids = _today_action_state_employee_ids(
+                                plan=pre_action_render_plan,
+                            )
+                            actionable_card_count = _today_action_state_actionable_card_count(plan=pre_action_render_plan)
+                            should_load_action_state_lookup = bool(actionable_card_count > 0 and action_state_employee_ids)
+
+                        profile.set("action_state_employee_ids", len(action_state_employee_ids or ()))
+                        profile.set("action_state_actionable_cards", int(actionable_card_count))
+                        action_wrapper_profile.set("employee_ids_count", len(action_state_employee_ids or ()))
+
+                        action_state_lookup: dict[str, dict[str, Any]] = {}
+                        action_state_lookup_skipped = 0
+                        action_state_lookup_cache_hit = 0
+                        action_state_lookup_cache_miss = 0
+                        render_plan = pre_action_render_plan
+                        render_plan_cache_key = ""
+                        cached_enriched_plan: TodayQueueRenderPlan | None = None
+
+                        with action_wrapper_profile.stage("action_state_lookup_call"):
+                            if not should_load_action_state_lookup:
+                                action_state_lookup_skipped = 1
+                                enriched_render_plan_cache_skipped = 1
+                            else:
+                                render_plan_cache_key = _enriched_render_plan_page_cache_key(
+                                    tenant_id=tenant_id,
+                                    today_iso=today_value.isoformat(),
+                                    context_day_key=str(precomputed.get("as_of_date") or today_value.isoformat()),
+                                    visible_employee_ids=action_state_employee_ids,
+                                    render_plan_fingerprint=_today_render_plan_fingerprint(plan=pre_action_render_plan),
+                                )
+                                cached_enriched_plan = _get_cached_enriched_render_plan_page(cache_key=render_plan_cache_key)
+                                if isinstance(cached_enriched_plan, TodayQueueRenderPlan):
+                                    render_plan = cached_enriched_plan
+                                    enriched_render_plan_cache_hit = 1
+                                else:
+                                    enriched_render_plan_cache_miss = 1
+                                    action_state_lookup, page_cache_hit = _cached_today_action_state_lookup_page(
+                                        tenant_id=tenant_id,
+                                        employee_ids=action_state_employee_ids,
+                                        today_iso=today_value.isoformat(),
+                                    )
+                                    if page_cache_hit:
+                                        action_state_lookup_cache_hit = 1
+                                    else:
+                                        action_state_lookup_cache_miss = 1
+
+                        action_wrapper_profile.set("lookup_rows_count", len(action_state_lookup or {}))
+
+                        with action_wrapper_profile.stage("post_lookup_state_transform"):
+                            if should_load_action_state_lookup and not isinstance(cached_enriched_plan, TodayQueueRenderPlan):
+                                if action_state_lookup:
+                                    render_plan_enrich_started = time.perf_counter()
+                                    render_plan = _enrich_render_plan_action_state(
+                                        plan=pre_action_render_plan,
+                                        today_value=today_value,
+                                        last_action_lookup=last_action_lookup,
+                                        action_state_lookup=action_state_lookup,
+                                    )
+                                    render_plan_enrich_ms = int(max(0.0, (time.perf_counter() - render_plan_enrich_started) * 1000))
+                                _set_cached_enriched_render_plan_page(cache_key=render_plan_cache_key, plan=render_plan)
+
+                        with action_wrapper_profile.stage("final_state_attach"):
+                            profile.set("action_state_lookup_skipped", int(action_state_lookup_skipped))
+                            profile.set("action_state_lookup_cache_hit", int(action_state_lookup_cache_hit))
+                            profile.set("action_state_lookup_cache_miss", int(action_state_lookup_cache_miss))
+                            profile.set("pre_action_render_plan_cache_hit", int(pre_action_render_plan_cache_hit))
+                            profile.set("pre_action_render_plan_cache_miss", int(pre_action_render_plan_cache_miss))
+                            profile.set("pre_action_render_plan_cache_skipped", int(pre_action_render_plan_cache_skipped))
+                            profile.set("enriched_render_plan_cache_hit", int(enriched_render_plan_cache_hit))
+                            profile.set("enriched_render_plan_cache_miss", int(enriched_render_plan_cache_miss))
+                            profile.set("enriched_render_plan_cache_skipped", int(enriched_render_plan_cache_skipped))
+                            profile.set("render_plan_build_count", int(render_plan_build_count))
+                            profile.set("render_plan_build_ms", int(render_plan_build_ms))
+                            profile.set("render_plan_second_build_count", int(render_plan_second_build_count))
+                            profile.set("render_plan_enrich_ms", int(render_plan_enrich_ms))
 
             orientation_state = meaning.surface_state
             if (
@@ -2494,19 +2995,24 @@ def page_today() -> None:
                     signal_mode=signal_mode,
                 )
 
-            should_load_weekly_activity = bool(
-                int(counts.get("all", 0) or 0) > 0
-                or bool(snapshot_cards)
-                or bool(getattr(decision_summary, "ranked_items", []))
-            )
             with profile.stage("weekly_activity"):
-                if should_load_weekly_activity:
-                    weekly_activity = _cached_weekly_manager_activity_summary(
+                rendered_card_count = _today_rendered_card_count(plan=render_plan)
+                profile.set("weekly_activity_rendered_cards", int(rendered_card_count))
+                weekly_activity_skipped = 0
+                weekly_activity_cache_hit = 0
+                weekly_activity_cache_miss = 0
+                if rendered_card_count > 0:
+                    weekly_activity, weekly_cache_hit = _cached_weekly_manager_activity_summary_page(
                         tenant_id=tenant_id,
                         lookback_days=7,
                         today_iso=today_value.isoformat(),
                     )
+                    if weekly_cache_hit:
+                        weekly_activity_cache_hit = 1
+                    else:
+                        weekly_activity_cache_miss = 1
                 else:
+                    weekly_activity_skipped = 1
                     weekly_activity = {
                         "reviewed_issues": 0,
                         "follow_up_touchpoints": 0,
@@ -2516,6 +3022,9 @@ def page_today() -> None:
                         "touchpoints_logged_today": 0,
                         "follow_ups_scheduled_today": 0,
                     }
+                profile.set("weekly_activity_skipped", int(weekly_activity_skipped))
+                profile.set("weekly_activity_cache_hit", int(weekly_activity_cache_hit))
+                profile.set("weekly_activity_cache_miss", int(weekly_activity_cache_miss))
 
             with profile.stage("render_queue"):
                 attention_strip = build_today_attention_strip(

@@ -163,3 +163,45 @@ def list_action_events_for_action_ids(
             error=error,
         )
         return []
+
+
+def list_action_events_for_employee_ids(
+    *,
+    employee_ids: list[str] | tuple[str, ...],
+    tenant_id: str = "",
+    limit: int = 500,
+    newest_first: bool = False,
+    columns: str = "*",
+    exists_only: bool = False,
+) -> list[dict]:
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return []
+
+    normalized_ids = [str(employee_id or "").strip() for employee_id in (employee_ids or []) if str(employee_id or "").strip()]
+    if not normalized_ids:
+        return []
+
+    try:
+        sb = get_client()
+        selected_columns = "action_id,employee_id" if exists_only else (columns or "*")
+        query = (
+            sb.table("action_events")
+            .select(selected_columns)
+            .eq("tenant_id", tid)
+            .in_("employee_id", normalized_ids)
+        )
+        if exists_only:
+            result = query.limit(max(1, int(limit or 1))).execute()
+        else:
+            result = query.order("event_at", desc=newest_first).limit(max(1, int(limit or 500))).execute()
+        return result.data or []
+    except Exception as error:
+        log_warn(
+            "repo_action_events_employee_batch_list_failed",
+            "Repository employee batched action event listing failed.",
+            tenant_id=tid,
+            context={"employee_id_count": len(normalized_ids), "limit": int(limit or 500)},
+            error=error,
+        )
+        return []

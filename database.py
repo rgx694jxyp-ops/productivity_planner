@@ -13,6 +13,9 @@ import math
 import os
 from datetime import date, datetime
 from typing import Optional
+from uuid import UUID
+
+from services.app_logging import log_warn
 
 
 def _normalize_config_value(value: str) -> str:
@@ -1268,6 +1271,20 @@ def get_followups_db(from_date: str = "", to_date: str = "", tenant_id: str = ""
     tid = tenant_id or get_tenant_id()
     if not tid:
         return []
+    try:
+        UUID(str(tid))
+    except (TypeError, ValueError, AttributeError):
+        log_warn(
+            "followups_invalid_tenant_id",
+            "Skipping follow-up DB read because tenant_id is not a valid UUID.",
+            tenant_id=str(tid or ""),
+            context={
+                "from_date": str(from_date or ""),
+                "to_date": str(to_date or ""),
+                "source": "database.get_followups_db",
+            },
+        )
+        return []
     from_value = str(from_date or date.today().isoformat())
     to_value = str(to_date or from_value)
     try:
@@ -1285,6 +1302,63 @@ def get_followups_db(from_date: str = "", to_date: str = "", tenant_id: str = ""
         return resp.data or []
     except Exception as e:
         print(f"[Warning] Could not load follow-ups from DB: {e}")
+        return []
+
+
+def get_followups_for_employee_ids_db(
+    employee_ids: list[str] | tuple[str, ...],
+    from_date: str = "",
+    to_date: str = "",
+    tenant_id: str = "",
+    limit: int | None = None,
+    exists_only: bool = False,
+) -> list[dict]:
+    """Return follow-ups for an inclusive date range scoped to employee IDs."""
+    tid = tenant_id or get_tenant_id()
+    if not tid:
+        return []
+
+    normalized_ids = [str(employee_id or "").strip() for employee_id in (employee_ids or []) if str(employee_id or "").strip()]
+    if not normalized_ids:
+        return []
+
+    try:
+        UUID(str(tid))
+    except (TypeError, ValueError, AttributeError):
+        log_warn(
+            "followups_invalid_tenant_id",
+            "Skipping follow-up DB read because tenant_id is not a valid UUID.",
+            tenant_id=str(tid or ""),
+            context={
+                "from_date": str(from_date or ""),
+                "to_date": str(to_date or ""),
+                "employee_ids": len(normalized_ids),
+                "source": "database.get_followups_for_employee_ids_db",
+            },
+        )
+        return []
+
+    from_value = str(from_date or date.today().isoformat())
+    to_value = str(to_date or from_value)
+    try:
+        sb = get_client()
+        selected_columns = "emp_id" if exists_only else "emp_id, name, dept, note_preview, followup_date"
+        query = (
+            sb.table("coaching_followups")
+            .select(selected_columns)
+            .eq("tenant_id", tid)
+            .in_("emp_id", normalized_ids)
+            .gte("followup_date", from_value)
+            .lte("followup_date", to_value)
+        )
+        if not exists_only:
+            query = query.order("followup_date").order("name")
+        if limit is not None:
+            query = query.limit(max(1, int(limit or 1)))
+        resp = query.execute()
+        return resp.data or []
+    except Exception as e:
+        print(f"[Warning] Could not load scoped follow-ups from DB: {e}")
         return []
 
 

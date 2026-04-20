@@ -80,12 +80,37 @@ class PerfProfile:
         self.status = "failed"
         self.error_text = str(error or "")
 
+    def _normalized_metrics_for_emit(self) -> dict[str, Any]:
+        metrics = dict(self.metrics)
+        if self.name != "action_state.lookup_batched":
+            return metrics
+
+        legacy_query_count = int(metrics.get("db_query_count_visible", 0) or 0)
+        legacy_visible_rows = int(metrics.get("db_rows_visible", 0) or 0)
+        legacy_actions_query_ms = int(metrics.get("stage_batched_actions_read_ms", 0) or 0)
+        legacy_generic_probe_ms = int(metrics.get("stage_batched_generic_employee_events_probe_ms", 0) or 0)
+        legacy_followups_probe_ms = int(metrics.get("stage_shared_followup_probe_ms", 0) or 0)
+
+        metrics.setdefault("actions_rows", 0)
+        metrics.setdefault("generic_employee_event_rows", 0)
+        metrics.setdefault("followup_rows", 0)
+        metrics.setdefault("actions_query_ms", legacy_actions_query_ms)
+        metrics.setdefault("generic_employee_events_probe_ms", legacy_generic_probe_ms)
+        metrics.setdefault("followups_probe_ms", legacy_followups_probe_ms)
+        metrics.setdefault("actions_query_skipped", False)
+        metrics.setdefault("generic_employee_events_query_skipped", False)
+        metrics.setdefault("followups_query_skipped", False)
+        metrics.setdefault("query_count", legacy_query_count)
+        metrics.setdefault("visible_db_rows", legacy_visible_rows)
+        return metrics
+
     def emit(self) -> None:
+        metrics = self._normalized_metrics_for_emit()
         context = {
             "profile": self.name,
             "duration_ms": int((time.perf_counter() - self.started_at) * 1000),
             **self.context,
-            **self.metrics,
+            **metrics,
         }
         if self.error_text:
             context["error"] = self.error_text

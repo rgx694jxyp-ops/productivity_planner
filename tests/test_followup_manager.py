@@ -2,6 +2,7 @@ from datetime import date
 
 import pytest
 
+import database
 import followup_manager
 
 
@@ -65,3 +66,23 @@ def test_get_followups_for_range_raises_when_tenant_local_date_unavailable(monke
 
     with pytest.raises(RuntimeError):
         followup_manager.get_followups_for_range(tenant_id="tenant-a")
+
+
+def test_get_followups_db_returns_early_for_malformed_tenant_id(monkeypatch):
+    log_calls = []
+
+    def _unexpected_get_client():
+        raise AssertionError("get_client should not be called for malformed tenant ids")
+
+    monkeypatch.setattr(database, "get_client", _unexpected_get_client)
+    monkeypatch.setattr(database, "log_warn", lambda event, message, **kwargs: log_calls.append((event, message, kwargs)))
+
+    out = database.get_followups_db(from_date="2026-04-19", to_date="2026-04-20", tenant_id="tenant-a")
+
+    assert out == []
+    assert len(log_calls) == 1
+    event, message, kwargs = log_calls[0]
+    assert event == "followups_invalid_tenant_id"
+    assert "not a valid UUID" in message
+    assert kwargs["tenant_id"] == "tenant-a"
+    assert kwargs["context"]["source"] == "database.get_followups_db"
