@@ -115,8 +115,17 @@ _TODAY_PENDING_COMPLETION_IDS_KEY = "_today_pending_completion_ids"
 _TODAY_PENDING_COMPLETION_META_KEY = "_today_pending_completion_meta"
 _TODAY_PENDING_COMPLETION_SIGNAL_KEYS_KEY = "_today_pending_completion_signal_keys"
 
+# Cold-load run-id & milestone instrumentation keys
+_TODAY_RUN_ID_DATE_KEY_PREFIX = "_today_run_id_for_date_"
+_TODAY_RUN_NAV_SOURCE_KEY_PREFIX = "_today_run_nav_source_"
+_TODAY_RUN_WALL_START_KEY = "_today_run_wall_start"
+_TODAY_RUN_IS_COLD_KEY = "_today_run_is_cold"
+_TODAY_RUN_MILESTONES_KEY = "_today_run_milestones"
+
 _TODAY_COMPLETION_ASYNC_RESULTS: dict[str, dict[str, Any]] = {}
 _TODAY_COMPLETION_ASYNC_RESULTS_LOCK = threading.Lock()
+_TODAY_ASYNC_SNAPSHOT_REFRESH_STATE: dict[str, dict[str, Any]] = {}
+_TODAY_ASYNC_SNAPSHOT_REFRESH_LOCK = threading.Lock()
 
 
 def _today_initial_load_completed_key(today_value: date) -> str:
@@ -153,6 +162,209 @@ def _log_today_initial_load_event_once(
         context=dict(context or {}),
     )
     st.session_state[log_key] = True
+
+
+def _log_today_milestone(
+    name: str,
+    *,
+    tenant_id: str,
+    context: dict[str, Any] | None = None,
+) -> None:
+    """Log a cold-load milestone with run_id and elapsed_ms.
+
+    Unlike the log-once helpers, fires on every run so the full multi-run
+    timeline (Run-1, Run-2, Run-3) is captured under one run_id.
+    """
+    today_iso = date.today().isoformat()
+    run_id = str(st.session_state.get(_TODAY_RUN_ID_DATE_KEY_PREFIX + today_iso) or "")
+    run_wall_start = float(st.session_state.get(_TODAY_RUN_WALL_START_KEY) or 0.0)
+    is_cold = bool(st.session_state.get(_TODAY_RUN_IS_COLD_KEY))
+    nav_from = str(st.session_state.get(_TODAY_RUN_NAV_SOURCE_KEY_PREFIX + today_iso) or "")
+    elapsed_ms = int((time.time() - run_wall_start) * 1000) if run_wall_start else 0
+
+    milestone: dict[str, Any] = {"name": name, "elapsed_ms": elapsed_ms, "ts": time.time()}
+    if context:
+        milestone.update(context)
+    milestones: list[dict[str, Any]] = list(st.session_state.get(_TODAY_RUN_MILESTONES_KEY) or [])
+    milestones.append(milestone)
+    st.session_state[_TODAY_RUN_MILESTONES_KEY] = milestones
+
+    _log_operational_event(
+        name,
+        status="info",
+        tenant_id=str(tenant_id or ""),
+        user_email=str(st.session_state.get("user_email") or ""),
+        context={
+            "run_id": run_id,
+            "elapsed_ms": elapsed_ms,
+            "is_cold_start": is_cold,
+            "nav_from": nav_from,
+            **(context or {}),
+        },
+    )
+
+
+def print_today_run_timeline() -> None:
+    """Print the ordered milestone timeline for the current Today run to stderr.
+
+    Call from a debug console or diagnostic view to inspect cold-load timing
+    without digging through the full operational log.
+    """
+    import sys
+
+    today_iso = date.today().isoformat()
+    run_id = str(st.session_state.get(_TODAY_RUN_ID_DATE_KEY_PREFIX + today_iso) or "none")
+    milestones: list[dict[str, Any]] = list(st.session_state.get(_TODAY_RUN_MILESTONES_KEY) or [])
+    lines = ["\n" + "=" * 60, f"Today Run Timeline  run_id={run_id}", "=" * 60]
+    prev_elapsed = 0
+    for m in milestones:
+        elapsed = int(m.get("elapsed_ms") or 0)
+        delta = elapsed - prev_elapsed
+        mname = str(m.get("name") or "?")
+        extra = {k: v for k, v in m.items() if k not in {"name", "elapsed_ms", "ts"}}
+        extra_str = f"  {extra}" if extra else ""
+        lines.append(f"  +{delta:>6}ms  [{elapsed:>7}ms]  {mname}{extra_str}")
+        prev_elapsed = elapsed
+    lines.append("=" * 60)
+    sys.stderr.write("\n".join(lines) + "\n")
+
+
+def _today_async_snapshot_refresh_key(*, tenant_id: str, today_value: date) -> str:
+    return f"{str(tenant_id or '').strip()}::{today_value.isoformat()}"
+
+
+def _today_async_snapshot_refresh_consumed_key(*, tenant_id: str, today_value: date) -> str:
+    return f"_today_async_snapshot_refresh_consumed::{str(tenant_id or '').strip()}::{today_value.isoformat()}"
+
+
+def _schedule_today_snapshot_recompute_async(
+    *,
+    tenant_id: str,
+    today_value: date,
+    run_id: str,
+    snapshot_available: bool,
+    latest_snapshot_date: str,
+) -> bool:
+    refresh_key = _today_async_snapshot_refresh_key(tenant_id=tenant_id, today_value=today_value)
+    with _TODAY_ASYNC_SNAPSHOT_REFRESH_LOCK:
+        existing = dict(_TODAY_ASYNC_SNAPSHOT_REFRESH_STATE.get(refresh_key) or {})
+        if bool(existing.get("in_progress")):
+            return False
+        token = int(existing.get("token", 0) or 0) + 1
+        _TODAY_ASYNC_SNAPSHOT_REFRESH_STATE[refresh_key] = {
+            "token": token,
+            "in_progress": True,
+            "completed": False,
+            "completed_token": int(existing.get("completed_token", 0) or 0),
+            "started_at": time.time(),
+            "error": "",
+        }
+
+    def _worker() -> None:
+        recompute_ms = 0
+        total_ms = 0
+        try:
+            from services.daily_snapshot_service import recompute_daily_employee_snapshots
+
+            _log_operational_event(
+                "today_snapshot_recompute_started_async",
+                status="started",
+                tenant_id=str(tenant_id or ""),
+                user_email="",
+                context={
+                    "run_id": str(run_id or ""),
+                    "today_iso": today_value.isoformat(),
+                    "snapshot_available": bool(snapshot_available),
+                    "latest_snapshot_date": str(latest_snapshot_date or ""),
+                },
+            )
+
+            worker_started_at = time.perf_counter()
+            recompute_started_at = time.perf_counter()
+            recompute_daily_employee_snapshots(tenant_id=tenant_id, days=1)
+            recompute_ms = int(max(0.0, (time.perf_counter() - recompute_started_at) * 1000))
+            # Note: daily signals are NOT written here — the Supabase JWT auth context
+            # required for signals RLS is not available in a background thread. Signals
+            # will be recomputed on the next page load after cache invalidation picks up
+            # the fresh snapshots written above.
+            total_ms = int(max(0.0, (time.perf_counter() - worker_started_at) * 1000))
+
+            with _TODAY_ASYNC_SNAPSHOT_REFRESH_LOCK:
+                _TODAY_ASYNC_SNAPSHOT_REFRESH_STATE[refresh_key] = {
+                    "token": token,
+                    "in_progress": False,
+                    "completed": True,
+                    "completed_token": token,
+                    "started_at": float(existing.get("started_at", time.time()) or time.time()),
+                    "completed_at": time.time(),
+                    "error": "",
+                }
+
+            _log_operational_event(
+                "today_snapshot_recompute_completed_async",
+                status="completed",
+                tenant_id=str(tenant_id or ""),
+                user_email="",
+                context={
+                    "run_id": str(run_id or ""),
+                    "today_iso": today_value.isoformat(),
+                    "recompute_ms": int(recompute_ms),
+                    "total_ms": int(total_ms),
+                },
+            )
+        except Exception as async_err:
+            with _TODAY_ASYNC_SNAPSHOT_REFRESH_LOCK:
+                _TODAY_ASYNC_SNAPSHOT_REFRESH_STATE[refresh_key] = {
+                    "token": token,
+                    "in_progress": False,
+                    "completed": False,
+                    "completed_token": int(existing.get("completed_token", 0) or 0),
+                    "started_at": float(existing.get("started_at", time.time()) or time.time()),
+                    "completed_at": time.time(),
+                    "error": str(async_err or ""),
+                }
+
+            _log_app_error(
+                "today_snapshot_recompute_async_failed",
+                f"Async snapshot recompute failed: {async_err}",
+                severity="warning",
+            )
+            _log_operational_event(
+                "today_snapshot_recompute_completed_async",
+                status="error",
+                tenant_id=str(tenant_id or ""),
+                user_email="",
+                context={
+                    "run_id": str(run_id or ""),
+                    "today_iso": today_value.isoformat(),
+                    "recompute_ms": int(recompute_ms),
+                    "total_ms": int(total_ms),
+                    "error": str(async_err or ""),
+                },
+            )
+
+    worker = threading.Thread(target=_worker, name=f"today-snapshot-refresh-{today_value.isoformat()}", daemon=True)
+    worker.start()
+    return True
+
+
+def _consume_today_async_snapshot_refresh_completion(*, tenant_id: str, today_value: date) -> bool:
+    refresh_key = _today_async_snapshot_refresh_key(tenant_id=tenant_id, today_value=today_value)
+    with _TODAY_ASYNC_SNAPSHOT_REFRESH_LOCK:
+        refresh_state = dict(_TODAY_ASYNC_SNAPSHOT_REFRESH_STATE.get(refresh_key) or {})
+
+    if not bool(refresh_state.get("completed")):
+        return False
+
+    completed_token = int(refresh_state.get("completed_token", 0) or 0)
+    consumed_key = _today_async_snapshot_refresh_consumed_key(tenant_id=tenant_id, today_value=today_value)
+    already_consumed_token = int(st.session_state.get(consumed_key, 0) or 0)
+    if completed_token <= already_consumed_token:
+        return False
+
+    _invalidate_today_write_caches()
+    st.session_state[consumed_key] = completed_token
+    return True
 
 
 def _today_payload_ready_for_render(precomputed: dict[str, Any] | None) -> bool:
@@ -448,6 +660,11 @@ def _trigger_today_initial_ready_rerun_if_needed(
     _log_today_initial_load_event_once(
         event_name="today_rerun_triggered",
         today_value=today_value,
+        tenant_id=tenant_id,
+        context={"reason": "initial_data_became_ready"},
+    )
+    _log_today_milestone(
+        "today_rerun_triggered",
         tenant_id=tenant_id,
         context={"reason": "initial_data_became_ready"},
     )
@@ -1407,7 +1624,7 @@ def _render_return_trigger(trigger: TodayReturnTriggerViewModel | None) -> None:
 
 
 def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bool:
-    """Rebuild snapshots then compute today's signals.
+    """Compute today's signals without blocking on snapshot recompute.
     
     Uses per-date recovery lock to prevent concurrent rebuilds during Streamlit reruns.
     Returns True if recovery completed successfully, False if skipped or failed.
@@ -1429,7 +1646,13 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
 
     try:
         from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
-        from services.daily_snapshot_service import get_latest_snapshot_goal_status, recompute_daily_employee_snapshots
+        from services.daily_snapshot_service import get_latest_snapshot_goal_status
+
+        _log_today_milestone(
+            "today_recovery_started",
+            tenant_id=tenant_id,
+            context={"today_iso": today_value.isoformat()},
+        )
 
         # Check if snapshots need recomputation
         snapshot_check_at = time.perf_counter()
@@ -1453,22 +1676,37 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
             st.session_state.get("_post_import_refresh_pending")
             or latest_snapshot_date != today_value.isoformat()
         )
+        has_snapshot_data = bool(str(latest_snapshot_date or "").strip())
+        _log_today_milestone(
+            "today_snapshot_check_done",
+            tenant_id=tenant_id,
+            context={
+                "snapshot_check_ms": int(snapshot_check_ms),
+                "latest_snapshot_date": str(latest_snapshot_date or ""),
+                "snapshot_current": bool(latest_snapshot_date == today_value.isoformat()),
+                "should_recompute": bool(should_recompute_snapshots),
+            },
+        )
 
         snapshot_recompute_ms = 0
         if should_recompute_snapshots:
-            snapshot_recompute_at = time.perf_counter()
-            try:
-                # Narrow to days=1: only today's snapshot rows need writing during recovery.
-                # Lookback for trend accuracy is preserved (fetch_days = 1 + lookback*3 = 43 days).
-                # Historical snapshot rows remain unchanged — they were written on their own day.
-                recompute_daily_employee_snapshots(tenant_id=tenant_id, days=1)
-            except Exception as snap_err:
-                _log_app_error(
-                    "recovery_snapshot_recompute",
-                    f"Snapshot recompute failed (non-fatal, continuing): {snap_err}",
-                    severity="warning",
-                )
-            snapshot_recompute_ms = int(max(0.0, (time.perf_counter() - snapshot_recompute_at) * 1000))
+            async_started = _schedule_today_snapshot_recompute_async(
+                tenant_id=tenant_id,
+                today_value=today_value,
+                run_id=str(st.session_state.get(_TODAY_RUN_ID_DATE_KEY_PREFIX + today_value.isoformat()) or ""),
+                snapshot_available=bool(has_snapshot_data),
+                latest_snapshot_date=str(latest_snapshot_date or ""),
+            )
+            _log_today_milestone(
+                "today_snapshot_recompute_skipped_for_ui",
+                tenant_id=tenant_id,
+                context={
+                    "async_started": bool(async_started),
+                    "snapshot_available": bool(has_snapshot_data),
+                    "latest_snapshot_date": str(latest_snapshot_date or ""),
+                    "reason": ("stale_snapshot_available" if has_snapshot_data else "snapshot_missing"),
+                },
+            )
 
         # Compute daily signals
         signal_compute_at = time.perf_counter()
@@ -1490,6 +1728,14 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
                 raise
         signal_compute_ms = int(max(0.0, (time.perf_counter() - signal_compute_at) * 1000))
         recovery_total_ms = int(max(0.0, (time.perf_counter() - cold_start_at) * 1000))
+        _log_today_milestone(
+            "today_signal_compute_done",
+            tenant_id=tenant_id,
+            context={
+                "signal_compute_ms": int(signal_compute_ms),
+                "recovery_total_ms": int(recovery_total_ms),
+            },
+        )
 
         _log_operational_event(
             "today_cold_load_signal_fetch_ms",
@@ -4004,6 +4250,36 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
         if entered_from_page and entered_from_page.strip().lower() != "today":
             st.session_state[phase2_ready_key] = False
 
+        _consume_today_async_snapshot_refresh_completion(
+            tenant_id=tenant_id,
+            today_value=today_value,
+        )
+
+        # --- Run-id: create once per navigation, preserved across same-session reruns ---
+        _today_iso = today_value.isoformat()
+        _run_id_key = _TODAY_RUN_ID_DATE_KEY_PREFIX + _today_iso
+        _run_nav_src_key = _TODAY_RUN_NAV_SOURCE_KEY_PREFIX + _today_iso
+        _existing_run_id = str(st.session_state.get(_run_id_key) or "")
+        _last_nav_source = str(st.session_state.get(_run_nav_src_key) or "")
+        _entered_from_normalized = entered_from_page.strip().lower()
+        _is_new_navigation = (
+            not _existing_run_id
+            or (
+                bool(_entered_from_normalized)
+                and _entered_from_normalized != "today"
+                and entered_from_page != _last_nav_source
+            )
+        )
+        if _is_new_navigation:
+            today_run_id = str(uuid4())
+            st.session_state[_run_id_key] = today_run_id
+            st.session_state[_run_nav_src_key] = entered_from_page
+            st.session_state[_TODAY_RUN_WALL_START_KEY] = time.time()
+            st.session_state[_TODAY_RUN_MILESTONES_KEY] = []
+            st.session_state[_TODAY_RUN_IS_COLD_KEY] = is_cold_start
+        else:
+            today_run_id = _existing_run_id
+
         _log_today_first_paint_event_once(
             event_name="today_first_paint_started",
             today_value=today_value,
@@ -4013,6 +4289,28 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 "initial_load_completed": bool(st.session_state.get(_today_initial_load_completed_key(today_value))),
             },
         )
+
+        _log_today_milestone(
+            "today_page_entered",
+            tenant_id=tenant_id,
+            context={
+                "is_cold_start": bool(is_cold_start),
+                "nav_from": entered_from_page,
+                "phase2_ready": bool(st.session_state.get(phase2_ready_key)),
+                "is_new_navigation": bool(_is_new_navigation),
+            },
+        )
+        if not _is_new_navigation and not is_cold_start:
+            _log_today_milestone(
+                "today_page_reentered_after_rerun",
+                tenant_id=tenant_id,
+                context={
+                    "phase2_ready": bool(st.session_state.get(phase2_ready_key)),
+                    "rerun_triggered_previously": bool(
+                        st.session_state.get(_today_initial_rerun_triggered_key(today_value))
+                    ),
+                },
+            )
 
         if is_cold_start:
             _log_today_first_paint_event_once(
@@ -4044,6 +4342,21 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     marker=entered_from_page,
                     context={"entered_from_page": entered_from_page},
                 )
+                _log_today_milestone(
+                    "today_previous_screen_cleared",
+                    tenant_id=tenant_id,
+                    context={"entered_from_page": entered_from_page},
+                )
+            _log_today_milestone(
+                "today_loading_shell_painted",
+                tenant_id=tenant_id,
+                context={
+                    "entered_from_page": entered_from_page,
+                    "previous_screen_cleared": bool(
+                        entered_from_page and entered_from_page.strip().lower() != "today"
+                    ),
+                },
+            )
 
         with profile_block(
             "today.page_today",
@@ -4168,6 +4481,15 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     ):
                         return
 
+                    _log_today_milestone(
+                        "today_payload_ready",
+                        tenant_id=tenant_id,
+                        context={
+                            "queue_items": len(list(precomputed.get("queue_items") or [])),
+                            "goal_status_rows": len(list(precomputed.get("goal_status") or [])),
+                        },
+                    )
+
                     queue_items = list(precomputed.get("queue_items") or [])
                     goal_status = list(precomputed.get("goal_status") or [])
                     import_summary = dict(precomputed.get("import_summary") or {})
@@ -4251,6 +4573,11 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
             phase2_ready = bool(st.session_state.get(phase2_ready_key))
             if not phase2_ready:
                 phase1_started_at = time.perf_counter()
+                _log_today_milestone(
+                    "today_phase1_started",
+                    tenant_id=tenant_id,
+                    context={"phase2_ready": False},
+                )
                 decision_items = list(precomputed.get("decision_items") or [])
                 decision_summary = precomputed.get("decision_summary") or attention_summary
                 suppressed_cards = home_sections.get("suppressed_signals", [])
@@ -4280,6 +4607,24 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                         signal_status_map=dict(phase1_prepared.get("signal_status_map") or {}),
                         people_needing_attention=int(phase1_prepared.get("people_needing_attention") or 0),
                     )
+                    if list(phase1_prepared.get("top_cards") or []):
+                        _log_today_milestone(
+                            "today_first_top3_card_written",
+                            tenant_id=tenant_id,
+                            context={
+                                "top3_count": len(list(phase1_prepared.get("top_cards") or [])),
+                            },
+                        )
+
+                _log_today_milestone(
+                    "today_top3_ready",
+                    tenant_id=tenant_id,
+                    context={
+                        "top3_count": len(list(phase1_prepared.get("top_cards") or [])),
+                        "queue_build_ms": int(phase1_prepared.get("queue_build_ms") or 0),
+                        "status_map_ms": int(phase1_prepared.get("signal_status_map_ms") or 0),
+                    },
+                )
 
                 top3_ready_ms = int(max(0.0, (time.perf_counter() - page_started_at) * 1000))
                 phase1_render_ms = int(max(0.0, (time.perf_counter() - phase1_started_at) * 1000))
@@ -4308,6 +4653,11 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 return
 
             phase2_started_at = time.perf_counter()
+            _log_today_milestone(
+                "today_phase2_started",
+                tenant_id=tenant_id,
+                context={"phase2_ready": True},
+            )
 
             return_trigger = None
             with profile.stage("render_header"):
@@ -4664,6 +5014,41 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 context={
                     "today_phase2_render_ms": int(phase2_render_ms),
                     "today_top3_ready_ms": int(profile.metrics.get("today_top3_ready_ms", 0) or 0),
+                },
+            )
+
+            _log_today_milestone(
+                "today_main_body_complete",
+                tenant_id=tenant_id,
+                context={"phase2_render_ms": int(phase2_render_ms)},
+            )
+
+            # Emit one consolidated run summary event
+            _milestones_snap = list(st.session_state.get(_TODAY_RUN_MILESTONES_KEY) or [])
+            _ms_by_name = {str(m.get("name") or ""): int(m.get("elapsed_ms") or 0) for m in _milestones_snap}
+            _log_today_milestone(
+                "today_run_summary",
+                tenant_id=tenant_id,
+                context={
+                    "total_to_shell_ms": int(_ms_by_name.get("today_loading_shell_painted") or 0),
+                    "total_to_recovery_start_ms": int(_ms_by_name.get("today_recovery_started") or 0),
+                    "total_to_snapshot_check_ms": int(_ms_by_name.get("today_snapshot_check_done") or 0),
+                    "total_to_snapshot_recompute_ms": int(_ms_by_name.get("today_snapshot_recompute_done") or 0),
+                    "total_to_signal_compute_ms": int(_ms_by_name.get("today_signal_compute_done") or 0),
+                    "total_to_payload_ready_ms": int(_ms_by_name.get("today_payload_ready") or 0),
+                    "total_to_rerun_ms": int(_ms_by_name.get("today_rerun_triggered") or 0),
+                    "total_to_phase1_start_ms": int(_ms_by_name.get("today_phase1_started") or 0),
+                    "total_to_top3_ms": int(_ms_by_name.get("today_top3_ready") or 0),
+                    "total_to_phase2_start_ms": int(_ms_by_name.get("today_phase2_started") or 0),
+                    "total_to_main_body_ms": int(_ms_by_name.get("today_main_body_complete") or 0),
+                    "old_screen_cleared_before_shell": (
+                        bool(_ms_by_name.get("today_loading_shell_painted"))
+                        and bool(_ms_by_name.get("today_page_entered"))
+                        and int(_ms_by_name.get("today_loading_shell_painted") or 0)
+                        <= int(_ms_by_name.get("today_recovery_started") or 0)
+                    ),
+                    "rerun_happened": bool(_ms_by_name.get("today_rerun_triggered")),
+                    "milestone_count": len(_milestones_snap),
                 },
             )
 

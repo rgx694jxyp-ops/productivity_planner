@@ -5,11 +5,11 @@ from __future__ import annotations
 from repositories._common import get_client, log_error, require_tenant, tenant_query
 
 
-def batch_upsert_daily_signals(rows: list[dict]) -> None:
+def batch_upsert_daily_signals(rows: list[dict], *, tenant_id: str = "") -> None:
     if not rows:
         return
 
-    tid = require_tenant()
+    tid = require_tenant(tenant_id)
     # Force each row into the resolved tenant scope.
     payload = [{**row, "tenant_id": tid} for row in rows]
 

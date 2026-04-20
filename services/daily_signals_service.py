@@ -431,7 +431,7 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
         with _write_profile.stage("delete"):
             delete_daily_signals(tenant_id=tenant_id, signal_date=signal_date.isoformat())
         with _write_profile.stage("upsert"):
-            batch_upsert_daily_signals(rows)
+            batch_upsert_daily_signals(rows, tenant_id=tenant_id)
         _write_profile.query(count=max(1, (len(rows) + 499) // 500) + 1, rows=len(rows))
     try:
         from services.today_home_service import clear_today_read_caches

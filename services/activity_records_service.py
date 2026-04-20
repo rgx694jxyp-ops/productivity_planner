@@ -156,7 +156,7 @@ def get_recent_activity_records(*, tenant_id: str = "", employee_id: str = "", d
         pass
     
     fetch_limit = 0 if employee_id else max(1, int(limit or 500))
-    legacy_rows = import_repo.get_all_uph_history(days=days, limit=fetch_limit)
+    legacy_rows = import_repo.get_all_uph_history(days=days, limit=fetch_limit, tenant_id=tenant_id)
     
     try:
         from core.dependencies import _log_operational_event

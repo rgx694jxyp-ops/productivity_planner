@@ -12,18 +12,25 @@ from services.app_logging import log_error as log_app_error
 from services.app_logging import log_info, log_warn
 
 
-def get_all_uph_history(days: int = 30, *, limit: int = 0) -> list[dict]:
+def get_all_uph_history(days: int = 30, *, limit: int = 0, tenant_id: str = "") -> list[dict]:
     """All UPH history records with pagination past Supabase default row caps."""
     sb = get_client()
     all_rows = []
     page_size = 1000
     offset = 0
     max_rows = max(0, int(limit or 0))
+    tid = str(tenant_id or "").strip()
 
     while True:
-        query = tenant_query(
-            sb.table("uph_history").select("emp_id, work_date, uph, units, hours_worked, department")
-        ).order("work_date", desc=False).range(offset, offset + page_size - 1)
+        if tid:
+            query = sb.table("uph_history").select(
+                "emp_id, work_date, uph, units, hours_worked, department"
+            ).eq("tenant_id", tid)
+        else:
+            query = tenant_query(
+                sb.table("uph_history").select("emp_id, work_date, uph, units, hours_worked, department")
+            )
+        query = query.order("work_date", desc=False).range(offset, offset + page_size - 1)
 
         if days > 0:
             cutoff = (date.today() - timedelta(days=days)).isoformat()

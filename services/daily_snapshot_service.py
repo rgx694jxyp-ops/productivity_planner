@@ -364,7 +364,10 @@ def recompute_daily_employee_snapshots(
 
         if filtered_snapshots:
             with profile.stage("upsert_snapshots"):
-                daily_employee_snapshots_repo.batch_upsert_daily_employee_snapshots(filtered_snapshots)
+                daily_employee_snapshots_repo.batch_upsert_daily_employee_snapshots(
+                    filtered_snapshots,
+                    tenant_id=tenant_id,
+                )
             profile.query(count=max(1, (len(filtered_snapshots) + 499) // 500), rows=len(filtered_snapshots))
             profile.set("upsert_batch_count", max(1, (len(filtered_snapshots) + 499) // 500))
 
