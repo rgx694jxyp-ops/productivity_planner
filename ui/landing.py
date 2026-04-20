@@ -69,7 +69,7 @@ def show_landing_page() -> None:
         }
         .lp-sticky .lp-ghost {
             background: rgba(77,163,255,0.16);
-            color: #E8F0F9;
+            color: #ffffff;
             border: 1px solid rgba(77,163,255,0.35);
         }
         .lp-shell {
@@ -251,25 +251,25 @@ def show_landing_page() -> None:
     if shot and os.path.exists(shot):
         st.image(shot, use_container_width=True)
     else:
-                st.markdown(
-                        """
-                        <div class="lp-workflow">
-                            <div class="lp-step">
-                                <div class="lp-step-title">1. Maya · Receiving</div>
-                                <div class="lp-step-meta">Below expected pace · Medium confidence · Current shift</div>
-                            </div>
-                            <div class="lp-step">
-                                <div class="lp-step-title">2. Luis · Packing</div>
-                                <div class="lp-step-meta">Repeated variance across shifts · Follow-up due</div>
-                            </div>
-                            <div class="lp-step">
-                                <div class="lp-step-title">3. Dana · Pick Line</div>
-                                <div class="lp-step-meta">Process friction signal surfaced · Note required</div>
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                )
+        st.markdown(
+            """
+            <div class="lp-workflow">
+                <div class="lp-step">
+                    <div class="lp-step-title">1. Maya · Receiving</div>
+                    <div class="lp-step-meta">Below expected pace · Medium confidence · Current shift</div>
+                </div>
+                <div class="lp-step">
+                    <div class="lp-step-title">2. Luis · Packing</div>
+                    <div class="lp-step-meta">Repeated variance across shifts · Follow-up due</div>
+                </div>
+                <div class="lp-step">
+                    <div class="lp-step-title">3. Dana · Pick Line</div>
+                    <div class="lp-step-meta">Process friction signal surfaced · Note required</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.caption("Action-first by design: review the queue, document context, and keep follow-through visible.")
         st.markdown('</div>', unsafe_allow_html=True)
 

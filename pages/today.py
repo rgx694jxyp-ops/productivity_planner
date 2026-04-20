@@ -122,6 +122,10 @@ def _today_initial_load_completed_key(today_value: date) -> str:
     return f"_today_initial_load_completed_{today_value.isoformat()}"
 
 
+def _today_initial_rerun_triggered_key(today_value: date) -> str:
+    return f"_today_initial_rerun_triggered_{today_value.isoformat()}"
+
+
 def _today_initial_load_event_logged_key(today_value: date, event_name: str, marker: str = "") -> str:
     safe_event = str(event_name or "").strip().replace(" ", "_")
     safe_marker = str(marker or "").strip().replace(" ", "_")
@@ -185,10 +189,12 @@ def _log_today_first_paint_event_once(
 
 
 def _today_should_show_first_paint_shell(*, entered_from_page: str, today_value: date) -> bool:
+    if bool(st.session_state.get(_today_initial_load_completed_key(today_value))):
+        return False
     source_page = str(entered_from_page or "").strip().lower()
     if source_page and source_page != "today":
         return True
-    return not bool(st.session_state.get(_today_initial_load_completed_key(today_value)))
+    return True
 
 
 def _render_today_loading_shell(*, reason: str = "Preparing today's signals...") -> None:
@@ -385,6 +391,64 @@ def _finalize_today_initial_load_state(*, tenant_id: str, today_value: date, pre
             "goal_status_rows": len(goal_status),
         },
     )
+    return True
+
+
+def _trigger_today_initial_ready_rerun_if_needed(
+    *,
+    tenant_id: str,
+    today_value: date,
+    was_initially_ready: bool,
+    is_ready_now: bool,
+) -> bool:
+    if not is_ready_now:
+        _log_today_initial_load_event_once(
+            event_name="today_rerun_skipped_reason",
+            today_value=today_value,
+            tenant_id=tenant_id,
+            marker="not_ready",
+            context={"reason": "not_ready"},
+        )
+        return False
+
+    if was_initially_ready:
+        _log_today_initial_load_event_once(
+            event_name="today_rerun_skipped_reason",
+            today_value=today_value,
+            tenant_id=tenant_id,
+            marker="already_ready",
+            context={"reason": "already_ready"},
+        )
+        return False
+
+    rerun_key = _today_initial_rerun_triggered_key(today_value)
+    if bool(st.session_state.get(rerun_key)):
+        _log_today_initial_load_event_once(
+            event_name="today_rerun_skipped_reason",
+            today_value=today_value,
+            tenant_id=tenant_id,
+            marker="already_triggered",
+            context={"reason": "already_triggered"},
+        )
+        return False
+
+    _log_today_initial_load_event_once(
+        event_name="today_data_ready_detected",
+        today_value=today_value,
+        tenant_id=tenant_id,
+        context={
+            "was_initially_ready": bool(was_initially_ready),
+            "is_ready_now": bool(is_ready_now),
+        },
+    )
+    st.session_state[rerun_key] = True
+    _log_today_initial_load_event_once(
+        event_name="today_rerun_triggered",
+        today_value=today_value,
+        tenant_id=tenant_id,
+        context={"reason": "initial_data_became_ready"},
+    )
+    st.rerun()
     return True
 
 
@@ -3963,6 +4027,9 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
 
                 with profile.stage("load_precomputed"):
                     precomputed = _load_today_signals()
+                    initial_load_completed_before_finalize = bool(
+                        st.session_state.get(_today_initial_load_completed_key(today_value))
+                    )
                     force_recompute = bool(st.session_state.get("_post_import_refresh_pending"))
                     needs_recovery = (
                         force_recompute
@@ -4032,6 +4099,14 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                             context={"reason": "initial_load_not_ready"},
                         )
                         _render_today_loading_shell()
+                        return
+
+                    if _trigger_today_initial_ready_rerun_if_needed(
+                        tenant_id=tenant_id,
+                        today_value=today_value,
+                        was_initially_ready=initial_load_completed_before_finalize,
+                        is_ready_now=True,
+                    ):
                         return
 
                     queue_items = list(precomputed.get("queue_items") or [])

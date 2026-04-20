@@ -647,3 +647,53 @@ def test_phase1_top_queue_render_limits_to_fast_top3(monkeypatch):
 
     assert len(list(prepared.get("top_cards") or [])) <= 3
     assert int(prepared.get("people_needing_attention") or 0) <= 3
+
+
+def test_initial_data_ready_transition_triggers_one_rerun(monkeypatch):
+    today_value = date(2026, 4, 20)
+    events: list[str] = []
+    reruns = {"count": 0}
+    session_state = {"tenant_id": "tenant-a", "user_email": "lead@example.com"}
+
+    monkeypatch.setattr("pages.today.st.session_state", session_state)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda event, **_kwargs: events.append(str(event)))
+    monkeypatch.setattr("pages.today.st.rerun", lambda: reruns.__setitem__("count", reruns["count"] + 1))
+
+    triggered = today_module._trigger_today_initial_ready_rerun_if_needed(
+        tenant_id="tenant-a",
+        today_value=today_value,
+        was_initially_ready=False,
+        is_ready_now=True,
+    )
+
+    assert triggered is True
+    assert reruns["count"] == 1
+    assert bool(session_state.get(today_module._today_initial_rerun_triggered_key(today_value))) is True
+    assert "today_data_ready_detected" in events
+    assert "today_rerun_triggered" in events
+
+
+def test_initial_data_ready_rerun_skipped_when_already_triggered(monkeypatch):
+    today_value = date(2026, 4, 20)
+    events: list[str] = []
+    reruns = {"count": 0}
+    session_state = {
+        "tenant_id": "tenant-a",
+        "user_email": "lead@example.com",
+        today_module._today_initial_rerun_triggered_key(today_value): True,
+    }
+
+    monkeypatch.setattr("pages.today.st.session_state", session_state)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda event, **_kwargs: events.append(str(event)))
+    monkeypatch.setattr("pages.today.st.rerun", lambda: reruns.__setitem__("count", reruns["count"] + 1))
+
+    triggered = today_module._trigger_today_initial_ready_rerun_if_needed(
+        tenant_id="tenant-a",
+        today_value=today_value,
+        was_initially_ready=False,
+        is_ready_now=True,
+    )
+
+    assert triggered is False
+    assert reruns["count"] == 0
+    assert "today_rerun_skipped_reason" in events
