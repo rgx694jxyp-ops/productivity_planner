@@ -106,6 +106,7 @@ _TODAY_ACTION_STATE_LOOKUP_MAX_SECTION_ITEMS = 12
 _TODAY_ACTION_STATE_LOOKUP_MAX_SNAPSHOT_ITEMS = 12
 _TODAY_PHASE1_RANKED_SCAN_LIMIT = 12
 _TODAY_QUEUE_DEFAULT_VISIBLE_CARDS = 3
+_TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX = "_today_payload_session_cache_"
 _TODAY_COMPLETED_ITEMS_SESSION_KEY = "_today_completed_items"
 _TODAY_LAST_COMPLETED_LABEL_KEY = "_today_last_completed_label"
 _TODAY_FOCUS_NEXT_CARD_KEY = "_today_focus_next_card"
@@ -245,6 +246,8 @@ def _prepare_today_phase1_top_queue_render(
         "top_cards": top_cards,
         "signal_status_map": dict(prepared.get("signal_status_map") or {}),
         "people_needing_attention": int(people_needing_attention),
+        "signal_status_map_ms": int(prepared.get("signal_status_map_ms") or 0),
+        "queue_build_ms": int(prepared.get("queue_derivation_ms") or 0),
     }
 
 
@@ -722,6 +725,15 @@ def _invalidate_today_write_caches() -> None:
         more_actions_cache = st.session_state.get("_today_more_actions_optional_data_cache")
         if isinstance(more_actions_cache, dict):
             more_actions_cache.clear()
+    except Exception:
+        pass
+    try:
+        stale_keys = [
+            k for k in st.session_state
+            if str(k or "").startswith(_TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX)
+        ]
+        for k in stale_keys:
+            st.session_state.pop(k, None)
     except Exception:
         pass
 
@@ -1413,12 +1425,14 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
     # Acquire lock before any work
     st.session_state[recovery_lock_key] = True
     st.session_state[recovery_started_at_key] = now_ts
+    cold_start_at = time.perf_counter()
 
     try:
         from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
         from services.daily_snapshot_service import get_latest_snapshot_goal_status, recompute_daily_employee_snapshots
 
         # Check if snapshots need recomputation
+        snapshot_check_at = time.perf_counter()
         latest_snapshot_date = ""
         try:
             _, _, latest_snapshot_date = get_latest_snapshot_goal_status(
@@ -1433,13 +1447,16 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
                 severity="warning",
             )
             latest_snapshot_date = ""
+        snapshot_check_ms = int(max(0.0, (time.perf_counter() - snapshot_check_at) * 1000))
 
         should_recompute_snapshots = bool(
             st.session_state.get("_post_import_refresh_pending")
             or latest_snapshot_date != today_value.isoformat()
         )
 
+        snapshot_recompute_ms = 0
         if should_recompute_snapshots:
+            snapshot_recompute_at = time.perf_counter()
             try:
                 recompute_daily_employee_snapshots(tenant_id=tenant_id, days=30)
             except Exception as snap_err:
@@ -1448,8 +1465,10 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
                     f"Snapshot recompute failed (non-fatal, continuing): {snap_err}",
                     severity="warning",
                 )
+            snapshot_recompute_ms = int(max(0.0, (time.perf_counter() - snapshot_recompute_at) * 1000))
 
         # Compute daily signals
+        signal_compute_at = time.perf_counter()
         try:
             compute_daily_signals(
                 signal_date=today_value,
@@ -1466,6 +1485,23 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
                 )
             else:
                 raise
+        signal_compute_ms = int(max(0.0, (time.perf_counter() - signal_compute_at) * 1000))
+        recovery_total_ms = int(max(0.0, (time.perf_counter() - cold_start_at) * 1000))
+
+        _log_operational_event(
+            "today_cold_load_signal_fetch_ms",
+            status="info",
+            tenant_id=str(tenant_id or ""),
+            user_email=str(st.session_state.get("user_email", "") or ""),
+            context={
+                "snapshot_check_ms": int(snapshot_check_ms),
+                "snapshot_recomputed": bool(should_recompute_snapshots),
+                "snapshot_recompute_ms": int(snapshot_recompute_ms),
+                "signal_compute_ms": int(signal_compute_ms),
+                "recovery_total_ms": int(recovery_total_ms),
+                "today_iso": today_value.isoformat(),
+            },
+        )
 
         # Clear caches to force re-read
         for func in [get_today_signals, _cached_today_signals_payload]:
@@ -3959,6 +3995,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
         today_value = date.today()
         page_started_at = time.perf_counter()
         tenant_id = str(st.session_state.get("tenant_id", "") or "")
+        is_cold_start = not bool(st.session_state.get(_today_initial_load_completed_key(today_value)))
         entered_from_page = str(st.session_state.get("_entered_from_page_key", "") or "")
         phase2_ready_key = _today_phase2_render_ready_key(today_value)
         if entered_from_page and entered_from_page.strip().lower() != "today":
@@ -3973,6 +4010,17 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 "initial_load_completed": bool(st.session_state.get(_today_initial_load_completed_key(today_value))),
             },
         )
+
+        if is_cold_start:
+            _log_today_first_paint_event_once(
+                event_name="today_cold_start_begin",
+                today_value=today_value,
+                tenant_id=tenant_id,
+                context={
+                    "today_iso": today_value.isoformat(),
+                    "entered_from_page": entered_from_page,
+                },
+            )
 
         if _today_should_show_first_paint_shell(entered_from_page=entered_from_page, today_value=today_value):
             _render_today_loading_shell()
@@ -4020,10 +4068,18 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
 
                 def _load_today_signals() -> dict[str, Any] | None:
                     profile.increment("today_signals_request_count", 1)
-                    return get_today_signals(
+                    _session_key = f"{_TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX}{tenant_id}_{today_value.isoformat()}"
+                    _cached_payload = st.session_state.get(_session_key)
+                    if isinstance(_cached_payload, dict) and _cached_payload.get("queue_items") is not None:
+                        profile.increment("today_signals_session_cache_hit", 1)
+                        return _cached_payload
+                    result = get_today_signals(
                         tenant_id=tenant_id,
                         as_of_date=today_value.isoformat(),
                     )
+                    if isinstance(result, dict):
+                        st.session_state[_session_key] = result
+                    return result
 
                 with profile.stage("load_precomputed"):
                     precomputed = _load_today_signals()
@@ -4234,7 +4290,14 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     context={
                         "today_phase1_render_ms": int(phase1_render_ms),
                         "today_top3_ready_ms": int(top3_ready_ms),
+                        "today_cold_load_phase1_total_ms": int(phase1_render_ms),
+                        "today_cold_load_top3_ready_ms": int(top3_ready_ms),
+                        "today_cold_load_queue_build_ms": int(phase1_prepared.get("queue_build_ms") or 0),
+                        "today_cold_load_status_map_ms": int(phase1_prepared.get("signal_status_map_ms") or 0),
+                        "today_cold_load_action_state_ms": 0,
                         "top3_count": len(list(phase1_prepared.get("top_cards") or [])),
+                        "is_cold_start": bool(is_cold_start),
+                        "is_warm": not bool(is_cold_start),
                     },
                 )
                 st.session_state[phase2_ready_key] = True

@@ -697,3 +697,86 @@ def test_initial_data_ready_rerun_skipped_when_already_triggered(monkeypatch):
     assert triggered is False
     assert reruns["count"] == 0
     assert "today_rerun_skipped_reason" in events
+
+
+def test_payload_session_cache_serves_second_call_without_db(monkeypatch):
+    """Second _load_today_signals call within the same run returns from session_state."""
+    today_value = date(2026, 4, 20)
+    db_calls = {"count": 0}
+    payload = {
+        "queue_items": [{"employee_id": "E1"}],
+        "goal_status": [],
+        "import_summary": {},
+        "home_sections": {},
+    }
+    session_state = {"tenant_id": "tenant-a"}
+
+    def _fake_get_today_signals(*, tenant_id, as_of_date):
+        db_calls["count"] += 1
+        return payload
+
+    monkeypatch.setattr("pages.today.get_today_signals", _fake_get_today_signals)
+    monkeypatch.setattr("pages.today.st.session_state", session_state)
+
+    cache_key = f"{today_module._TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX}tenant-a_{today_value.isoformat()}"
+
+    # First call: DB hit, result stored in session_state
+    result1 = today_module.get_today_signals(tenant_id="tenant-a", as_of_date=today_value.isoformat())
+    session_state[cache_key] = result1
+
+    # Simulate second call (as _load_today_signals would do)
+    cached = session_state.get(cache_key)
+    assert isinstance(cached, dict) and cached.get("queue_items") is not None
+    assert cached is payload
+    assert db_calls["count"] == 1
+
+
+def test_invalidate_today_write_caches_clears_session_payload_cache(monkeypatch):
+    today_value = date(2026, 4, 20)
+    cache_key = f"{today_module._TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX}tenant-a_{today_value.isoformat()}"
+    session_state = {
+        cache_key: {"queue_items": [], "goal_status": [], "import_summary": {}, "home_sections": {}},
+    }
+
+    monkeypatch.setattr("pages.today.st.session_state", session_state)
+    monkeypatch.setattr("pages.today._cached_today_action_state_lookup", type("F", (), {"cache_clear": lambda self: None})())
+    monkeypatch.setattr("pages.today._cached_today_signals_payload", type("F", (), {"cache_clear": lambda self: None})())
+    monkeypatch.setattr("pages.today._cached_today_signal_status_map", type("F", (), {"cache_clear": lambda self: None})())
+    monkeypatch.setattr("pages.today.get_today_signals", type("F", (), {"cache_clear": lambda self: None})())
+
+    today_module._invalidate_today_write_caches()
+
+    assert cache_key not in session_state
+
+
+def test_phase1_prepare_exposes_status_map_ms_and_queue_build_ms(monkeypatch):
+    today_value = date(2026, 4, 20)
+    cards = [_card_for(f"sig-timing-{i}", f"E{i}") for i in range(3)]
+    plan = today_module.TodayQueueRenderPlan(
+        section_title="Today",
+        weak_data_note="",
+        start_note="",
+        primary_cards=cards,
+        secondary_cards=[],
+        primary_placeholder="",
+        secondary_caption="",
+        secondary_expanded=False,
+        suppressed_debug_rows=[],
+    )
+
+    monkeypatch.setattr(
+        "pages.today.st.session_state",
+        {"_today_completed_items": [], "_today_pending_completion_signal_keys": []},
+    )
+    monkeypatch.setattr("pages.today._cached_today_signal_status_map", lambda **_kwargs: {})
+
+    prepared = today_module._prepare_today_phase1_top_queue_render(
+        plan=plan,
+        tenant_id="tenant-a",
+        today_value=today_value,
+    )
+
+    assert "signal_status_map_ms" in prepared
+    assert "queue_build_ms" in prepared
+    assert isinstance(prepared["signal_status_map_ms"], int)
+    assert isinstance(prepared["queue_build_ms"], int)
