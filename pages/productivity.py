@@ -1068,18 +1068,18 @@ def page_productivity():
         styled = df_show.style.map(_color_risk, subset=["Risk"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
-        st.markdown("##### Quick actions")
+        st.markdown("##### Quick links")
         for i, r in enumerate(priority_list[:12]):
             qa1, qa2, qa3, qa4 = st.columns([3, 2, 1, 1])
             qa1.write(r["name"])
             qa2.caption(r["department"] or "No dept")
-            if qa3.button("Coach", key=f"prio_coach_{i}"):
-                st.session_state["goto_page"] = "employees"
-                st.session_state["emp_view"] = "Performance Journal"
+            if qa3.button("Context", key=f"prio_coach_{i}"):
+                st.session_state["goto_page"] = "team"
+                st.session_state["team_selected_emp_id"] = str(r.get("emp_id") or "")
                 st.rerun()
             if qa4.button("History", key=f"prio_hist_{i}"):
-                st.session_state["goto_page"] = "employees"
-                st.session_state["emp_view"] = "Employee History"
+                st.session_state["goto_page"] = "team"
+                st.session_state["team_selected_emp_id"] = str(r.get("emp_id") or "")
                 st.rerun()
 
         # Download

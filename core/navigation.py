@@ -232,11 +232,6 @@ def render_sidebar() -> str:
             key="_current_page_key",
         )
 
-        st.divider()
-        if st.button("↺ Refresh data", use_container_width=True, key="sb_refresh"):
-            bust_cache()
-            st.rerun()
-
         from ui.components import toggle_simple_mode
 
         toggle_simple_mode()

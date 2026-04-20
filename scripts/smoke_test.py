@@ -50,11 +50,11 @@ def test_sidebar_key_routes() -> None:
     assert "handlers = {" in router_src, "Missing route handlers map"
     required_handler_keys = [
         '"today": page_today',
-        '"team": page_employees',
+        '"team": page_team',
         '"supervisor": page_today',
         '"dashboard": page_dashboard',
         '"import": page_import',
-        '"employees": page_employees',
+        '"employees": page_team',
         '"productivity": page_productivity',
         '"shift_plan": page_shift_plan',
         '"coaching_intel": page_coaching_intel',

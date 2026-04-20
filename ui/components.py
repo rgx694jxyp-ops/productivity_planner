@@ -291,11 +291,11 @@ def simplified_supervisor_view(gs: list[dict]):
         col1, col2 = st.columns([3, 1])
         col1.markdown(f"**{name}** · {dept}\n*{status}*")
         
-        if col2.button("View details", key=f"simple_coach_{emp.get('EmployeeID')}", 
+        if col2.button("View context", key=f"simple_coach_{emp.get('EmployeeID')}", 
                   help="Open performance context"):
-            st.session_state["goto_page"] = "employees"
-            st.session_state["emp_view"] = "Performance Journal"
+            st.session_state["goto_page"] = "team"
             st.session_state["cn_selected_emp"] = str(emp.get("EmployeeID", ""))
+            st.session_state["team_selected_emp_id"] = str(emp.get("EmployeeID", ""))
             st.rerun()
 
 
@@ -312,11 +312,12 @@ def show_start_shift_card(gs: list[dict], follow_up_due: int = 0):
 
     if below:
         st.caption("Signals are surfaced for below-target output and downward trend movement.")
-        if st.button("▶ Open review", key="start_shift_cta", type="primary", use_container_width=True):
+        if st.button("▶ Open Team context", key="start_shift_cta", type="primary", use_container_width=True):
             top_emp = below[0]
-            st.session_state["goto_page"] = "employees"
-            st.session_state["emp_view"] = "Performance Journal"
-            st.session_state["cn_selected_emp"] = str(top_emp.get("EmployeeID", top_emp.get("Employee Name", "")))
+            selected_emp_id = str(top_emp.get("EmployeeID", top_emp.get("Employee Name", "")))
+            st.session_state["goto_page"] = "team"
+            st.session_state["cn_selected_emp"] = selected_emp_id
+            st.session_state["team_selected_emp_id"] = selected_emp_id
             st.rerun()
     else:
         st.success("Everyone is on track right now based on current data.")
@@ -568,9 +569,9 @@ def show_resume_session_card(next_emp_name: str, next_context: str, next_emp_id:
     st.caption(f"Pick up where you left off: next is {next_emp_name}")
     st.caption(next_context)
     if st.button("▶ Continue where I left off", key="resume_session_cta", use_container_width=True):
-        st.session_state["goto_page"] = "employees"
-        st.session_state["emp_view"] = "Performance Journal"
+        st.session_state["goto_page"] = "team"
         st.session_state["cn_selected_emp"] = next_emp_id
+        st.session_state["team_selected_emp_id"] = next_emp_id
         st.rerun()
 
 
@@ -649,7 +650,8 @@ def _render_breadcrumb(current_page: str, subcontext: str | None = None):
     _page_labels = {
         "supervisor": "👔 Supervisor",
         "dashboard": "📊 Dashboard",
-        "employees": "👥 Employees",
+        "employees": "👥 Team",
+        "team": "👥 Team",
         "productivity": "📈 Productivity",
         "import": "📁 Import",
         "email": "📧 Email",

@@ -25,7 +25,7 @@ def _summary_with_secondary_only() -> AttentionSummary:
     )
 
 
-def test_first_run_secondary_only_shows_early_signal_placeholder(monkeypatch):
+def test_first_run_secondary_only_surfaces_item_in_top_cards(monkeypatch):
     class _Ctx:
         def __enter__(self):
             return None
@@ -85,4 +85,6 @@ def test_first_run_secondary_only_shows_early_signal_placeholder(monkeypatch):
         show_secondary_open=True,
     )
 
-    assert any("Early signals are listed below. Confidence improves as more history is imported." in text for text in markdown_calls)
+    assert any(">E1<" in text or "E1</div>" in text for text in markdown_calls)
+    assert any(">Packing<" in text or "Packing</div>" in text for text in markdown_calls)
+    assert not any("Early signals are listed below. Confidence improves as more history is imported." in text for text in markdown_calls)

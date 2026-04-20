@@ -22,9 +22,8 @@ def _render_priority_strip(gs: list[dict], history: list[dict]):
         st.session_state["goto_page"] = "productivity"
         st.session_state["prod_view"] = "📋 Priority List"
         st.rerun()
-    if a2.button("Open Journal", use_container_width=True, key="pri_strip_coaching"):
-        st.session_state["goto_page"] = "employees"
-        st.session_state["emp_view"] = "Performance Journal"
+    if a2.button("Open Team", use_container_width=True, key="pri_strip_coaching"):
+        st.session_state["goto_page"] = "team"
         st.rerun()
 
 
@@ -86,11 +85,11 @@ def _render_primary_action_rail(gs: list[dict], history: list[dict], key_prefix:
         st.caption(f"💡 {adaptive['emphasis']}")
 
     col1, col2 = st.columns(2)
-    action_label = adaptive.get("action", "Open Journal") if adaptive else "Open Journal"
+    action_label = "Open Team" if adaptive else "Open Team"
     if col1.button(f"▶ {action_label}", key=f"{key_prefix}_start_coach", type="primary", use_container_width=True):
-        st.session_state["goto_page"] = "employees"
-        st.session_state["emp_view"] = "Performance Journal"
+        st.session_state["goto_page"] = "team"
         st.session_state["cn_selected_emp"] = rec["emp_id"]
+        st.session_state["team_selected_emp_id"] = rec["emp_id"]
         st.rerun()
     if col2.button("View Context →", key=f"{key_prefix}_view_context", use_container_width=True):
         st.session_state["goto_page"] = "dashboard"
@@ -134,15 +133,15 @@ def _render_soft_action_buttons(emp_id: str, emp_name: str, risk_level: str, con
         st.session_state["show_soft_note_input"] = True
 
     if col3.button(
-        "▶ Full Coaching",
+        "View in Team",
         key=f"soft_escalate_{emp_id}",
-        help="Move to formal coaching session",
+        help="Open drill-down context for this employee",
         use_container_width=True,
         type="secondary",
     ):
-        st.session_state["goto_page"] = "employees"
-        st.session_state["emp_view"] = "Performance Journal"
+        st.session_state["goto_page"] = "team"
         st.session_state["cn_selected_emp"] = emp_id
+        st.session_state["team_selected_emp_id"] = emp_id
         st.rerun()
 
     st.caption("📌 **Add context** if applicable:")

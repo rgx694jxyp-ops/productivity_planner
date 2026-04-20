@@ -9,7 +9,7 @@ import dataclasses
 import hashlib
 import json
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any
 
 import pandas as pd
@@ -21,7 +21,7 @@ from core.onboarding_intent import build_onboarding_event_context
 from domain.display_signal import DisplaySignal, SignalLabel
 from domain.insight_card_contract import InsightCardContract
 from domain.operational_exceptions import EXCEPTION_CATEGORIES
-from services.action_state_service import build_employee_action_state_lookup, log_coaching_lifecycle_entry, log_follow_through_event
+from services.action_state_service import build_employee_action_state_lookup, log_follow_through_event
 from services.action_metrics_service import (
     _recent_action_outcomes,
     get_manager_outcome_stats,
@@ -101,6 +101,11 @@ _TODAY_ACTION_STATE_LOOKUP_MAX_RANKED_ITEMS = 12
 _TODAY_ACTION_STATE_LOOKUP_MAX_DECISION_ITEMS = 18
 _TODAY_ACTION_STATE_LOOKUP_MAX_SECTION_ITEMS = 12
 _TODAY_ACTION_STATE_LOOKUP_MAX_SNAPSHOT_ITEMS = 12
+_TODAY_QUEUE_DEFAULT_VISIBLE_CARDS = 3
+_TODAY_COMPLETED_ITEMS_SESSION_KEY = "_today_completed_items"
+_TODAY_LAST_COMPLETED_LABEL_KEY = "_today_last_completed_label"
+_TODAY_FOCUS_NEXT_CARD_KEY = "_today_focus_next_card"
+_TODAY_AUTO_REFRESH_MIN_SECONDS = 60
 
 
 def _log_heavy_render_compute(name: str) -> None:
@@ -443,16 +448,55 @@ def _apply_today_styles() -> None:
             color: #0f2d52;
             margin-bottom: 4px;
         }
+        .today-insight-title-priority {
+            font-size: 1.08rem;
+            margin-bottom: 6px;
+        }
         .today-insight-line {
             color: #182b40;
             font-size: 0.93rem;
             line-height: 1.38;
             margin: 3px 0;
         }
+        .today-insight-line-priority {
+            font-size: 0.97rem;
+            line-height: 1.42;
+            margin: 4px 0;
+        }
         .today-insight-meta {
             color: #5d7693;
             font-size: 0.83rem;
             margin-top: 7px;
+        }
+        .today-priority-card-gap {
+            height: 6px;
+        }
+        .today-card-focus {
+            border: 2px solid #9bc2e8;
+            border-radius: 10px;
+            padding: 6px;
+            margin: 2px 0 10px;
+            background: #f4f9ff;
+        }
+        .today-completed-state {
+            border: 1px solid #b9e0be;
+            background: #f0fbf2;
+            color: #20603a;
+            border-radius: 10px;
+            padding: 8px 10px;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+        }
+        .today-focus-chip {
+            display: inline-block;
+            background: #e7f1fc;
+            color: #1e4f82;
+            border: 1px solid #c9dff4;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 0.74rem;
+            font-weight: 700;
+            margin-bottom: 6px;
         }
         .today-confidence-badge-low {
             display: inline-block;
@@ -516,6 +560,12 @@ def _apply_today_styles() -> None:
             margin-bottom: 10px;
             color: #5d7693;
             font-size: 0.92rem;
+        }
+        .today-update-indicator {
+            margin-top: -6px;
+            margin-bottom: 10px;
+            color: #5d7693;
+            font-size: 0.8rem;
         }
         .today-action-helper {
             margin-top: -4px;
@@ -1083,6 +1133,39 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
     finally:
         # Clear lock to allow future attempts
         st.session_state[recovery_lock_key] = False
+
+
+def _today_has_active_text_area_input() -> bool:
+    # Streamlit doesn't expose focused-widget state directly, so treat non-empty
+    # in-progress note fields as active editing and skip background refresh.
+    for key, value in dict(st.session_state).items():
+        key_text = str(key or "")
+        if not key_text:
+            continue
+        if key_text.endswith("_completion_note") or key_text.endswith("_exception_note"):
+            if bool(str(value or "").strip()):
+                return True
+    return False
+
+
+def _should_auto_refresh_signals() -> bool:
+    last_refresh = float(st.session_state.get("last_refresh", 0.0) or 0.0)
+    time_since = float(time.time()) - last_refresh
+    if "last_refresh" not in st.session_state or time_since > _TODAY_AUTO_REFRESH_MIN_SECONDS:
+        return True
+    return False
+
+
+def _updated_indicator_text() -> str:
+    last_refresh = float(st.session_state.get("last_refresh", 0.0) or 0.0)
+    if last_refresh <= 0:
+        return "Updated just now"
+    elapsed = max(0, int((time.time() - last_refresh) // 60))
+    if elapsed <= 0:
+        return "Updated just now"
+    if elapsed == 1:
+        return "Updated 1 min ago"
+    return f"Updated {elapsed} min ago"
 
 
 def _precomputed_payload_looks_stale(*, precomputed: dict[str, Any] | None, tenant_id: str, today_value: date) -> bool:
@@ -1820,9 +1903,9 @@ def _is_low_confidence_overdue_card(card: TodayQueueCardViewModel, line_5_text: 
 def _format_signal_status_label(signal_status: str) -> str:
     normalized = str(signal_status or "").strip().lower()
     if normalized == SIGNAL_STATUS_LOOKED_AT:
-        return "Looked at"
+        return "Completed"
     if normalized == SIGNAL_STATUS_NEEDS_FOLLOW_UP:
-        return "Needs follow-up"
+        return "Pending follow-up"
     return ""
 
 
@@ -1836,131 +1919,324 @@ def _action_state_chip(card: TodayQueueCardViewModel) -> str:
     )
 
 
-def _render_signal_status_controls(*, card: TodayQueueCardViewModel, key_prefix: str, status_map: dict[str, dict[str, str]]) -> None:
+def _save_today_card_completion(
+    *,
+    card: TodayQueueCardViewModel,
+    note_text: str,
+    follow_up_required: bool,
+    follow_up_at: datetime | None,
+    add_operational_exception: bool = False,
+    exception_type: str = "",
+    exception_note: str = "",
+    linked_existing_exception_id: str = "",
+    add_follow_through: bool = False,
+    follow_through_status: str = "logged",
+    follow_through_note: str = "",
+    link_follow_through_to_exception: bool = False,
+) -> bool:
     signal_key = str(getattr(card, "signal_key", "") or "").strip()
     employee_id = str(card.employee_id or "").strip()
-    if not signal_key or not employee_id:
-        return
-
-    current = dict(status_map.get(signal_key) or {})
-    current_status = _format_signal_status_label(str(current.get("status") or ""))
-    owner = str(current.get("owner") or "").strip()
-    if current_status:
-        owner_suffix = f" - {owner}" if owner else ""
-        st.markdown(
-            f'<div class="today-signal-status-chip">Status: {current_status}{owner_suffix}</div>',
-            unsafe_allow_html=True,
-        )
-
-    left, right, _ = st.columns([1.05, 1.4, 2.8])
-    with left:
-        looked_at_clicked = st.button(
-            "Looked at",
-            key=f"{key_prefix}_{signal_key}_looked_at",
-            use_container_width=True,
-            type="secondary",
-        )
-    with right:
-        follow_up_clicked = st.button(
-            "Needs follow-up",
-            key=f"{key_prefix}_{signal_key}_needs_follow_up",
-            use_container_width=True,
-            type="secondary",
-        )
-
-    selected = ""
-    if looked_at_clicked:
-        selected = SIGNAL_STATUS_LOOKED_AT
-    elif follow_up_clicked:
-        selected = SIGNAL_STATUS_NEEDS_FOLLOW_UP
-
-    if not selected:
+    clean_note = str(note_text or "").strip()
+    if not employee_id or not clean_note:
         return
 
     owner_value = str(st.session_state.get("user_email") or st.session_state.get("user_name") or "").strip()
     tenant_id = str(st.session_state.get("tenant_id") or "").strip()
-    saved = set_signal_status(
-        signal_key=signal_key,
+    user_role = str(st.session_state.get("user_role") or "").strip()
+    follow_up_due_date = follow_up_at.date().isoformat() if follow_up_required and follow_up_at else ""
+    due_at_label = follow_up_at.isoformat(timespec="minutes") if follow_up_required and follow_up_at else ""
+    linked_exception_id = ""
+    linked_existing_exception_id = str(linked_existing_exception_id or "").strip()
+
+    if add_operational_exception:
+        category = str(exception_type or "").strip()
+        exception_note_clean = str(exception_note or "").strip()
+        if not category or not exception_note_clean:
+            return False
+
+        line_1 = str(getattr(card, "line_1", "") or "").strip()
+        line_1_parts = [part.strip() for part in line_1.split("·") if str(part or "").strip()]
+        employee_name = line_1_parts[0] if line_1_parts else str(card.employee_id or "").strip()
+        department = str(getattr(card, "process_id", "") or "").strip()
+
+        summary_text = exception_note_clean.split("\n", 1)[0].strip() or "Operational exception linked from Today card"
+        created_exception = create_operational_exception(
+            category=category,
+            summary=summary_text,
+            employee_id=str(card.employee_id or "").strip(),
+            employee_name=employee_name,
+            department=department,
+            shift="",
+            process_name=department,
+            notes=exception_note_clean,
+            created_by=owner_value or "supervisor",
+            tenant_id=tenant_id,
+            user_role=user_role,
+        )
+        linked_exception_id = str((created_exception or {}).get("id") or "").strip()
+        if not linked_exception_id:
+            return False
+
+    resolved_exception_id = linked_exception_id or linked_existing_exception_id
+
+    details_lines = [
+        "Today queue completion",
+        f"signal_key={signal_key}",
+        f"follow_up_required={'yes' if follow_up_required else 'no'}",
+    ]
+    if due_at_label:
+        details_lines.append(f"follow_up_due_at={due_at_label}")
+    if resolved_exception_id:
+        details_lines.append(f"linked_exception_id={resolved_exception_id}")
+    details_lines.append(f"note={clean_note}")
+    details_payload = "\n".join(details_lines)
+
+    follow_through_saved = log_follow_through_event(
         employee_id=employee_id,
-        signal_status=selected,
-        owner=owner_value,
+        linked_exception_id=resolved_exception_id,
+        owner=owner_value or "supervisor",
+        status="pending" if follow_up_required else "done",
+        due_date=follow_up_due_date,
+        details=details_payload,
+        outcome="pending" if follow_up_required else "not_applicable",
         tenant_id=tenant_id,
     )
-    if saved:
-        _invalidate_today_write_caches()
-        set_flash_message("Marked reviewed." if selected == SIGNAL_STATUS_LOOKED_AT else "Flagged for follow-up.")
-        st.rerun()
 
+    secondary_follow_through_saved = True
+    clean_follow_through_note = str(follow_through_note or "").strip()
+    if add_follow_through and clean_follow_through_note:
+        secondary_follow_through_saved = bool(
+            log_follow_through_event(
+                employee_id=employee_id,
+                linked_exception_id=(resolved_exception_id if link_follow_through_to_exception else ""),
+                owner=owner_value or "supervisor",
+                status=str(follow_through_status or "logged"),
+                due_date=follow_up_due_date,
+                details=clean_follow_through_note,
+                outcome="pending" if follow_up_required else "not_applicable",
+                tenant_id=tenant_id,
+            )
+        )
 
-def _save_today_quick_note(*, card: TodayQueueCardViewModel, note_text: str) -> bool:
-    clean_note = str(note_text or "").strip()
-    employee_id = str(card.employee_id or "").strip()
-    if not clean_note or not employee_id:
-        return False
-
-    name_parts = str(card.line_1 or "").split(" · ")
-    employee_name = str(name_parts[0] or employee_id).strip() if name_parts else employee_id
-    department = str(card.process_id or (name_parts[1] if len(name_parts) > 1 else "")).strip()
-    performed_by = str(st.session_state.get("user_name") or st.session_state.get("user_email") or "").strip()
-    tenant_id = str(st.session_state.get("tenant_id") or "").strip()
+    # Preserve existing coaching journal history used by employee timelines.
     try:
-        expected_follow_up_date = (_tenant_today_value(tenant_id) + timedelta(days=7)).isoformat()
+        coaching_note = (
+            "reason=Today queue completion\n"
+            f"follow_up_required={'yes' if follow_up_required else 'no'}\n"
+            + (f"follow_up_due_at={due_at_label}\n" if due_at_label else "")
+            + clean_note
+        )
+        add_coaching_note(employee_id, coaching_note, owner_value or "supervisor")
     except Exception:
-        return False
+        pass
 
-    write_result = log_coaching_lifecycle_entry(
-        employee_id=employee_id,
-        employee_name=employee_name,
-        department=department,
-        reason="Today queue quick note",
-        action_taken=clean_note,
-        expected_follow_up_date=expected_follow_up_date,
-        performed_by=performed_by,
-        later_outcome="pending",
-        existing_action_id="",
-        tenant_id=tenant_id,
-        user_role=str(st.session_state.get("user_role") or ""),
-    )
-    if not write_result:
-        return False
+    status_saved = True
+    if signal_key:
+        status_saved = bool(
+            set_signal_status(
+                signal_key=signal_key,
+                employee_id=employee_id,
+                signal_status=SIGNAL_STATUS_LOOKED_AT,
+                owner=owner_value,
+                tenant_id=tenant_id,
+            )
+        )
 
-    _invalidate_today_write_caches()
-
-    # Preserve existing coaching journal flow while action lifecycle remains canonical.
-    journal_note = (
-        "reason=Today queue quick note\n"
-        f"expected_follow_up_date={expected_follow_up_date}\n"
-        "later_outcome=pending\n"
-        f"{clean_note}"
-    )
-    add_coaching_note(employee_id, journal_note, performed_by)
-    return True
+    return bool(follow_through_saved) and bool(secondary_follow_through_saved) and bool(status_saved)
 
 
-def _render_today_quick_note(*, card: TodayQueueCardViewModel, key_prefix: str) -> None:
+def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_prefix: str, status_map: dict[str, dict[str, str]]) -> None:
+    signal_key = str(getattr(card, "signal_key", "") or "").strip()
     employee_id = str(card.employee_id or "").strip()
     if not employee_id:
         return
 
-    note_key = f"{key_prefix}_{employee_id}_{card.process_id}_quick_note_text"
-    save_key = f"{key_prefix}_{employee_id}_{card.process_id}_quick_note_save"
-    with st.expander("Quick note", expanded=False):
-        note_text = st.text_area(
-            "Action note",
-            value=str(st.session_state.get(note_key) or ""),
-            key=note_key,
-            height=90,
-            placeholder="Log what you reviewed or changed.",
+    note_key = f"{key_prefix}_{employee_id}_{card.process_id}_completion_note"
+    follow_up_key = f"{key_prefix}_{employee_id}_{card.process_id}_follow_up_needed"
+    due_date_key = f"{key_prefix}_{employee_id}_{card.process_id}_follow_up_date"
+    due_time_key = f"{key_prefix}_{employee_id}_{card.process_id}_follow_up_time"
+    add_more_details_key = f"{key_prefix}_{employee_id}_{card.process_id}_add_more_details"
+    add_exception_key = f"{key_prefix}_{employee_id}_{card.process_id}_add_exception"
+    exception_type_key = f"{key_prefix}_{employee_id}_{card.process_id}_exception_type"
+    exception_note_key = f"{key_prefix}_{employee_id}_{card.process_id}_exception_note"
+    submit_key = f"{key_prefix}_{employee_id}_{card.process_id}_complete"
+
+    note_text = st.text_area(
+        "Note (required)",
+        value=str(st.session_state.get(note_key) or ""),
+        key=note_key,
+        height=90,
+        placeholder="Describe what happened and what was completed.",
+    )
+
+    follow_up_choice = st.selectbox(
+        "Follow-up needed? (required)",
+        options=["Select one", "Yes", "No"],
+        index=0,
+        key=follow_up_key,
+    )
+
+    follow_up_due_at: datetime | None = None
+    if follow_up_choice == "Yes":
+        c1, c2 = st.columns(2)
+        with c1:
+            due_date = st.date_input(
+                "Follow-up date",
+                value=date.today() + timedelta(days=7),
+                key=due_date_key,
+            )
+        with c2:
+            due_time = st.time_input(
+                "Follow-up time",
+                value=dt_time(hour=9, minute=0),
+                key=due_time_key,
+            )
+        follow_up_due_at = datetime.combine(due_date, due_time)
+
+    add_operational_exception = False
+    selected_exception_type = ""
+    operational_exception_note = ""
+    linked_existing_exception_id = ""
+    add_follow_through = False
+    selected_follow_through_status = "logged"
+    follow_through_note = ""
+    link_follow_through_to_exception = False
+
+    tenant_id = str(st.session_state.get("tenant_id") or "").strip()
+    exception_rows: list[dict[str, Any]] = []
+    try:
+        exception_rows = list((summarize_open_operational_exceptions(tenant_id=tenant_id) or {}).get("rows") or [])[:25]
+    except Exception:
+        exception_rows = []
+
+    exception_options = {"Select exception": ""}
+    for row in exception_rows:
+        row_id = str(row.get("id") or "").strip()
+        row_summary = str(row.get("summary") or "Operational exception").strip()
+        if not row_id:
+            continue
+        exception_options[f"#{row_id[:8]} - {row_summary[:70]}"] = row_id
+
+    with st.expander("More actions", expanded=False):
+        st.session_state[add_more_details_key] = True
+        add_operational_exception = st.checkbox(
+            "Add operational exception",
+            value=bool(st.session_state.get(add_exception_key, False)),
+            key=add_exception_key,
         )
-        if st.button("Save quick note", key=save_key, use_container_width=True, type="secondary"):
-            if not str(note_text or "").strip():
-                st.warning("Write a quick note before saving.")
-            elif _save_today_quick_note(card=card, note_text=note_text):
-                st.session_state[note_key] = ""
-                set_flash_message("Quick note saved.")
-                st.rerun()
-            else:
-                show_error_state("Quick note could not be saved right now.")
+        if add_operational_exception:
+            selected_exception_type = st.selectbox(
+                "Exception type",
+                options=list(EXCEPTION_CATEGORIES),
+                key=exception_type_key,
+            )
+            operational_exception_note = st.text_area(
+                "Exception note",
+                value=str(st.session_state.get(exception_note_key) or ""),
+                key=exception_note_key,
+                height=70,
+                placeholder="Brief context for the exception.",
+            )
+
+        link_existing_exception = st.checkbox(
+            "Link to existing exception",
+            value=False,
+            key=f"{key_prefix}_{employee_id}_{card.process_id}_link_existing_exception",
+        )
+        if link_existing_exception:
+            linked_exception_label = st.selectbox(
+                "Existing exception",
+                options=list(exception_options.keys()),
+                key=f"{key_prefix}_{employee_id}_{card.process_id}_existing_exception_choice",
+            )
+            linked_existing_exception_id = str(exception_options.get(linked_exception_label) or "").strip()
+
+        add_follow_through = st.checkbox(
+            "Add follow-through",
+            value=False,
+            key=f"{key_prefix}_{employee_id}_{card.process_id}_add_follow_through",
+        )
+        if add_follow_through:
+            selected_follow_through_status = st.selectbox(
+                "Follow-through status",
+                options=list(FOLLOW_THROUGH_STATUSES),
+                index=0,
+                key=f"{key_prefix}_{employee_id}_{card.process_id}_follow_through_status",
+            )
+            follow_through_note = st.text_area(
+                "Follow-through note",
+                value=str(st.session_state.get(f"{key_prefix}_{employee_id}_{card.process_id}_follow_through_note") or ""),
+                key=f"{key_prefix}_{employee_id}_{card.process_id}_follow_through_note",
+                height=70,
+                placeholder="Add a short follow-through update.",
+            )
+            link_follow_through_to_exception = st.checkbox(
+                "Link follow-through to exception",
+                value=False,
+                key=f"{key_prefix}_{employee_id}_{card.process_id}_link_follow_through_to_exception",
+            )
+
+    has_note = bool(str(note_text or "").strip())
+    has_follow_up_selection = follow_up_choice in {"Yes", "No"}
+    can_submit = has_note and has_follow_up_selection
+
+    if st.button(
+        "Mark as complete",
+        key=submit_key,
+        use_container_width=True,
+        type="primary",
+        disabled=not can_submit,
+    ):
+        if not has_note:
+            st.warning("A note is required.")
+            return
+        if not has_follow_up_selection:
+            st.warning("Choose whether follow-up is needed.")
+            return
+        if add_operational_exception and not str(operational_exception_note or "").strip():
+            st.warning("Add an exception note before completing.")
+            return
+        if bool(st.session_state.get(f"{key_prefix}_{employee_id}_{card.process_id}_link_existing_exception", False)) and not linked_existing_exception_id:
+            st.warning("Select an existing exception to link.")
+            return
+        if add_follow_through and not str(follow_through_note or "").strip():
+            st.warning("Add a follow-through note before completing.")
+            return
+        if link_follow_through_to_exception and not (linked_existing_exception_id or add_operational_exception):
+            st.warning("Create or link an exception before linking follow-through.")
+            return
+
+        card_session_key = _today_card_session_key(card)
+        if _save_today_card_completion(
+            card=card,
+            note_text=note_text,
+            follow_up_required=follow_up_choice == "Yes",
+            follow_up_at=follow_up_due_at,
+            add_operational_exception=bool(add_operational_exception),
+            exception_type=selected_exception_type,
+            exception_note=operational_exception_note,
+            linked_existing_exception_id=linked_existing_exception_id,
+            add_follow_through=bool(add_follow_through),
+            follow_through_status=selected_follow_through_status,
+            follow_through_note=follow_through_note,
+            link_follow_through_to_exception=bool(link_follow_through_to_exception),
+        ):
+            completed_items = list(st.session_state.get(_TODAY_COMPLETED_ITEMS_SESSION_KEY) or [])
+            if card_session_key and card_session_key not in completed_items:
+                completed_items.append(card_session_key)
+            st.session_state[_TODAY_COMPLETED_ITEMS_SESSION_KEY] = completed_items
+            st.session_state[_TODAY_LAST_COMPLETED_LABEL_KEY] = str(card.line_1 or card.employee_id or "Item")
+            st.session_state[_TODAY_FOCUS_NEXT_CARD_KEY] = True
+            st.session_state[note_key] = ""
+            st.session_state[follow_up_key] = "Select one"
+            st.session_state[add_more_details_key] = False
+            st.session_state[add_exception_key] = False
+            st.session_state[exception_note_key] = ""
+            _invalidate_today_write_caches()
+            set_flash_message("Action completed.")
+            st.rerun()
+        else:
+            show_error_state("Action completion could not be saved right now.")
 
 
 def _render_attention_card(
@@ -1968,17 +2244,29 @@ def _render_attention_card(
     card: TodayQueueCardViewModel,
     key_prefix: str,
     compact: bool = False,
+    emphasize: bool = False,
+    focused: bool = False,
     show_action: bool = True,
     signal_status_map: dict[str, dict[str, str]] | None = None,
 ) -> None:
+    del show_action
+    title_class = "today-insight-title today-insight-title-priority" if emphasize else "today-insight-title"
+    line_class = "today-insight-line today-insight-line-priority" if emphasize else "today-insight-line"
+
+    if focused:
+        st.markdown('<div class="today-focus-chip">Next up</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-card-focus">', unsafe_allow_html=True)
+
     with st.container(border=True):
-        st.markdown(f'<div class="today-insight-title">{card.line_1}</div>', unsafe_allow_html=True)
-        action_state_chip = _action_state_chip(card)
-        if action_state_chip:
-            st.markdown(action_state_chip, unsafe_allow_html=True)
-        st.markdown(f'<div class="today-insight-line">{card.line_2}</div>', unsafe_allow_html=True)
-        if str(card.line_3 or "").strip():
-            st.markdown(f'<div class="today-insight-line">{card.line_3}</div>', unsafe_allow_html=True)
+        line_1_text = str(card.line_1 or "").strip()
+        employee_name, department_name = (line_1_text.split("·", 1) + [""])[:2] if "·" in line_1_text else (line_1_text, "")
+        employee_name = str(employee_name or "").strip()
+        department_name = str(department_name or "").strip()
+
+        st.markdown(f'<div class="{title_class}">{employee_name or line_1_text}</div>', unsafe_allow_html=True)
+        if department_name:
+            st.markdown(f'<div class="today-insight-meta">{department_name}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="{line_class}">{card.line_2}</div>', unsafe_allow_html=True)
 
         line_5_text = str(card.line_5 or "").strip()
         freshness_text = str(card.freshness_line or "").strip()
@@ -1995,53 +2283,37 @@ def _render_attention_card(
             if freshness_text:
                 st.markdown(f'<div class="today-freshness-meta">{freshness_text}</div>', unsafe_allow_html=True)
         else:
-            if freshness_text:
-                st.markdown(f'<div class="today-insight-meta">{freshness_text}</div>', unsafe_allow_html=True)
+            if line_5_text or freshness_text:
+                confidence_freshness = f"{line_5_text} · {freshness_text}" if line_5_text and freshness_text else line_5_text or freshness_text
+                st.markdown(f'<div class="today-insight-meta">{confidence_freshness}</div>', unsafe_allow_html=True)
 
-        if str(card.line_4 or "").strip():
-            st.markdown(f'<div class="today-insight-line">{card.line_4}</div>', unsafe_allow_html=True)
+        if compact and str(card.line_3 or "").strip():
+            st.markdown(f'<div class="today-insight-meta">{card.line_3}</div>', unsafe_allow_html=True)
 
-        last_action_label = str(getattr(card, "last_action_date_label", "") or "").strip()
-        if last_action_label:
-            st.markdown(f'<div class="today-insight-meta">{last_action_label}</div>', unsafe_allow_html=True)
-
-        collapsed_hint = str(getattr(card, "collapsed_hint", "") or "").strip()
-        if collapsed_hint:
-            st.markdown(f'<div class="today-insight-meta">{collapsed_hint}</div>', unsafe_allow_html=True)
-        collapsed_evidence = str(getattr(card, "collapsed_evidence", "") or "").strip()
-        line_4_text = str(card.line_4 or "").strip().lower()
-        if collapsed_evidence and collapsed_evidence.strip().lower() != line_4_text:
-            st.markdown(f'<div class="today-insight-meta">{collapsed_evidence}</div>', unsafe_allow_html=True)
-        collapsed_issue = str(getattr(card, "collapsed_issue", "") or "").strip()
-        if collapsed_issue:
-            st.markdown(f'<div class="today-insight-meta">{collapsed_issue}</div>', unsafe_allow_html=True)
-
-        if not compact and card.expanded_lines:
-            with st.expander("Why this is shown", expanded=False):
-                for line in card.expanded_lines[:3]:
-                    st.write(line)
-
-        if signal_status_map is not None:
-            _render_signal_status_controls(
+        if signal_status_map is not None and not compact:
+            _render_guided_completion_controls(
                 card=card,
-                key_prefix=f"{key_prefix}_status",
+                key_prefix=f"{key_prefix}_complete",
                 status_map=signal_status_map,
             )
 
-        if not compact:
-            _render_today_quick_note(card=card, key_prefix=f"{key_prefix}_quick_note")
+    if focused:
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        if show_action:
-            if st.button(
-                "View details →",
-                key=f"{key_prefix}_{card.employee_id}_{card.process_id}",
-                use_container_width=False,
-                type="secondary",
-            ):
-                st.session_state["goto_page"] = "team"
-                st.session_state["emp_view"] = "Performance Journal"
-                st.session_state["cn_selected_emp"] = card.employee_id
-                st.rerun()
+    if emphasize:
+        st.markdown('<div class="today-priority-card-gap"></div>', unsafe_allow_html=True)
+
+
+def _today_card_session_key(card: TodayQueueCardViewModel) -> str:
+    signal_key = str(getattr(card, "signal_key", "") or "").strip()
+    if signal_key:
+        return f"signal:{signal_key}"
+    employee_id = str(getattr(card, "employee_id", "") or "").strip()
+    process_id = str(getattr(card, "process_id", "") or "").strip()
+    state = str(getattr(card, "state", "") or "").strip()
+    line_1 = str(getattr(card, "line_1", "") or "").strip()
+    return f"card:{employee_id}:{process_id}:{state}:{line_1}".strip(":")
+
 
 
 def _render_unified_attention_queue(
@@ -2070,20 +2342,16 @@ def _render_unified_attention_queue(
         action_state_lookup=action_state_lookup,
     )
 
-    st.markdown(f'<div class="today-section-label">{plan.section_title}</div>', unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="today-supporting-note">{plan.start_note}</div>',
-        unsafe_allow_html=True,
-    )
-    if plan.primary_cards or plan.secondary_cards:
-        st.markdown(
-            '<div class="today-action-helper">Mark signals to track what you\'ve reviewed.</div>',
-            unsafe_allow_html=True,
-        )
+    ranked_cards = list(plan.primary_cards or []) + list(plan.secondary_cards or [])
+    completed_items = {
+        str(item or "").strip()
+        for item in list(st.session_state.get(_TODAY_COMPLETED_ITEMS_SESSION_KEY) or [])
+        if str(item or "").strip()
+    }
 
     all_signal_keys = {
         str(getattr(card, "signal_key", "") or "").strip()
-        for card in (list(plan.primary_cards) + list(plan.secondary_cards))
+        for card in ranked_cards
         if str(getattr(card, "signal_key", "") or "").strip()
     }
     signal_status_map = _cached_today_signal_status_map(
@@ -2092,25 +2360,48 @@ def _render_unified_attention_queue(
         today_iso=date.today().isoformat(),
     )
 
-    if plan.primary_placeholder:
+    active_ranked_cards: list[TodayQueueCardViewModel] = []
+    for card in ranked_cards:
+        card_key = _today_card_session_key(card)
+        if card_key in completed_items:
+            continue
+        signal_key = str(getattr(card, "signal_key", "") or "").strip()
+        if signal_key:
+            persisted_status = str((signal_status_map.get(signal_key) or {}).get("status") or "").strip().lower()
+            if persisted_status == SIGNAL_STATUS_LOOKED_AT:
+                continue
+        active_ranked_cards.append(card)
+
+    top_cards = active_ranked_cards[:_TODAY_QUEUE_DEFAULT_VISIBLE_CARDS]
+    overflow_cards = active_ranked_cards[_TODAY_QUEUE_DEFAULT_VISIBLE_CARDS:]
+
+    completed_label = str(st.session_state.pop(_TODAY_LAST_COMPLETED_LABEL_KEY, "") or "").strip()
+    if completed_label:
+        st.markdown(f'<div class="today-completed-state">Completed: {completed_label}</div>', unsafe_allow_html=True)
+
+    if not active_ranked_cards and plan.primary_placeholder:
         st.markdown(f'<div class="today-placeholder">{plan.primary_placeholder}</div>', unsafe_allow_html=True)
     else:
-        for idx, card in enumerate(plan.primary_cards):
+        st.markdown('<div class="today-section-label">Handle these first</div>', unsafe_allow_html=True)
+        focus_next_card = bool(st.session_state.pop(_TODAY_FOCUS_NEXT_CARD_KEY, False))
+        for idx, card in enumerate(top_cards):
             _render_attention_card(
                 card=card,
                 key_prefix=f"today_attention_primary_{idx}",
+                emphasize=True,
+                focused=bool(focus_next_card and idx == 0),
                 signal_status_map=signal_status_map,
             )
 
-    if plan.secondary_cards:
-        st.markdown(f'<div class="today-secondary-subcaption">{plan.secondary_caption}</div>', unsafe_allow_html=True)
-        with st.expander("Other items", expanded=bool(plan.secondary_expanded)):
-            for idx, card in enumerate(plan.secondary_cards[:20]):
+    if overflow_cards:
+        overflow_caption = str(plan.secondary_caption or "").strip() or "Remaining queue items"
+        st.markdown(f'<div class="today-secondary-subcaption">{overflow_caption}</div>', unsafe_allow_html=True)
+        with st.expander("Other items", expanded=False):
+            for idx, card in enumerate(overflow_cards):
                 _render_attention_card(
                     card=card,
                     key_prefix=f"today_attention_other_{idx}",
                     compact=True,
-                    show_action=False,
                     signal_status_map=signal_status_map,
                 )
 
@@ -2615,43 +2906,20 @@ def page_today() -> None:
 
                 _show_flash_message()
 
-            refresh_col, _ = st.columns([1, 4])
-            with refresh_col:
-                if st.button("Refresh signals", key="today_refresh_precomputed_signals", use_container_width=True):
-                    try:
-                        from services.daily_signals_service import build_transient_today_payload, compute_daily_signals
-
-                        with profile.stage("manual_refresh"):
-                            loading_slot = st.empty()
-                            with loading_slot.container():
-                                show_loading_state("Refreshing precomputed signals for Today…")
-                            with st.spinner("Refreshing signals…"):
-                                _tenant = str(st.session_state.get("tenant_id", "") or "")
-                                try:
-                                    compute_daily_signals(
-                                        signal_date=today_value,
-                                        tenant_id=_tenant,
-                                    )
-                                    profile.query(count=1)
-                                except Exception as _compute_err:
-                                    _msg = str(_compute_err or "")
-                                    if "daily_signals" in _msg or "PGRST205" in _msg:
-                                        st.session_state["_today_precomputed_payload"] = build_transient_today_payload(
-                                            signal_date=today_value,
-                                            tenant_id=_tenant,
-                                        )
-                                    else:
-                                        raise
-                            loading_slot.empty()
-                            if hasattr(get_today_signals, "cache_clear"):
-                                get_today_signals.cache_clear()
-                            elif hasattr(get_today_signals, "clear"):
-                                get_today_signals.clear()
-                        st.success("Signals refreshed.")
-                        st.rerun()
-                    except Exception as _refresh_err:
-                        show_error_state(f"Signal refresh failed: {_refresh_err}")
-                        return
+            with profile.stage("auto_refresh"):
+                tenant_id = str(st.session_state.get("tenant_id", "") or "")
+                refresh_due = _should_auto_refresh_signals()
+                skip_due_to_input = _today_has_active_text_area_input()
+                profile.set("auto_refresh_due", bool(refresh_due))
+                profile.set("auto_refresh_skipped_active_input", bool(skip_due_to_input))
+                if refresh_due and not skip_due_to_input:
+                    st.session_state["_today_auto_refresh_running"] = True
+                    refreshed = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
+                    st.session_state["_today_auto_refresh_running"] = False
+                    st.session_state["last_refresh"] = float(time.time())
+                    st.session_state["_today_last_refresh_success"] = bool(refreshed)
+                elif "last_refresh" not in st.session_state:
+                    st.session_state["last_refresh"] = float(time.time())
 
             try:
                 tenant_id = str(st.session_state.get("tenant_id", "") or "")
@@ -2713,7 +2981,7 @@ def page_today() -> None:
                                 precomputed = _load_today_signals()
 
                         if not precomputed:
-                            st.info("Today's queue is still preparing. Use Refresh signals if this does not clear shortly.")
+                            st.info("Today's queue is still preparing. It refreshes automatically.")
                             return
 
                     queue_items = list(precomputed.get("queue_items") or [])
@@ -2781,9 +3049,8 @@ def page_today() -> None:
                 queue_count=int(counts.get("all", 0) or 0),
             )
 
+            return_trigger = None
             with profile.stage("render_header"):
-                _render_top_status_area(meaning=meaning)
-                return_trigger = None
                 should_load_previous_payload = _should_load_previous_payload_for_return_trigger(
                     queue_items=queue_items,
                     today_value=today_value,
@@ -2803,7 +3070,6 @@ def page_today() -> None:
                     )
                 else:
                     profile.set("header_previous_payload_skipped", True)
-                _render_return_trigger(return_trigger)
 
             signal_mode = meaning.signal_mode
             snapshot_cards = None
@@ -2974,8 +3240,8 @@ def page_today() -> None:
             ):
                 orientation_state = TodaySurfaceState.EARLY_SIGNAL
 
+            orientation_model = build_queue_orientation(attention_summary)
             with profile.stage("render_queue_orientation"):
-                orientation_model = build_queue_orientation(attention_summary)
                 if decision_summary.ranked_items:
                     orientation_model = build_queue_orientation(decision_summary)
                 if snapshot_cards and orientation_model.total_shown <= 0:
@@ -2988,13 +3254,14 @@ def page_today() -> None:
                         total_evaluated=orientation_model.total_evaluated,
                     )
 
-                _render_queue_orientation_block(
-                    orientation_model,
-                    meaning=meaning,
-                    surface_state=orientation_state,
-                    signal_mode=signal_mode,
-                )
-
+            attention_strip = TodayAttentionStripViewModel(
+                total_needing_attention=0,
+                new_today=0,
+                overdue_follow_ups=0,
+                reviewed_today=0,
+                touchpoints_logged_today=0,
+                follow_ups_scheduled_today=0,
+            )
             with profile.stage("weekly_activity"):
                 rendered_card_count = _today_rendered_card_count(plan=render_plan)
                 profile.set("weekly_activity_rendered_cards", int(rendered_card_count))
@@ -3026,14 +3293,33 @@ def page_today() -> None:
                 profile.set("weekly_activity_cache_hit", int(weekly_activity_cache_hit))
                 profile.set("weekly_activity_cache_miss", int(weekly_activity_cache_miss))
 
-            with profile.stage("render_queue"):
                 attention_strip = build_today_attention_strip(
                     attention=decision_summary,
                     queue_items=queue_items,
                     today=today_value,
                     same_day_activity=weekly_activity,
                 )
-                _render_attention_summary_strip(attention_strip)
+
+            weekly_summary = TodayWeeklySummaryViewModel(items=[])
+            with profile.stage("render_weekly_summary"):
+                weekly_summary = build_today_weekly_summary_view_model(
+                    reviewed_issues=int(weekly_activity.get("reviewed_issues", 0) or 0),
+                    follow_up_touchpoints=int(weekly_activity.get("follow_up_touchpoints", 0) or 0),
+                    closed_issues=int(weekly_activity.get("closed_issues", 0) or 0),
+                    improved_outcomes=int(weekly_activity.get("improved_outcomes", 0) or 0),
+                )
+
+            with profile.stage("render_queue"):
+                ranked_cards = list(render_plan.primary_cards or []) + list(render_plan.secondary_cards or [])
+                people_needing_attention = len(
+                    {
+                        str(getattr(card, "employee_id", "") or "").strip()
+                        for card in ranked_cards
+                        if str(getattr(card, "employee_id", "") or "").strip()
+                    }
+                )
+                st.markdown(f"## Today: {people_needing_attention} people need your attention")
+                st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
 
                 _render_unified_attention_queue(
                     decision_summary,
@@ -3048,43 +3334,31 @@ def page_today() -> None:
                     render_plan=render_plan,
                 )
 
-            with profile.stage("render_weekly_summary"):
-                weekly_summary = build_today_weekly_summary_view_model(
-                    reviewed_issues=int(weekly_activity.get("reviewed_issues", 0) or 0),
-                    follow_up_touchpoints=int(weekly_activity.get("follow_up_touchpoints", 0) or 0),
-                    closed_issues=int(weekly_activity.get("closed_issues", 0) or 0),
-                    improved_outcomes=int(weekly_activity.get("improved_outcomes", 0) or 0),
-                )
-                _render_weekly_summary_block(weekly_summary)
-
-            _supporting_context_key = "_today_supporting_context_loaded"
-            if bool(st.session_state.get("_first_import_just_completed")):
-                st.session_state[_supporting_context_key] = True
-
             with profile.stage("supporting_context"):
-                _show_supporting_context = bool(st.session_state.get(_supporting_context_key, False))
-                if _show_supporting_context:
-                    value_strip = build_today_value_strip_view_model(
-                        goal_status=goal_status,
-                        import_summary=meaning.import_summary,
+                value_strip = build_today_value_strip_view_model(
+                    goal_status=goal_status,
+                    import_summary=meaning.import_summary,
+                )
+                profile.set("supporting_context_cards", len(value_strip.cards or []))
+
+                with st.expander("Supporting context", expanded=False):
+                    _render_top_status_area(meaning=meaning)
+                    _render_return_trigger(return_trigger)
+                    _render_queue_orientation_block(
+                        orientation_model,
+                        meaning=meaning,
+                        surface_state=orientation_state,
+                        signal_mode=signal_mode,
                     )
-                    profile.set("supporting_context_cards", len(value_strip.cards or []))
+                    _render_attention_summary_strip(attention_strip)
+                    _render_weekly_summary_block(weekly_summary)
                     if value_strip.cards:
-                        with st.expander("Supporting context", expanded=bool(st.session_state.get("_first_import_just_completed"))):
-                            _render_today_value_strip(
-                                value_strip,
-                                freshness_note=meaning.freshness_note,
-                                is_stale=bool(meaning.state_flags.get("stale_data")),
-                                subdued=True,
-                            )
-                            if st.button("Hide supporting context", key="today_hide_supporting_context", type="secondary"):
-                                st.session_state[_supporting_context_key] = False
-                                st.rerun()
-                else:
-                    st.info("Supporting context is available on demand to keep Today reruns responsive.")
-                    if st.button("Load supporting context", key="today_load_supporting_context", type="secondary"):
-                        st.session_state[_supporting_context_key] = True
-                        st.rerun()
+                        _render_today_value_strip(
+                            value_strip,
+                            freshness_note=meaning.freshness_note,
+                            is_stale=bool(meaning.state_flags.get("stale_data")),
+                            subdued=True,
+                        )
 
             if bool(st.session_state.get("_first_import_just_completed")):
                 st.session_state["_first_import_just_completed"] = False

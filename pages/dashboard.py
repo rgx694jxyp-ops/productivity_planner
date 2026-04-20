@@ -208,15 +208,15 @@ def page_dashboard():
             unsafe_allow_html=True,
         )
         _sb1, _sb2, _sb3 = st.columns(3)
-        if _sb1.button("▶ Coach first selected", key="dash_sel_coach", type="primary", use_container_width=True):
-            st.session_state["goto_page"] = "employees"
-            st.session_state["emp_view"] = "Performance Journal"
+        if _sb1.button("View first in Team", key="dash_sel_coach", type="primary", use_container_width=True):
+            st.session_state["goto_page"] = "team"
             st.session_state["cn_selected_emp"] = _sel_items[0]["emp_id"]
+            st.session_state["team_selected_emp_id"] = _sel_items[0]["emp_id"]
             st.rerun()
-        if _sb2.button("📝 Add note to first", key="dash_sel_note", use_container_width=True):
-            st.session_state["goto_page"] = "employees"
-            st.session_state["emp_view"] = "Performance Journal"
+        if _sb2.button("View history", key="dash_sel_note", use_container_width=True):
+            st.session_state["goto_page"] = "team"
             st.session_state["cn_selected_emp"] = _sel_items[0]["emp_id"]
+            st.session_state["team_selected_emp_id"] = _sel_items[0]["emp_id"]
             st.rerun()
         # Export selected
         _sel_df = df[df["Name"].isin(_sel_names)]
