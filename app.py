@@ -1,4 +1,4 @@
-"""Productivity Planner entrypoint.
+"""Pulse Ops entrypoint.
 
 Run with:
     streamlit run app.py

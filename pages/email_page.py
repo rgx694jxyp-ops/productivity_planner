@@ -75,7 +75,7 @@ def page_email():
                     with st.spinner("Sending test email…"):
                         ok, err = send_report_email(
                             [_to],
-                            "Productivity Planner — Resend Test",
+                            "Pulse Ops — Resend Test",
                             "<p>Your Resend configuration is working correctly.</p>",
                         )
                     if ok:
@@ -128,7 +128,7 @@ def page_email():
 3. Under *"How you sign in to Google"*, click **2-Step Verification** and turn it on if it's off
 4. Go back to the Security page and type **"App passwords"** in the search bar at the top — it won't appear in the menu, search is the only way to find it
 5. Click **App passwords** in the results
-6. Type a name like **Productivity Planner** and click **Create**
+6. Type a name like **Pulse Ops** and click **Create**
 7. Google shows you a **16-character password** — copy it immediately, you won't see it again
 8. Paste it into the **App password** field below
 
@@ -161,7 +161,7 @@ def page_email():
 3. Click **Account Security** in the left sidebar
 4. Make sure **Two-step verification** is turned on — if it's off, click it and follow the prompts to enable it
 5. Scroll down and click **Generate app password** (or "Manage app passwords")
-6. Select **Other app** from the dropdown and type **Productivity Planner**
+6. Select **Other app** from the dropdown and type **Pulse Ops**
 7. Click **Generate**
 8. Yahoo shows you a **16-character password** — copy it immediately, you won't see it again
 9. Paste it into the **App password** field below
@@ -254,7 +254,7 @@ App passwords are typically 16 characters and look like: **abcd efgh ijkl mnop**
                     with st.spinner("Sending test email to yourself…"):
                         ok, err = send_report_email(
                             [cfg2["username"]],
-                            "Productivity Planner — Test Email",
+                            "Pulse Ops — Test Email",
                             "<p>Your email configuration is working correctly! 🎉</p>",
                         )
                     if ok:

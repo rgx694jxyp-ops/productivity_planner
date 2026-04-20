@@ -1,4 +1,4 @@
-# Productivity Planner — Setup Guide
+# Pulse Ops — Setup Guide
 
 ## Prerequisites
 

@@ -15,7 +15,7 @@ from styles import apply_global_styles
 
 
 PAGE_CONFIG = {
-    "page_title": "Productivity Planner",
+    "page_title": "Pulse Ops",
     "page_icon": "📦",
     "layout": "wide",
     "initial_sidebar_state": "collapsed",

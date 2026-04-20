@@ -433,7 +433,7 @@ def subscription_page(render_sign_out_button_cb, full_sign_out_cb):
       <div style="background:#0F2D52;border-radius:12px;padding:28px 36px;margin-bottom:8px;">
         <div style="font-size:26px;margin-bottom:4px;">📦</div>
         <div style="font-size:20px;font-weight:700;color:#fff;letter-spacing:-.02em;">
-          Productivity Planner
+                    Pulse Ops
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-# Productivity Planner — Architecture Overview
+# Pulse Ops — Architecture Overview
 
 Last updated: 2026-04-10
 Branch: stabilization-architecture-pass

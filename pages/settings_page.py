@@ -345,7 +345,7 @@ def page_settings():
             )
             _log_app_error("billing", f"Billing tab load failed: {_sub_err}", detail=traceback.format_exc())
 
-    st.caption("Productivity Planner · Powered by Supply Chain Automation Co")
+    st.caption("Pulse Ops · Supervisor operations signals by Supply Chain Automation Co")
 
     with tab_team:
         # ── Team Members & Invite ──────────────────────────────────────────────

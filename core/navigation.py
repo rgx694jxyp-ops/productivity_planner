@@ -181,8 +181,11 @@ def render_sidebar() -> str:
             """
 <div style="padding:8px 0 20px;">
   <div style="font-size:19px;font-weight:700;color:#fff;letter-spacing:-.02em;line-height:1.15;">
-    📦 Productivity<br>Planner
+        📦 Pulse<br>Ops
   </div>
+    <div style="font-size:11px;color:#9FB8D1;line-height:1.35;margin-top:6px;">
+        Know what needs attention now
+    </div>
 </div>""",
             unsafe_allow_html=True,
         )
@@ -236,7 +239,7 @@ def render_sidebar() -> str:
 
         toggle_simple_mode()
         if st.session_state.get("simple_mode"):
-            st.caption("Simple Mode keeps the app focused on who needs attention right now.")
+            st.caption("Simple Mode keeps Pulse Ops focused on active floor signals.")
 
         plan_display = plan.capitalize() if plan != "admin" else "Admin"
         plan_color = {"starter": "#888", "pro": "#1E90FF", "business": "#FFD700", "admin": "#FF6347"}.get(plan, "#888")
@@ -267,7 +270,7 @@ def render_sidebar() -> str:
             st.rerun()
 
         st.markdown(
-            '<div style="font-size:10px;color:#3D5A7A;line-height:1.7;">Productivity Planner · v3.0</div>',
+            '<div style="font-size:10px;color:#3D5A7A;line-height:1.7;">Pulse Ops v3.0</div>',
             unsafe_allow_html=True,
         )
     return page

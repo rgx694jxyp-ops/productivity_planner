@@ -1,6 +1,6 @@
 -- ============================================================================
 -- 001_setup.sql
--- Multi-tenant setup for DPD Web (Streamlit Productivity Planner)
+-- Multi-tenant setup for DPD Web (Streamlit Pulse Ops)
 --
 -- Safe to run multiple times (uses IF NOT EXISTS / DO $$ blocks throughout).
 -- Adds tenant_id columns, RLS policies, new tenant config tables, and

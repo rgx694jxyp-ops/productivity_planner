@@ -213,7 +213,7 @@ def check_access() -> bool:
     <div style="max-width:400px;margin:80px auto;background:#fff;
                 border:1px solid #E2EBF4;border-radius:12px;padding:36px;">
       <div style="font-size:22px;font-weight:700;color:#0F2D52;
-                  margin-bottom:24px;">📦 Productivity Planner</div>
+                  margin-bottom:24px;">📦 Pulse Ops</div>
     </div>""",
         unsafe_allow_html=True,
     )
@@ -261,8 +261,11 @@ def login_page(bust_cache_cb, log_app_error_cb):  # noqa: C901
       <div style="background:#0F2D52;border-radius:12px;padding:32px 36px;">
         <div style="font-size:28px;margin-bottom:4px;">📦</div>
         <div style="font-size:20px;font-weight:700;color:#fff;letter-spacing:-.02em;">
-          Productivity Planner
+                    Pulse Ops
         </div>
+                <div style="font-size:12px;color:#BDD7EE;margin-top:6px;">
+                    Supervisor signal and action workflow
+                </div>
       </div>
     </div>
     """,
