@@ -351,6 +351,14 @@ def test_build_employee_action_state_lookup_valid_tenant_zero_actions_skips_full
     assert context["followups_query_skipped"] is True
     assert context["query_count"] == 3
     assert context["visible_db_rows"] == 0
+    assert int(context["actions_query_ms"]) >= 0
+    assert int(context["generic_employee_events_probe_ms"]) >= 0
+    assert int(context["followups_probe_ms"]) >= 0
+    assert int(context["service_work_ms"]) >= 0
+    assert int(context["total_wall_ms"]) >= int(context["service_work_ms"])
+    assert int(context["perf_emit_overhead_ms"]) == (
+        int(context["total_wall_ms"]) - int(context["service_work_ms"])
+    )
 
 
 def test_build_employee_action_state_lookup_valid_tenant_zero_actions_partially_skips_standalone_reads(monkeypatch):

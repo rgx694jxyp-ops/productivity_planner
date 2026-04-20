@@ -173,6 +173,8 @@ def list_action_events_for_employee_ids(
     newest_first: bool = False,
     columns: str = "*",
     exists_only: bool = False,
+    from_date: str = "",
+    to_date: str = "",
 ) -> list[dict]:
     tid = tenant_id or get_tenant_id()
     if not tid:
@@ -191,6 +193,10 @@ def list_action_events_for_employee_ids(
             .eq("tenant_id", tid)
             .in_("employee_id", normalized_ids)
         )
+        if from_date:
+            query = query.gte("event_at", from_date)
+        if to_date:
+            query = query.lte("event_at", to_date)
         if exists_only:
             result = query.limit(max(1, int(limit or 1))).execute()
         else:

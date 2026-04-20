@@ -129,7 +129,7 @@ def page_cost_impact():
                 f'<div style="font-size:11px;color:#555;margin-bottom:6px;">{_html_mod.escape(_r["Dept"])}</div>'
                 f'<div style="font-size:22px;font-weight:800;color:#B71C1C;">'
                 f'${_r["$/week lost"]:,.0f}/wk</div>'
-                f'<div style="font-size:11px;color:#777;">Gap: {_r["GAP (UPH)"]:.1f} UPH · '
+                f'<div style="font-size:11px;color:#555;">Gap: {_r["GAP (UPH)"]:.1f} UPH · '
                 f'{_r["Lost units/week"]:,} units lost/wk</div>'
                 f'<div style="font-size:11px;color:#1B5E20;margin-top:4px;">'
                 f'✔ At target = +${_r["Value if at target"]:,.0f}/wk potential</div>'

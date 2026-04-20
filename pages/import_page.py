@@ -637,7 +637,7 @@ def _render_first_import_insight(insight: dict, *, highlight: bool = False) -> N
                 unsafe_allow_html=True,
             )
             tier = str(getattr(top_item, "attention_tier", "") or "")
-            tier_colors = {"high": "#c0392b", "medium": "#e67e22", "low": "#7f8c8d"}
+            tier_colors = {"high": "#c0392b", "medium": "#7a4500", "low": "#7f8c8d"}
             tier_color = tier_colors.get(tier, "#555")
             summary = str(getattr(top_item, "attention_summary", "") or "")
             reasons = list(getattr(top_item, "attention_reasons", []) or [])

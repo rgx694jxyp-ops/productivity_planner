@@ -490,7 +490,7 @@ def _apply_today_styles() -> None:
             border: 1px solid #b9e0be;
         }
         .today-freshness-meta {
-            color: #6c8198;
+            color: #5d7693;
             font-size: 0.8rem;
             margin-top: 4px;
         }
@@ -520,7 +520,7 @@ def _apply_today_styles() -> None:
         .today-action-helper {
             margin-top: -4px;
             margin-bottom: 8px;
-            color: #738aa2;
+            color: #5d7693;
             font-size: 0.82rem;
         }
         .today-value-card {
@@ -552,7 +552,7 @@ def _apply_today_styles() -> None:
             font-size: 0.69rem;
             font-weight: 700;
             letter-spacing: 0.05em;
-            color: #7b90a7;
+            color: #5d7693;
             margin-bottom: 6px;
         }
         .today-value-headline {
@@ -586,12 +586,12 @@ def _apply_today_styles() -> None:
             font-weight: 700;
             letter-spacing: 0.06em;
             text-transform: uppercase;
-            color: #7b90a7;
+            color: #5d7693;
         }
         .today-secondary-context-note {
             margin-top: -1px;
             margin-bottom: 8px;
-            color: #738aa2;
+            color: #5d7693;
             font-size: 0.86rem;
         }
         .today-secondary-label {
@@ -606,11 +606,11 @@ def _apply_today_styles() -> None:
         .today-secondary-subcaption {
             margin-top: 0;
             margin-bottom: 6px;
-            color: #6c8198;
+            color: #5d7693;
             font-size: 0.84rem;
         }
         .today-secondary-note {
-            color: #6c8198;
+            color: #5d7693;
             font-size: 0.82rem;
             margin-bottom: 8px;
         }
@@ -649,7 +649,7 @@ def _apply_today_styles() -> None:
             margin-right: 6px;
         }
         .attention-score-high  { background: #fdecea; color: #c0392b; }
-        .attention-score-medium { background: #fef5e7; color: #e67e22; }
+        .attention-score-medium { background: #fef5e7; color: #7a4500; }
         .attention-score-low   { background: #f0f0f0; color: #555; }
         .today-queue-orientation {
             background: #f4f8fc;
@@ -904,7 +904,7 @@ def _render_top_status_area(*, meaning: TodaySurfaceMeaning) -> None:
     if detail_line:
         detail_block += f'<div style="color:#5d7693;font-size:0.86rem;margin-top:6px;">{detail_line}</div>'
     if detail_source_line:
-        detail_block += f'<div style="color:#7b90a7;font-size:0.79rem;margin-top:2px;">{detail_source_line}</div>'
+        detail_block += f'<div style="color:#5d7693;font-size:0.79rem;margin-top:2px;">{detail_source_line}</div>'
 
     st.markdown(
         (
@@ -963,7 +963,7 @@ def _render_return_trigger(trigger: TodayReturnTriggerViewModel | None) -> None:
     basis_html = ""
     if str(trigger.comparison_basis or "").strip():
         basis_html = (
-            f'<div style="color:#7b90a7;font-size:0.79rem;margin-top:6px;">{trigger.comparison_basis}</div>'
+            f'<div style="color:#5d7693;font-size:0.79rem;margin-top:6px;">{trigger.comparison_basis}</div>'
         )
 
     cue_block = f'<div class="today-queue-orientation-chips">{cue_html}</div>' if cue_html else ""

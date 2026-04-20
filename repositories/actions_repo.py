@@ -67,16 +67,30 @@ def create_action(
             )
 
         if payload["follow_up_due_at"]:
-            import database
+            try:
+                import database
 
-            database.add_followup_db(
-                employee_id,
-                employee_name,
-                department,
-                payload["follow_up_due_at"],
-                trigger_summary[:80],
-                tenant_id=tid,
-            )
+                database.add_followup_db(
+                    employee_id,
+                    employee_name,
+                    department,
+                    payload["follow_up_due_at"],
+                    trigger_summary[:80],
+                    tenant_id=tid,
+                )
+            except Exception as followup_error:
+                # Keep action creation non-blocking if legacy follow-up mirror write fails.
+                log_warn(
+                    "repo_actions_followup_mirror_failed",
+                    "Action created, but follow-up mirror write failed.",
+                    tenant_id=tid,
+                    context={
+                        "action_id": str(row.get("id") or ""),
+                        "employee_id": str(employee_id),
+                        "follow_up_due_at": str(payload.get("follow_up_due_at") or ""),
+                    },
+                    error=followup_error,
+                )
 
         return row
     except Exception as error:
@@ -129,6 +143,7 @@ def list_actions_for_employee_ids(
     employee_ids: list[str] | tuple[str, ...],
     tenant_id: str = "",
     statuses: list[str] | None = None,
+    columns: str = "*",
 ) -> list[dict]:
     tid = tenant_id or get_tenant_id()
     if not tid:
@@ -142,7 +157,7 @@ def list_actions_for_employee_ids(
         sb = get_client()
         query = (
             sb.table("actions")
-            .select("*")
+            .select(columns or "*")
             .eq("tenant_id", tid)
             .in_("employee_id", normalized_employee_ids)
             .order("last_event_at", desc=True)

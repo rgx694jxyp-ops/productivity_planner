@@ -124,7 +124,7 @@ def page_settings():
                       <div style="margin-left:auto;text-align:right;line-height:1.6;">
                         <div style="font-size:12px;color:#444;">{_emp_count} / {_limit_str} employees used</div>
                         <div style="font-size:12px;color:#444;">{_status.replace('_', ' ').title()}</div>
-                        {"<div style='font-size:12px;color:#888;'>Renews " + _renew_str + "</div>" if _renew_str else ""}
+                        {"<div style='font-size:12px;color:#666;'>Renews " + _renew_str + "</div>" if _renew_str else ""}
                       </div>
                     </div>
                     """,

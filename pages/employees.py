@@ -956,6 +956,10 @@ def _emp_coaching():
         show_no_data_state()
         return
 
+    # Ensure goal_status is populated on first load (same guard as Coaching Insights view).
+    if not st.session_state.get("pipeline_done") and not st.session_state.get("_archived_loaded"):
+        _build_archived_productivity(st.session_state)
+
     # ── Build employee list — all employees, annotate who has notes / is flagged
     emp_ids_with_notes = _cached_all_coaching_notes()
     note_counts_by_emp = _raw_cached_open_coaching_note_counts(str(tenant_id or "")) or {}
@@ -964,6 +968,21 @@ def _emp_coaching():
     if dept_sel not in ["All departments", *all_depts]:
         dept_sel = "All departments"
         st.session_state["cn_dept"] = dept_sel
+
+    filtered_emps = (emps if dept_sel == "All departments"
+                     else [e for e in emps if e.get("department","") == dept_sel])
+
+    def _team_employee_by_id(employee_id: str) -> dict | None:
+        employee_id = str(employee_id or "")
+        if not employee_id:
+            return None
+        return next((e for e in filtered_emps if str(e.get("emp_id", "")) == employee_id), None)
+
+    def _select_team_employee(employee: dict | None) -> dict | None:
+        if not employee:
+            return None
+        st.session_state["cn_selected_emp"] = str(employee.get("emp_id", "") or "")
+        return employee
 
     # ── Manager signal list ───────────────────────────────────────────────────
     # Auto-surfaces employees with below-goal/trending-down signals.
@@ -1007,17 +1026,29 @@ def _emp_coaching():
     if action_items:
         with st.expander(f"📋 **Manager Signal List** — {len(action_items)} active signal(s)", expanded=True):
             st.caption("Employees currently trending down or below goal in the latest observed data.")
-            for ai in action_items:
+            for idx, ai in enumerate(action_items):
                 ac1, ac2, ac3 = st.columns([3, 5, 1])
                 badge = ""
                 if ai["trend"] == "declining": badge += " ↓"
                 elif ai["trend"] == "improving": badge += " ↑"
                 if ai["goal_st"] == "below_goal": badge += " ⚠️"
-                ac1.markdown(f"**{ai['name']}**{badge}")
+                with ac1:
+                    _open_clicked = st.button(
+                        f"{ai['name']}{badge}",
+                        key=f"manager_signal_open_{idx}_{ai['eid']}",
+                        use_container_width=True,
+                        type="primary",
+                    )
+                if _open_clicked:
+                    selected_from_signal = _select_team_employee(_team_employee_by_id(ai["eid"]))
+                    if selected_from_signal:
+                        st.session_state["_team_signal_jump"] = True
+                        st.rerun()
                 ac2.caption(f"{ai['dept']} · {' · '.join(ai['reasons'])}")
-                if ac3.button("✓", key=f"dismiss_{ai['key']}", help="Mark as done"):
-                    st.session_state.dismissed_actions.add(ai["key"])
-                    st.rerun()
+                with ac3:
+                    if st.button("✓", key=f"dismiss_{ai['key']}", type="primary"):
+                        st.session_state.dismissed_actions.add(ai["key"])
+                        st.rerun()
 
             if st.button("Clear all completed actions", key="clear_dismissed", type="secondary"):
                 st.session_state.dismissed_actions.clear()
@@ -1072,15 +1103,23 @@ def _emp_coaching():
         sel_rows = sel.selection.rows if sel and sel.selection else []
         if sel_rows:
             selected_idx = sel_rows[0]
-            if 0 <= selected_idx < len(filtered_emps):
-                selected_emp = filtered_emps[selected_idx]
-                st.session_state["cn_selected_emp"] = selected_emp["emp_id"]
-            else:
-                selected_emp = None
+            selected_emp = _select_team_employee(
+                filtered_emps[selected_idx] if 0 <= selected_idx < len(filtered_emps) else None
+            )
         else:
-            selected_emp = None
+            selected_emp = _team_employee_by_id(st.session_state.get("cn_selected_emp", ""))
 
     with col_detail:
+        # Anchor so JS scroll lands at the detail panel.
+        st.markdown('<a name="team_detail_anchor"></a>', unsafe_allow_html=True)
+        if st.session_state.pop("_team_signal_jump", False):
+            st.markdown(
+                "<script>setTimeout(function(){"
+                "var el=document.querySelector('[name=\"team_detail_anchor\"]');"
+                "if(el){el.scrollIntoView({behavior:'smooth',block:'start'});}"
+                "},120);</script>",
+                unsafe_allow_html=True,
+            )
         if not selected_emp:
             _team_analysis_flag_key = "_employees_show_team_analysis"
             _last_team_analysis_dept = str(st.session_state.get("_employees_team_analysis_dept", "") or "")
@@ -1563,7 +1602,6 @@ def _emp_coaching():
             selected_issues = st.multiselect(
                 "Common issues observed",
                 _issue_options,
-                default=[],
                 key="cn_common_issues",
                 help="Tag the likely cause so we can track patterns over time.",
             )
@@ -1707,7 +1745,7 @@ def _emp_coaching():
                                 elif _delta < -0.2:
                                     _uph_change_str = f" · <span style='color:#B71C1C;font-size:11px;'>↓ {_delta} UPH</span>"
                                 else:
-                                    _uph_change_str = f" · <span style='color:#5A7A9C;font-size:11px;'>→ stable</span>"
+                                    _uph_change_str = f" · <span style='color:#3d617d;font-size:11px;'>→ stable</span>"
                         except Exception:
                             pass
 
@@ -1718,7 +1756,7 @@ def _emp_coaching():
                         tl1, tl2 = st.columns([11, 1])
                         tl1.markdown(
                             f"<div style='border-left:3px solid #0F2D52;padding:8px 12px;margin-bottom:6px;'>"
-                            f"<span style='color:#5A7A9C;font-size:11px;'>{_ndate_safe}"
+                            f"<span style='color:#3d617d;font-size:11px;'>{_ndate_safe}"
                             f"{'  ·  ' + _nby_safe if _nby_safe else ''}{_uph_change_str}</span>"
                             f"<br><span style='color:#1A2D42;font-size:13px;'>{_ntxt_safe}</span>"
                             f"</div>",

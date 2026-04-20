@@ -494,6 +494,24 @@ def log_coaching_lifecycle_entry(
                 user_role=user_role,
             )
             created_new = bool(target_action)
+            if not target_action:
+                # Recover from side-effect-only failures where action row may still exist.
+                recovered_open_actions = actions_repo.list_actions(
+                    tenant_id=tenant_id,
+                    statuses=list(OPEN_STATUSES),
+                    employee_id=employee_id,
+                )
+                target_action = (recovered_open_actions or [{}])[0] if recovered_open_actions else {}
+                if target_action:
+                    log_warn(
+                        "coaching_lifecycle_create_action_recovered",
+                        "Coaching lifecycle recovered by reusing latest open action after empty create result.",
+                        tenant_id=tenant_id,
+                        context=_action_log_context(
+                            employee_id=employee_id,
+                            extra={"reason": str(reason or "")[:80]},
+                        ),
+                    )
 
         action_id = str(target_action.get("id") or "")
         if not action_id:

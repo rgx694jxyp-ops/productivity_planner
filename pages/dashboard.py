@@ -177,7 +177,7 @@ def page_dashboard():
         if "🔴" in str(val):
             return "background-color: #ffcccc; color: #8b0000"
         elif "🟡" in str(val):
-            return "background-color: #fff9e6; color: #ff6600"
+            return "background-color: #fff9e6; color: #7a4500"
         elif "🟢" in str(val):
             return "background-color: #e6ffe6; color: #008000"
         return ""

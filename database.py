@@ -1342,17 +1342,33 @@ def get_followups_for_employee_ids_db(
     to_value = str(to_date or from_value)
     try:
         sb = get_client()
-        selected_columns = "emp_id" if exists_only else "emp_id, name, dept, note_preview, followup_date"
+        if exists_only:
+            # Keep existence probes index-friendly and deterministic:
+            # tenant + employee scope + date window, minimum projection, 1-row cap.
+            query = (
+                sb.table("coaching_followups")
+                .select("emp_id")
+                .eq("tenant_id", tid)
+                .in_("emp_id", normalized_ids)
+                .gte("followup_date", from_value)
+                .lte("followup_date", to_value)
+                .order("emp_id")
+                .order("followup_date")
+                .limit(1)
+            )
+            resp = query.execute()
+            return resp.data or []
+
         query = (
             sb.table("coaching_followups")
-            .select(selected_columns)
+            .select("emp_id, name, dept, note_preview, followup_date")
             .eq("tenant_id", tid)
             .in_("emp_id", normalized_ids)
             .gte("followup_date", from_value)
             .lte("followup_date", to_value)
+            .order("followup_date")
+            .order("name")
         )
-        if not exists_only:
-            query = query.order("followup_date").order("name")
         if limit is not None:
             query = query.limit(max(1, int(limit or 1)))
         resp = query.execute()

@@ -90,6 +90,7 @@ class PerfProfile:
         legacy_actions_query_ms = int(metrics.get("stage_batched_actions_read_ms", 0) or 0)
         legacy_generic_probe_ms = int(metrics.get("stage_batched_generic_employee_events_probe_ms", 0) or 0)
         legacy_followups_probe_ms = int(metrics.get("stage_shared_followup_probe_ms", 0) or 0)
+        legacy_service_work_ms = int(metrics.get("service_work_ms", 0) or 0)
 
         metrics.setdefault("actions_rows", 0)
         metrics.setdefault("generic_employee_event_rows", 0)
@@ -97,6 +98,9 @@ class PerfProfile:
         metrics.setdefault("actions_query_ms", legacy_actions_query_ms)
         metrics.setdefault("generic_employee_events_probe_ms", legacy_generic_probe_ms)
         metrics.setdefault("followups_probe_ms", legacy_followups_probe_ms)
+        metrics.setdefault("service_work_ms", legacy_service_work_ms)
+        metrics.setdefault("perf_emit_overhead_ms", 0)
+        metrics.setdefault("total_wall_ms", 0)
         metrics.setdefault("actions_query_skipped", False)
         metrics.setdefault("generic_employee_events_query_skipped", False)
         metrics.setdefault("followups_query_skipped", False)
@@ -105,10 +109,22 @@ class PerfProfile:
         return metrics
 
     def emit(self) -> None:
+        emit_started = time.perf_counter()
         metrics = self._normalized_metrics_for_emit()
+        duration_ms = int((emit_started - self.started_at) * 1000)
+
+        if self.name == "action_state.lookup_batched":
+            service_work_ms = int(metrics.get("service_work_ms", 0) or 0)
+            if service_work_ms <= 0:
+                service_work_ms = duration_ms
+            metrics["service_work_ms"] = int(max(0, service_work_ms))
+            # This makes boundary overhead explicit at the point immediately before log emission.
+            metrics["perf_emit_overhead_ms"] = int(max(0, duration_ms - metrics["service_work_ms"]))
+            metrics["total_wall_ms"] = int(max(0, duration_ms))
+
         context = {
             "profile": self.name,
-            "duration_ms": int((time.perf_counter() - self.started_at) * 1000),
+            "duration_ms": duration_ms,
             **self.context,
             **metrics,
         }

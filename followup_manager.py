@@ -62,9 +62,15 @@ def get_followups_for_employees(
     exists_only: bool = False,
 ) -> list[dict]:
     """Return follow-ups within range scoped to employee IDs."""
-    today_value = _tenant_today(tenant_id)
-    _from = from_date or today_value.isoformat()
-    _to = to_date or (today_value + timedelta(days=30)).isoformat()
+    # Hot-path optimization: callers that already pass explicit bounds (including
+    # action-state zero-action probes) can avoid tenant-timezone resolution.
+    if from_date is not None and to_date is not None:
+        _from = str(from_date)
+        _to = str(to_date)
+    else:
+        today_value = _tenant_today(tenant_id)
+        _from = from_date or today_value.isoformat()
+        _to = to_date or (today_value + timedelta(days=30)).isoformat()
     from database import get_followups_for_employee_ids_db
 
     return list(

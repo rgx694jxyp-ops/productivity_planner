@@ -184,14 +184,14 @@ def apply_global_styles():
   }
 
   .stButton > button[kind="secondary"],
-  .stButton > button:not([kind="primary"]),
+  .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
   button[data-testid="stBaseButton-secondary"] {
     background-color: var(--dpd-surface) !important;
     color: var(--dpd-navy-900) !important;
     border: 1px solid var(--dpd-border) !important;
   }
   .stButton > button[kind="secondary"]:hover,
-  .stButton > button:not([kind="primary"]):hover,
+  .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]):hover,
   button[data-testid="stBaseButton-secondary"]:hover {
     background-color: var(--dpd-surface-soft) !important;
     border-color: var(--dpd-border-strong) !important;
@@ -390,6 +390,39 @@ def apply_global_styles():
     border-top: 3px solid #4DA3FF;
     padding: 14px 20px;
     box-shadow: 0 -4px 16px rgba(15, 45, 82, 0.14);
+  }
+
+  /* Tooltips (help= parameter popups) */
+  [data-testid="stTooltipContent"],
+  [data-testid="stTooltipContent"] * {
+    background: var(--dpd-navy-900) !important;
+    color: #FFFFFF !important;
+    border-radius: 6px !important;
+    font-size: 12px !important;
+  }
+
+  /* Select / multiselect dropdown option hover */
+  [data-baseweb="menu"] [role="option"]:hover,
+  [data-baseweb="menu"] [role="option"][aria-selected="true"],
+  [data-baseweb="menu"] li:hover {
+    background: var(--dpd-surface-soft) !important;
+    color: var(--dpd-navy-900) !important;
+  }
+  [data-baseweb="menu"] [role="option"],
+  [data-baseweb="menu"] li {
+    color: var(--dpd-text) !important;
+  }
+
+  /* Sidebar button hover: re-state color explicitly */
+  [data-testid="stSidebar"] .stButton > button:hover,
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-secondary"]:hover {
+    color: var(--dpd-navy-900) !important;
+  }
+
+  /* File uploader browse button hover */
+  [data-testid="stFileUploaderDropzone"] button:hover {
+    background: #79BAF0 !important;
+    color: #032540 !important;
   }
 
   /* Small motion */

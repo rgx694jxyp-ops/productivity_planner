@@ -515,9 +515,34 @@ def _build_employee_action_state_lookup_batched(
     ) as profile:
         def _finalize_lookup_payload(*, query_count_value: int = 0, visible_db_rows_value: int = 0) -> None:
             # Keep the authoritative runtime payload shape stable across all branches.
+            profile.set("service_work_ms", int(max(0.0, (time.perf_counter() - profile.started_at) * 1000)))
             profile.set("actions_rows", int(profile.metrics.get("actions_rows", 0) or 0))
             profile.set("generic_employee_event_rows", int(profile.metrics.get("generic_employee_event_rows", 0) or 0))
             profile.set("followup_rows", int(profile.metrics.get("followup_rows", 0) or 0))
+            profile.set(
+                "actions_query_ms",
+                int(profile.metrics.get("actions_query_ms", profile.metrics.get("stage_batched_actions_read_ms", 0)) or 0),
+            )
+            profile.set(
+                "generic_employee_events_probe_ms",
+                int(
+                    profile.metrics.get(
+                        "generic_employee_events_probe_ms",
+                        profile.metrics.get("stage_batched_generic_employee_events_probe_ms", 0),
+                    )
+                    or 0
+                ),
+            )
+            profile.set(
+                "followups_probe_ms",
+                int(
+                    profile.metrics.get(
+                        "followups_probe_ms",
+                        profile.metrics.get("stage_shared_followup_probe_ms", 0),
+                    )
+                    or 0
+                ),
+            )
             profile.set("actions_query_skipped", bool(profile.metrics.get("actions_query_skipped", False)))
             profile.set("generic_employee_events_query_skipped", bool(profile.metrics.get("generic_employee_events_query_skipped", False)))
             profile.set("followups_query_skipped", bool(profile.metrics.get("followups_query_skipped", False)))
@@ -535,6 +560,9 @@ def _build_employee_action_state_lookup_batched(
         profile.set("actions_query_ms", 0)
         profile.set("generic_employee_events_query_ms", 0)
         profile.set("followups_query_ms", 0)
+        profile.set("generic_employee_events_probe_ms", 0)
+        profile.set("followups_probe_ms", 0)
+        profile.set("service_work_ms", 0)
         profile.set("query_count", 0)
         profile.set("visible_db_rows", 0)
         profile.set("needs_generic_employee_events_probe", False)
@@ -556,7 +584,14 @@ def _build_employee_action_state_lookup_batched(
         visible_db_rows = 0
 
         with profile.stage("batched_actions_read"):
-            actions = list(actions_repo.list_actions_for_employee_ids(employee_ids=employee_ids, tenant_id=tenant_id) or [])
+            actions = list(
+                actions_repo.list_actions_for_employee_ids(
+                    employee_ids=employee_ids,
+                    tenant_id=tenant_id,
+                    columns="id, employee_id, employee_name, department, status, follow_up_due_at, trigger_summary, note, issue_type, action_type, last_event_at",
+                )
+                or []
+            )
             for action in actions:
                 action["_runtime_status"] = runtime_status(
                     str(action.get("status") or "new"),
@@ -593,6 +628,7 @@ def _build_employee_action_state_lookup_batched(
         # Safe short-circuit branch 2: for valid-tenant, zero-action lookups, run cheap
         # existence probes first and skip full standalone reads only when both probes are empty.
         should_probe_standalone = bool((not actions) and tenant_scope_text and tenant_scope_is_valid_uuid)
+        probe_employee_ids = tuple(sorted(employee_id_set))
         needs_followups_probe = bool(should_probe_standalone)
         needs_generic_employee_events_probe = bool(should_probe_standalone)
         if should_probe_standalone:
@@ -601,10 +637,11 @@ def _build_employee_action_state_lookup_batched(
             # Probe follow-ups first so singleton pages can skip generic probing/reads
             # when follow-up state is already present.
             if needs_followups_probe:
+                profile.set("followups_probe_mode", "exists_only_emp_date_ordered")
                 with profile.stage("shared_followup_probe"):
                     followup_probe_rows = list(
                         get_followups_for_employees(
-                            employee_ids=tuple(employee_id_set),
+                            employee_ids=probe_employee_ids,
                             from_date=(today - timedelta(days=90)).isoformat(),
                             to_date=(today + timedelta(days=365)).isoformat(),
                             tenant_id=tenant_id,
@@ -628,6 +665,7 @@ def _build_employee_action_state_lookup_batched(
                 needs_generic_employee_events_probe and not skip_generic_for_singleton_followup
             )
             if needs_generic_employee_events_probe:
+                profile.set("generic_probe_mode", "exists_only_emp_date")
                 with profile.stage("batched_generic_employee_events_probe"):
                     generic_probe_rows = list(
                         action_events_repo.list_action_events_for_employee_ids(
@@ -637,6 +675,8 @@ def _build_employee_action_state_lookup_batched(
                             limit=1,
                             columns="action_id, employee_id, event_type, event_at, details, notes, due_date, next_follow_up_at, status",
                             exists_only=bool(len(employee_id_set) > 1),
+                            from_date=(today - timedelta(days=90)).isoformat(),
+                            to_date=(today + timedelta(days=365)).isoformat(),
                         )
                         or []
                     )
@@ -755,6 +795,8 @@ def _build_employee_action_state_lookup_batched(
                             newest_first=True,
                             limit=max(120, len(employee_ids) * 120),
                             columns="action_id, employee_id, event_type, event_at, details, notes, due_date, next_follow_up_at, status",
+                            from_date=(today - timedelta(days=90)).isoformat(),
+                            to_date=(today + timedelta(days=365)).isoformat(),
                         )
                         or []
                     )
@@ -782,7 +824,7 @@ def _build_employee_action_state_lookup_batched(
                 with profile.stage("shared_followup_read"):
                     followups = list(
                         get_followups_for_employees(
-                            employee_ids=tuple(employee_id_set),
+                            employee_ids=probe_employee_ids,
                             from_date=(today - timedelta(days=90)).isoformat(),
                             to_date=(today + timedelta(days=365)).isoformat(),
                             tenant_id=tenant_id,

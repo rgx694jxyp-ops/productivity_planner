@@ -217,7 +217,7 @@ def page_shift_plan():
             elif _gap_pct >= -15:
                 _icon  = "🟡"
                 _label = "Slightly Behind"
-                _color = "#F57F17"
+                _color = "#7a4500"
                 _bg    = "#FFFDE7"
             else:
                 _icon  = "🔴"

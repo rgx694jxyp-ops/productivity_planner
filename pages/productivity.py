@@ -959,8 +959,8 @@ def page_productivity():
         def _color_impact(val):
             try:
                 v = float(val)
-                if v < 0: return "color: #FF4444"
-                if v > 0: return "color: #44AA44"
+                if v < 0: return "color: #CC0000"
+                if v > 0: return "color: #2a7a2a"
             except: pass
             return ""
 
@@ -1054,7 +1054,7 @@ def page_productivity():
             if "🔴" in str(val):
                 return "background-color: #ffcccc; color: #8b0000"
             elif "🟡" in str(val):
-                return "background-color: #fff9e6; color: #ff6600"
+                return "background-color: #fff9e6; color: #7a4500"
             elif "🟢" in str(val):
                 return "background-color: #e6ffe6; color: #008000"
             return ""
