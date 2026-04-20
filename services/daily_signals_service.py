@@ -21,6 +21,7 @@ from repositories.daily_signals_repo import (
     delete_daily_signals,
     list_daily_signals,
 )
+from services.perf_profile import profile_block
 from services.action_query_service import get_open_actions
 from services.action_recommendation_service import get_ignored_high_performers, get_repeat_offenders
 from services.attention_scoring_service import AttentionFactor, AttentionItem, AttentionSummary
@@ -270,60 +271,73 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
     This function centralizes signal interpretation and attention scoring into a
     pre-processing step so the Today screen can remain read-only.
     """
-    open_actions = get_open_actions(tenant_id=tenant_id, today=signal_date)
-    repeat_offenders = get_repeat_offenders(tenant_id=tenant_id, today=signal_date, open_actions=open_actions)
-    recognition_opportunities = get_ignored_high_performers(tenant_id=tenant_id, today=signal_date, open_actions=open_actions)
-    queue_items = build_action_queue(
-        open_actions=open_actions,
-        repeat_offenders=repeat_offenders,
-        recognition_opportunities=recognition_opportunities,
-        tenant_id=tenant_id,
-        today=signal_date,
-    )
+    with profile_block(
+        "daily_signals.compute",
+        tenant_id=str(tenant_id or ""),
+        context={"signal_date": signal_date.isoformat()},
+        execution_key=f"_perf_profile_daily_signals_compute_{str(tenant_id or '').strip()}",
+    ) as _profile:
+        with _profile.stage("open_actions"):
+            open_actions = get_open_actions(tenant_id=tenant_id, today=signal_date)
+            repeat_offenders = get_repeat_offenders(tenant_id=tenant_id, today=signal_date, open_actions=open_actions)
+            recognition_opportunities = get_ignored_high_performers(tenant_id=tenant_id, today=signal_date, open_actions=open_actions)
+            queue_items = build_action_queue(
+                open_actions=open_actions,
+                repeat_offenders=repeat_offenders,
+                recognition_opportunities=recognition_opportunities,
+                tenant_id=tenant_id,
+                today=signal_date,
+            )
+        _profile.query(rows=len(open_actions or []))
 
-    goal_status, _history_rows, _snapshot_date = get_latest_snapshot_goal_status(
-        tenant_id=tenant_id,
-        days=30,
-        rebuild_if_missing=False,
-    )
-    goal_status = goal_status or []
+        with _profile.stage("goal_status_read"):
+            goal_status, _history_rows, _snapshot_date = get_latest_snapshot_goal_status(
+                tenant_id=tenant_id,
+                days=30,
+                rebuild_if_missing=False,
+            )
+            goal_status = goal_status or []
+        _profile.query(rows=len(goal_status))
 
-    import_summary = _build_import_summary(tenant_id=tenant_id, goal_status=goal_status)
+        with _profile.stage("build_sections"):
+            import_summary = _build_import_summary(tenant_id=tenant_id, goal_status=goal_status)
+            home_sections = build_today_home_sections(
+                queue_items=queue_items,
+                goal_status=goal_status,
+                import_summary=import_summary,
+                today=signal_date,
+            )
 
-    home_sections = build_today_home_sections(
-        queue_items=queue_items,
-        goal_status=goal_status,
-        import_summary=import_summary,
-        today=signal_date,
-    )
-    eligible_employee_ids = {
-        str(item.drill_down.entity_id or "").strip()
-        for section_key in ("needs_attention", "changed_from_normal", "unresolved_items")
-        for item in (home_sections.get(section_key) or [])
-        if str(item.drill_down.entity_id or "").strip()
-    }
-    if not eligible_employee_ids:
-        # If all interpreted cards were filtered/suppressed, do not block
-        # attention ranking for every employee. Allow scorer to evaluate full
-        # goal_status so Today can still surface meaningful signals.
-        eligible_employee_ids = None
-    open_exception_rows = list_open_operational_exceptions(tenant_id=tenant_id, limit=200)
-    attention_summary = build_today_attention_summary(
-        goal_status=goal_status,
-        queue_items=queue_items,
-        open_exception_rows=open_exception_rows,
-        eligible_employee_ids=eligible_employee_ids,
-        weak_data_mode=_is_weak_data_mode(import_summary),
-    )
-    decision_items = build_decision_items(
-        goal_status=goal_status,
-        queue_items=queue_items,
-        open_exception_rows=open_exception_rows,
-        tenant_id=tenant_id,
-        today=signal_date,
-        weak_data_mode=_is_weak_data_mode(import_summary),
-    )
-    decision_summary = build_decision_summary(decision_items)
+        eligible_employee_ids = {
+            str(item.drill_down.entity_id or "").strip()
+            for section_key in ("needs_attention", "changed_from_normal", "unresolved_items")
+            for item in (home_sections.get(section_key) or [])
+            if str(item.drill_down.entity_id or "").strip()
+        }
+        if not eligible_employee_ids:
+            # If all interpreted cards were filtered/suppressed, do not block
+            # attention ranking for every employee. Allow scorer to evaluate full
+            # goal_status so Today can still surface meaningful signals.
+            eligible_employee_ids = None
+
+        with _profile.stage("build_attention"):
+            open_exception_rows = list_open_operational_exceptions(tenant_id=tenant_id, limit=200)
+            attention_summary = build_today_attention_summary(
+                goal_status=goal_status,
+                queue_items=queue_items,
+                open_exception_rows=open_exception_rows,
+                eligible_employee_ids=eligible_employee_ids,
+                weak_data_mode=_is_weak_data_mode(import_summary),
+            )
+            decision_items = build_decision_items(
+                goal_status=goal_status,
+                queue_items=queue_items,
+                open_exception_rows=open_exception_rows,
+                tenant_id=tenant_id,
+                today=signal_date,
+                weak_data_mode=_is_weak_data_mode(import_summary),
+            )
+            decision_summary = build_decision_summary(decision_items)
 
     rows: list[dict[str, Any]] = []
     for section_key in ("needs_attention", "changed_from_normal", "unresolved_items", "data_warnings", "suppressed_signals"):
@@ -409,8 +423,16 @@ def compute_daily_signals(*, signal_date: date, tenant_id: str) -> dict[str, Any
         }
     )
 
-    delete_daily_signals(tenant_id=tenant_id, signal_date=signal_date.isoformat())
-    batch_upsert_daily_signals(rows)
+    with profile_block(
+        "daily_signals.db_writes",
+        tenant_id=str(tenant_id or ""),
+        context={"signal_date": signal_date.isoformat(), "row_count": len(rows)},
+    ) as _write_profile:
+        with _write_profile.stage("delete"):
+            delete_daily_signals(tenant_id=tenant_id, signal_date=signal_date.isoformat())
+        with _write_profile.stage("upsert"):
+            batch_upsert_daily_signals(rows)
+        _write_profile.query(count=max(1, (len(rows) + 499) // 500) + 1, rows=len(rows))
     try:
         from services.today_home_service import clear_today_read_caches
 

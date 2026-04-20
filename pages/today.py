@@ -1458,7 +1458,10 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
         if should_recompute_snapshots:
             snapshot_recompute_at = time.perf_counter()
             try:
-                recompute_daily_employee_snapshots(tenant_id=tenant_id, days=30)
+                # Narrow to days=1: only today's snapshot rows need writing during recovery.
+                # Lookback for trend accuracy is preserved (fetch_days = 1 + lookback*3 = 43 days).
+                # Historical snapshot rows remain unchanged — they were written on their own day.
+                recompute_daily_employee_snapshots(tenant_id=tenant_id, days=1)
             except Exception as snap_err:
                 _log_app_error(
                     "recovery_snapshot_recompute",
