@@ -484,7 +484,9 @@ def _render_today_phase1_top_cards(
             key_prefix=f"today_attention_primary_{idx}",
             emphasize=False,
             focused=False,
-            signal_status_map=signal_status_map,
+            # Phase 1 is scan-only; keep action widgets out to avoid duplicate keys
+            # before Phase 2 renders the full actionable queue in the same run.
+            signal_status_map=None,
         )
 
 
