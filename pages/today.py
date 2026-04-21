@@ -110,6 +110,7 @@ _TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX = "_today_payload_session_cache_"
 _TODAY_COMPLETED_ITEMS_SESSION_KEY = "_today_completed_items"
 _TODAY_LAST_COMPLETED_LABEL_KEY = "_today_last_completed_label"
 _TODAY_FOCUS_NEXT_CARD_KEY = "_today_focus_next_card"
+_TODAY_HANDOFF_FOCUS_RENDERED_KEY_PREFIX = "_today_handoff_focus_rendered_"
 _TODAY_AUTO_REFRESH_MIN_SECONDS = 60
 _TODAY_PENDING_COMPLETION_IDS_KEY = "_today_pending_completion_ids"
 _TODAY_PENDING_COMPLETION_META_KEY = "_today_pending_completion_meta"
@@ -3543,15 +3544,23 @@ def _render_attention_card(
     signal_status_map: dict[str, dict[str, str]] | None = None,
 ) -> None:
     del show_action
-    del focused
     title_class = "today-insight-title"
     line_class = "today-insight-line"
+
+    # When focused (e.g., navigating from Team with preselected employee),
+    # render an anchor to support browser scroll, and add a subtle visual cue.
+    if focused:
+        card_anchor = f"today_card_{str(card.employee_id or '').replace(' ', '_')}"
+        st.markdown(f'<a id="{card_anchor}"></a>', unsafe_allow_html=True)
 
     with st.container(border=True):
         line_1_text = str(card.line_1 or "").strip()
         employee_name, department_name = (line_1_text.split("·", 1) + [""])[:2] if "·" in line_1_text else (line_1_text, "")
         employee_name = str(employee_name or "").strip()
         department_name = str(department_name or "").strip()
+
+        if focused:
+            st.markdown(f'<div class="today-focused-indicator">← Team handoff</div>', unsafe_allow_html=True)
 
         st.markdown(f'<div class="{title_class}">{employee_name or line_1_text}</div>', unsafe_allow_html=True)
         if department_name:
@@ -3737,14 +3746,29 @@ def _render_unified_attention_queue(
     else:
         st.markdown('<div class="today-section-label">Prioritize these first</div>', unsafe_allow_html=True)
         st.session_state.pop(_TODAY_FOCUS_NEXT_CARD_KEY, None)
+
+        # Honor cn_selected_emp when navigating from Team: focus the matching employee's card on arrival.
+        # Track per-day whether we've already rendered the handoff focus to avoid sticky behavior on reruns.
+        today_value = date.today()
+        handoff_rendered_key = _TODAY_HANDOFF_FOCUS_RENDERED_KEY_PREFIX + today_value.isoformat()
+        handoff_focus_already_rendered = bool(st.session_state.get(handoff_rendered_key))
+        
+        focused_employee_id = str(st.session_state.get("cn_selected_emp") or "").strip()
+        is_first_handoff_render = bool(focused_employee_id and not handoff_focus_already_rendered)
+
         for idx, card in enumerate(top_cards):
+            card_employee_id = str(card.employee_id or "").strip()
+            is_focused = bool(is_first_handoff_render and card_employee_id == focused_employee_id)
             _render_attention_card(
                 card=card,
                 key_prefix=f"today_attention_primary_{idx}",
                 emphasize=False,
-                focused=False,
+                focused=is_focused,
                 signal_status_map=signal_status_map,
             )
+            # Mark handoff as rendered after the first matching card is rendered.
+            if is_focused and not handoff_focus_already_rendered:
+                st.session_state[handoff_rendered_key] = True
 
     if overflow_cards:
         overflow_caption = str(plan.secondary_caption or "").strip() or "Remaining queue items"
