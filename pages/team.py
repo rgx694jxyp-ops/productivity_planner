@@ -708,6 +708,31 @@ def _render_team_page_styles() -> None:
         div[data-testid="stMarkdownContainer"] p {
             margin-bottom: 0.25rem;
         }
+        .team-roster-anchor {
+            height: 0;
+            margin: 0;
+            padding: 0;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) {
+            background: #F8FAFD;
+            border: 1px solid #E8EEF7;
+            border-radius: 0.62rem;
+            padding: 0.75rem 0.82rem;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) h3 {
+            font-size: 1.0rem;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            margin: 0 0 0.125rem 0;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] [role="radiogroup"] {
+            gap: 0.3rem;
+            margin-top: 0.25rem;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label {
+            padding-top: 0.25rem;
+            padding-bottom: 0.25rem;
+        }
         .team-section-anchor {
             height: 0;
             margin: 0;
@@ -772,11 +797,13 @@ def _render_team_page_styles() -> None:
             margin: 0.125rem 0 0.25rem 0;
         }
         .team-timeline-entry {
-            padding: 0.5rem 0;
-            border-bottom: 1px solid #ECF1F8;
+            padding: 0.5rem 0 0.5rem 0.625rem;
+            border-left: 2px solid rgba(99, 134, 192, 0.14);
+            border-bottom: 1px solid #EEF2FA;
         }
         .team-timeline-entry:last-child {
             border-bottom: 0;
+            padding-bottom: 0.25rem;
         }
         .team-timeline-event {
             font-size: 0.92rem;
@@ -794,15 +821,17 @@ def _render_team_page_styles() -> None:
         .team-timeline-detail {
             font-size: 0.86rem;
             color: var(--dpd-text);
-            margin: 0.125rem 0 0 0;
+            margin: 0.25rem 0 0 0;
             line-height: 1.42;
         }
         .team-notes-entry {
-            padding: 0.5rem 0;
-            border-bottom: 1px solid #ECF1F8;
+            padding: 0.5rem 0 0.5rem 0.625rem;
+            border-left: 2px solid rgba(99, 134, 192, 0.14);
+            border-bottom: 1px solid #EEF2FA;
         }
         .team-notes-entry:last-child {
             border-bottom: 0;
+            padding-bottom: 0.25rem;
         }
         .team-notes-body {
             font-size: 0.91rem;
@@ -818,11 +847,13 @@ def _render_team_page_styles() -> None:
             line-height: 1.28;
         }
         .team-exceptions-entry {
-            padding: 0.5rem 0;
-            border-bottom: 1px solid #ECF1F8;
+            padding: 0.5rem 0 0.5rem 0.625rem;
+            border-left: 2px solid rgba(99, 134, 192, 0.14);
+            border-bottom: 1px solid #EEF2FA;
         }
         .team-exceptions-entry:last-child {
             border-bottom: 0;
+            padding-bottom: 0.25rem;
         }
         .team-exceptions-primary {
             font-size: 0.91rem;
@@ -840,7 +871,7 @@ def _render_team_page_styles() -> None:
         .team-exceptions-support {
             font-size: 0.86rem;
             color: var(--dpd-text);
-            margin: 0.125rem 0 0 0;
+            margin: 0.25rem 0 0 0;
             line-height: 1.42;
         }
         .team-comparison-primary {
@@ -855,6 +886,18 @@ def _render_team_page_styles() -> None:
             color: var(--dpd-text-muted);
             margin: 0;
             line-height: 1.28;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-section-anchor--timeline) div[data-testid="stExpander"] summary,
+        div[data-testid="stVerticalBlock"]:has(.team-section-anchor--notes) div[data-testid="stExpander"] summary,
+        div[data-testid="stVerticalBlock"]:has(.team-section-anchor--exceptions) div[data-testid="stExpander"] summary {
+            font-size: 0.81rem;
+            opacity: 0.8;
+            padding-left: 0.625rem;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-section-anchor--timeline) div[data-testid="stExpander"],
+        div[data-testid="stVerticalBlock"]:has(.team-section-anchor--notes) div[data-testid="stExpander"],
+        div[data-testid="stVerticalBlock"]:has(.team-section-anchor--exceptions) div[data-testid="stExpander"] {
+            margin-top: 0.25rem;
         }
         .team-section-intent {
             font-size: 0.74rem;
@@ -1029,6 +1072,7 @@ def page_team() -> None:
         st.session_state["team_selected_emp_id"] = selected_employee_id
 
     with shell_left:
+        st.markdown("<div class='team-roster-anchor'></div>", unsafe_allow_html=True)
         st.markdown(f"### {section_titles['roster']}")
         roster_support = _compact_support_line(
             format_roster_helper_text(),
