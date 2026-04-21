@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Any
+
+from services.import_date_service import parse_work_date
 
 
 def _safe_str(value: Any) -> str:
@@ -31,7 +33,7 @@ def parse_sessions_to_rows(sessions: list[dict], fallback_date: date) -> list[di
     """
     out: list[dict] = []
     fallback_date_str = fallback_date.isoformat()
-    date_parse_cache: dict[str, str] = {}
+    date_parse_cache: dict[str, str | None] = {}
 
     for session in sessions or []:
         mapping = session.get("mapping") or {}
@@ -48,26 +50,26 @@ def parse_sessions_to_rows(sessions: list[dict], fallback_date: date) -> list[di
 
         for idx, row in enumerate(rows, start=1):
             work_date = fallback_date_str
-            used_fallback_date = False
+            date_parse_error = ""
             raw_date_value = ""
+            raw_units_value = _safe_str(row.get(units_col, ""))
+            raw_hours_value = _safe_str(row.get(hours_col, ""))
+            raw_uph_value = _safe_str(row.get(uph_col, ""))
             if date_col:
                 raw_date_value = _safe_str(row.get(date_col, ""))
-                raw_date = raw_date_value[:10]
-                if raw_date:
-                    cached_date = date_parse_cache.get(raw_date)
-                    if cached_date is None:
-                        try:
-                            datetime.strptime(raw_date, "%Y-%m-%d")
-                            cached_date = raw_date
-                        except Exception:
-                            cached_date = ""
-                        date_parse_cache[raw_date] = cached_date
+                if raw_date_value:
+                    cached_date = date_parse_cache.get(raw_date_value)
+                    if raw_date_value not in date_parse_cache:
+                        cached_date = parse_work_date(raw_date_value)
+                        date_parse_cache[raw_date_value] = cached_date
                     if cached_date:
                         work_date = cached_date
                     else:
-                        used_fallback_date = True
+                        work_date = ""
+                        date_parse_error = "unparseable"
                 else:
-                    used_fallback_date = True
+                    work_date = ""
+                    date_parse_error = "missing"
 
             out.append(
                 {
@@ -77,11 +79,14 @@ def parse_sessions_to_rows(sessions: list[dict], fallback_date: date) -> list[di
                     "employee_name": _safe_str(row.get(name_col, "")),
                     "department": _safe_str(row.get(dept_col, "")),
                     "work_date": work_date,
-                    "units": _safe_float(row.get(units_col)),
-                    "hours_worked": _safe_float(row.get(hours_col)),
-                    "uph": _safe_float(row.get(uph_col)),
-                    "_used_fallback_date": used_fallback_date,
+                    "units": _safe_float(raw_units_value),
+                    "hours_worked": _safe_float(raw_hours_value),
+                    "uph": _safe_float(raw_uph_value),
+                    "_date_parse_error": date_parse_error,
                     "_raw_date_value": raw_date_value,
+                    "_raw_units_value": raw_units_value,
+                    "_raw_hours_worked_value": raw_hours_value,
+                    "_raw_uph_value": raw_uph_value,
                 }
             )
 

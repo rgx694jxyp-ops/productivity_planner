@@ -56,6 +56,7 @@ from services.import_quality_service import (
     build_latest_import_summary,
     trust_level_from_summary,
 )
+from services.import_date_service import parse_work_date
 from ui.traceability_panel import render_traceability_panel
 from models.import_quality_models import LatestImportSummary
 from services.trend_classification_service import normalize_trend_state
@@ -708,7 +709,7 @@ def _render_data_confidence_panel(trust: dict) -> None:
         st.caption("Data issues can reduce confidence in today’s interpretation, especially trend and comparison sections.")
 
 
-def _render_import_ready_message(summary: dict) -> None:
+def _render_import_ready_message(summary: dict, *, downstream_ready: bool = False) -> None:
     rows_ready = int(summary.get("valid_rows", 0) or summary.get("rows_processed", 0) or 0)
     employees = int(summary.get("emp_count", 0) or 0)
     row_label = "row" if rows_ready == 1 else "rows"
@@ -718,12 +719,28 @@ def _render_import_ready_message(summary: dict) -> None:
     if confidence_level == "Moderate":
         confidence_level = "Medium"
 
+    _title = (
+        "Import complete: first signal view is ready"
+        if downstream_ready
+        else "Import saved: final signal view is still being prepared"
+    )
+    _status_line = (
+        "Compared using available targets and recent history."
+        if downstream_ready
+        else "Your data was written successfully. Today and Team will update when downstream processing finishes."
+    )
+    _support_line = (
+        "Signals are surfaced to establish an initial baseline."
+        if downstream_ready
+        else "Post-import materialization is running asynchronously in the background."
+    )
+
     st.markdown(
         f'<div class="dpd-import-done" style="background:#ffffff;border:1px solid #d9e2ef;border-radius:10px;padding:14px 16px;">'
-        f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">Import complete: first signal view is ready</div>'
+        f'<div class="dpd-import-done-title" style="color:#000000;font-size:20px;font-weight:800;line-height:1.3;">{_title}</div>'
         f'<div class="dpd-import-row" style="color:#000000;font-size:16px;line-height:1.5;margin-top:6px;"><strong>{rows_ready:,}</strong> {row_label} across <strong>{employees:,}</strong> {employee_label}</div>'
-        f'<div class="dpd-import-row" style="color:#000000;font-size:15px;line-height:1.5;margin-top:8px;">Compared using available targets and recent history.</div>'
-        f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:10px;">Signals are surfaced to establish an initial baseline.</div>'
+        f'<div class="dpd-import-row" style="color:#000000;font-size:15px;line-height:1.5;margin-top:8px;">{_status_line}</div>'
+        f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:10px;">{_support_line}</div>'
         f'<div class="dpd-import-row" style="color:#5d7693;font-size:13px;line-height:1.4;margin-top:4px;">Confidence: {confidence_level} based on available data completeness and sample depth.</div>'
         f'</div>',
         unsafe_allow_html=True,
@@ -1692,13 +1709,16 @@ def _import_step3(tenant_id: str):
     # ── Post-import confidence summary (shown once after pipeline completes) ──
     if st.session_state.get("_import_complete_summary"):
         _sm = st.session_state["_import_complete_summary"]
+        _downstream_ready = st.session_state.get("_post_import_refresh_pending") is False
         _ic_below = _sm.get("below", 0)
         _ic_risks = _sm.get("risks", 0)
         _ic_trust = _sm.get("trust") or {}
         _focus_first_insight = bool(st.session_state.pop(_FOCUS_FIRST_INSIGHT_ONCE_FLAG, False))
-        if _focus_first_insight:
+        if _focus_first_insight and _downstream_ready:
             st.success("Sample data is ready. Showing your first insight now.")
-        _render_import_ready_message(_sm)
+        elif _focus_first_insight:
+            st.info("Sample data was saved. Insights will appear once downstream processing finishes.")
+        _render_import_ready_message(_sm, downstream_ready=_downstream_ready)
 
         # ── First interpreted insight ─────────────────────────────────────────
         try:
@@ -1892,13 +1912,14 @@ def _import_step3(tenant_id: str):
                 _enm = str(_r.get(_name_col, "") if _name_col else "").strip()
                 _dep = str(_r.get(_dept_col, "") if _dept_col else "").strip()
                 _d = str(_r.get(_date_col, "") if _date_col else "").strip()
+                _parsed_preview_date = parse_work_date(_d) if _date_col else None
                 if _eid:
                     _preview_emp_ids.add(_eid)
-                if _d:
-                    _preview_dates.add(_d[:10])
+                if _parsed_preview_date:
+                    _preview_dates.add(_parsed_preview_date)
                 if len(_preview_rows) < 25:
                     _preview_rows.append({
-                        "Date": _d[:10] if _d else work_date.isoformat(),
+                        "Date": _parsed_preview_date if _date_col else work_date.isoformat(),
                         "Employee ID": _eid,
                         "Employee Name": _enm,
                         "Department": _dep,
@@ -2073,6 +2094,20 @@ def _import_step3(tenant_id: str):
             f"Sample preview of parsed rows. About {_preview_days} day(s) and "
             f"{len(_preview_emp_ids)} unique employee ID(s) detected."
         )
+        if _candidate_preview_rows:
+            if _preview_exact_duplicate_import:
+                _duplicate_message = (
+                    f"{len(_candidate_preview_rows):,} rows are duplicates and will be ignored. "
+                    "These rows already exist in your data. Running the pipeline will not add new rows for them."
+                )
+            elif _preview_overlap_count > 0:
+                _duplicate_message = (
+                    f"{_preview_overlap_count:,} rows already exist and will be replaced. "
+                    "These rows already exist in your data. Running the pipeline will replace the existing values with this new data."
+                )
+            else:
+                _duplicate_message = "No duplicates detected in this preview."
+            st.warning(_duplicate_message)
         if _preview_trust_summary:
             _render_import_trust_summary(_preview_trust_summary, heading="Projected data quality and trust")
             _render_latest_import_summary(
@@ -2097,6 +2132,26 @@ def _import_step3(tenant_id: str):
         if _preview_row_issues:
             with st.expander("Show row-level validation issues", expanded=False):
                 _render_row_error_summary(_preview_row_issues)
+        _preview_exclusion_reason_counts = {}
+        for _issue in (_preview_row_issues or []):
+            if str(_issue.get("severity", "error") or "error").strip().lower() != "error":
+                continue
+            _code = str(_issue.get("code", "unknown") or "unknown").strip() or "unknown"
+            _preview_exclusion_reason_counts[_code] = int(_preview_exclusion_reason_counts.get(_code, 0) or 0) + 1
+        if _preview_exact_duplicate_import:
+            _preview_exclusion_reason_counts["exact_duplicate_import"] = int(
+                _preview_exclusion_reason_counts.get("exact_duplicate_import", 0) or 0
+            ) + int(len(_candidate_preview_rows or []))
+        elif _preview_mismatch_rows:
+            _preview_exclusion_reason_counts["history_key_mismatch"] = int(
+                _preview_exclusion_reason_counts.get("history_key_mismatch", 0) or 0
+            ) + int(len(_preview_mismatch_rows or []))
+        if _preview_exclusion_reason_counts:
+            _preview_reason_bits = ", ".join(
+                f"{_k}: {_v}"
+                for _k, _v in sorted(_preview_exclusion_reason_counts.items())
+            )
+            st.caption(f"Excluded/ignored reason counts: {_preview_reason_bits}")
         if _preview_mismatch_rows:
             with st.expander("Show excluded/ignored rows", expanded=False):
                 st.dataframe(pd.DataFrame(_preview_mismatch_rows[:120]), use_container_width=True, hide_index=True)
@@ -2122,11 +2177,11 @@ def _import_step3(tenant_id: str):
                 )
                 if _preview_overlap_count:
                     st.caption(
-                        f"Overlap detected for {_preview_overlap_count}/{len(_candidate_preview_rows)} row(s). "
-                        "Existing history for those employee/day keys will be replaced before insert."
+                        "These rows already exist in your data. "
+                        "Running the pipeline will replace the existing values with this new data."
                     )
             if _preview_exact_duplicate_import:
-                st.warning("All derived rows are duplicates. Nothing new will be uploaded.")
+                st.warning("All derived rows are duplicates. Running the pipeline will not add new rows.")
                 if _matching_upload:
                     st.caption(
                         "Matched a previously uploaded dataset fingerprint "
@@ -2173,6 +2228,30 @@ def _import_step3(tenant_id: str):
             context={"source_mode": "demo", "resume": True},
         )
         st.info("Loading sample data and preparing your first insight. This can take a few seconds.")
+
+    _outcome_processed = int(len(_candidate_preview_rows or []))
+    _outcome_replaced = 0 if _preview_exact_duplicate_import else int(_preview_overlap_count or 0)
+    _outcome_added = 0 if _preview_exact_duplicate_import else max(0, _outcome_processed - _outcome_replaced)
+    _outcome_ignored = int(len(_preview_mismatch_rows or []))
+    if _preview_exact_duplicate_import:
+        _outcome_ignored += _outcome_processed
+
+    st.markdown("**What will happen when you run this pipeline**")
+    with st.container(border=True):
+        st.markdown(f"{_outcome_processed:,} rows will be processed")
+        st.markdown(f"{_outcome_added:,} new rows will be added")
+        st.markdown(f"{_outcome_replaced:,} existing rows will be replaced")
+        st.markdown(f"{_outcome_ignored:,} rows will be ignored/excluded")
+
+        if (_outcome_added + _outcome_replaced) > 0:
+            st.caption(
+                "After this runs, only rows that are new or replaced will be available for signal generation in Today and Team."
+            )
+        else:
+            st.warning("This import will not create new signal rows with the current handling choices.")
+            st.caption(
+                "After this runs, your current Today and Team signals will stay the same until new usable rows are imported."
+            )
     
     _confirm_preview = st.checkbox(
         "I reviewed the preview and want to write this data to history",
@@ -2390,83 +2469,103 @@ def _import_step3(tenant_id: str):
             # Determine whether any session has a date column mapped
             has_date_col  = any(s.get("mapping",{}).get("Date")  for s in sessions)
 
-            for sess in sessions:
-                s_mapping  = sess.get("mapping") or all_mapping
-                s_rows     = sess.get("rows", [])
-                s_id_col   = s_mapping.get("EmployeeID",   "EmployeeID")
-                s_name_col = s_mapping.get("EmployeeName", "EmployeeName")
-                s_dept_col = s_mapping.get("Department",   "Department")
-                s_date_col = s_mapping.get("Date",         "")
-                s_u_col    = s_mapping.get("Units",        "Units")
-                s_h_col    = s_mapping.get("HoursWorked",  "HoursWorked")
-                s_uph_col  = s_mapping.get("UPH",          "UPH")
+            _candidate_source_rows = list(_candidate_preview_rows or [])
+            _candidate_write_exclusions = []
+            _candidate_write_exclusion_counts = defaultdict(int)
 
-                for row in s_rows:
-                    eid = str(row.get(s_id_col, "")).strip()
-                    if not eid:
+            def _record_candidate_exclusion(reason: str, row: dict) -> None:
+                _reason = str(reason or "unknown").strip() or "unknown"
+                _candidate_write_exclusion_counts[_reason] += 1
+                if len(_candidate_write_exclusions) < 120:
+                    _candidate_write_exclusions.append(
+                        {
+                            "Reason": _reason,
+                            "Employee ID": str((row or {}).get("emp_id", "") or ""),
+                            "Date": str((row or {}).get("work_date", "") or ""),
+                            "Department": str((row or {}).get("department", "") or ""),
+                            "Source": "validated_candidate_row",
+                        }
+                    )
+
+            for row in _candidate_source_rows:
+                eid = str(row.get("emp_id", "") or "").strip()
+                if not eid:
+                    _record_candidate_exclusion("missing_emp_id_in_candidate", row)
+                    continue
+
+                row_date = str(row.get("work_date", "") or "").strip()[:10]
+                if not row_date:
+                    _record_candidate_exclusion("missing_work_date_in_candidate", row)
+                    continue
+
+                try:
+                    units_val = float(row.get("units", 0) or 0)
+                    if not math.isfinite(units_val):
+                        _record_candidate_exclusion("non_finite_units_in_candidate", row)
                         continue
+                except (ValueError, TypeError):
+                    _record_candidate_exclusion("invalid_units_in_candidate", row)
+                    continue
 
-                    try:
-                        units_val = float(row.get(s_u_col, 0) or 0)
-                        if not math.isfinite(units_val):
-                            units_val = 0.0
-                    except (ValueError, TypeError):
-                        units_val = 0.0
-                    try:
-                        hours_val = float(row.get(s_h_col, 0) or 0)
-                        if not math.isfinite(hours_val):
-                            hours_val = 0.0
-                    except (ValueError, TypeError):
-                        hours_val = 0.0
-                    if units_val < 0:
-                        units_val = 0.0
-                        neg_value_fixed_count += 1
-                    if hours_val < 0:
-                        hours_val = 0.0
-                        neg_value_fixed_count += 1
-                    raw_uph = row.get(s_uph_col, None)
+                try:
+                    hours_val = float(row.get("hours_worked", 0) or 0)
+                    if not math.isfinite(hours_val):
+                        _record_candidate_exclusion("non_finite_hours_in_candidate", row)
+                        continue
+                except (ValueError, TypeError):
+                    _record_candidate_exclusion("invalid_hours_in_candidate", row)
+                    continue
 
-                    # Date: use mapped column value, fall back to work_date picker
-                    row_date = work_date.isoformat()
-                    if s_date_col and row.get(s_date_col):
-                        raw_d = str(row[s_date_col]).strip()[:10]
-                        try:
-                            datetime.strptime(raw_d, "%Y-%m-%d")
-                            row_date = raw_d
-                        except ValueError:
-                            pass
+                if units_val < 0:
+                    _record_candidate_exclusion("negative_units_in_candidate", row)
+                    continue
+                if hours_val < 0:
+                    _record_candidate_exclusion("negative_hours_in_candidate", row)
+                    continue
 
-                    key = (eid, "", row_date)
-                    combo_agg[key]["units"] += units_val
-                    combo_agg[key]["hours"] += hours_val
-                    _valid_uph_val = None
-                    if raw_uph:
-                        try:
-                            _uph_val = float(raw_uph)
-                            if math.isfinite(_uph_val) and 0 <= _uph_val <= max_reasonable_uph:
-                                _valid_uph_val = _uph_val
-                            else:
-                                uph_rejected_count += 1
-                        except (ValueError, TypeError):
-                            uph_rejected_count += 1
-                    if _valid_uph_val is not None:
-                        combo_agg[key]["uphs"].append(_valid_uph_val)
+                _valid_uph_val = None
+                try:
+                    _uph_raw = row.get("uph", 0)
+                    _uph_val = float(_uph_raw if _uph_raw is not None else 0)
+                    if math.isfinite(_uph_val) and 0 <= _uph_val <= max_reasonable_uph:
+                        _valid_uph_val = _uph_val
+                    else:
+                        uph_rejected_count += 1
+                except (ValueError, TypeError):
+                    uph_rejected_count += 1
 
-                    name_val, _name_flagged = _sanitize_employee_name(row.get(s_name_col, ""), eid)
-                    if _name_flagged:
-                        name_fixed_count += 1
-                    dept_val = _normalize_label_text(row.get(s_dept_col, ""), max_len=40)
-                    if name_val:
-                        combo_agg[key]["name"]                    = name_val
-                        emp_date_totals[(eid, row_date)]["name"]  = name_val
-                    if dept_val:
-                        combo_agg[key]["dept"]                    = dept_val
-                        emp_date_totals[(eid, row_date)]["dept"]  = dept_val
+                key = (eid, "", row_date)
+                combo_agg[key]["units"] += units_val
+                combo_agg[key]["hours"] += hours_val
+                if _valid_uph_val is not None:
+                    combo_agg[key]["uphs"].append(_valid_uph_val)
 
-                    emp_date_totals[(eid, row_date)]["units"] += units_val
-                    emp_date_totals[(eid, row_date)]["hours"] += hours_val
-                    if _valid_uph_val is not None:
-                        emp_date_totals[(eid, row_date)]["uphs"].append(_valid_uph_val)
+                name_val, _name_flagged = _sanitize_employee_name(row.get("employee_name", ""), eid)
+                if _name_flagged:
+                    name_fixed_count += 1
+                dept_val = _normalize_label_text(row.get("department", ""), max_len=40)
+                if name_val:
+                    combo_agg[key]["name"] = name_val
+                    emp_date_totals[(eid, row_date)]["name"] = name_val
+                if dept_val:
+                    combo_agg[key]["dept"] = dept_val
+                    emp_date_totals[(eid, row_date)]["dept"] = dept_val
+
+                emp_date_totals[(eid, row_date)]["units"] += units_val
+                emp_date_totals[(eid, row_date)]["hours"] += hours_val
+                if _valid_uph_val is not None:
+                    emp_date_totals[(eid, row_date)]["uphs"].append(_valid_uph_val)
+
+            _candidate_write_excluded_count = int(sum(_candidate_write_exclusion_counts.values()))
+            if _candidate_write_excluded_count:
+                _reason_bits = ", ".join(
+                    f"{_k}: {_v}"
+                    for _k, _v in sorted(_candidate_write_exclusion_counts.items())
+                )
+                st.warning(
+                    f"Excluded {_candidate_write_excluded_count} validated candidate row(s) before write due to data-shape checks."
+                )
+                st.caption(f"Exclusion reasons: {_reason_bits}")
 
             if neg_value_fixed_count:
                 st.warning(f"Adjusted {neg_value_fixed_count} negative unit/hour value(s) to 0.")
@@ -2530,7 +2629,7 @@ def _import_step3(tenant_id: str):
             # - overlapping employee/date keys => replace existing rows for those keys
             _dup_skipped = 0
             _replaced_existing_rows = 0
-            _candidate_count = len(uph_batch)
+            _candidate_count = len(_candidate_source_rows)
             _exact_duplicate_import = False
             _undo_previous_rows = []
             _undo_touched_keys = []
@@ -2834,8 +2933,8 @@ def _import_step3(tenant_id: str):
                         ),
                         handling_choice=str(st.session_state.get("import_preview_continue_path") or ""),
                         handling_note="Imported through legacy-compatible UPH pipeline",
-                        from_date="" if _should_defer_snapshot_recompute else (_valid_dates[0] if _valid_dates else ""),
-                        to_date="" if _should_defer_snapshot_recompute else (_valid_dates[-1] if _valid_dates else ""),
+                        from_date=(_valid_dates[0] if _valid_dates else ""),
+                        to_date=(_valid_dates[-1] if _valid_dates else ""),
                         replace_existing_snapshots=False,
                         ingest_activity=True,
                         snapshot_source_limit=5000,
@@ -3019,9 +3118,9 @@ def _import_step3(tenant_id: str):
                 "valid_rows": int((_final_trust_summary or {}).get("accepted_rows", 0) or len(uph_batch)),
                 "warning_rows": int((_final_trust_summary or {}).get("warnings", 0) or 0),
                 "rejected_rows": int((_final_trust_summary or {}).get("rejected_rows", 0) or max(0, _candidate_count - len(uph_batch))),
-                "ignored_or_excluded_rows": int((_dup_skipped or 0) + len(_preview_mismatch_rows or [])),
+                "ignored_or_excluded_rows": int((_dup_skipped or 0) + len(_preview_mismatch_rows or []) + _candidate_write_excluded_count),
                 "row_issues": list(_preview_row_issues or []),
-                "excluded_rows": list((_preview_mismatch_rows or [])[:120]),
+                "excluded_rows": list(((_preview_mismatch_rows or []) + (_candidate_write_exclusions or []))[:120]),
                 "preview_rows": list((_preview_rows or [])[:120]),
                 "import_job": _serialize_import_job(_import_job),
                 "import_file": _upload_name,
@@ -3068,9 +3167,14 @@ def _import_step3(tenant_id: str):
 
     if st.session_state.get("pipeline_done") and st.session_state.get("alloc_rows"):
         _uc = len({r["emp_id"] for r in st.session_state.alloc_rows})
-        col2.success(
-            f"✓ Your data is ready — {_uc} employee{'s' if _uc != 1 else ''} available for review now."
-        )
+        if st.session_state.get("_post_import_refresh_pending") is False:
+            col2.success(
+                f"✓ Your data is ready — {_uc} employee{'s' if _uc != 1 else ''} available for review now."
+            )
+        else:
+            col2.info(
+                f"✓ Import saved for {_uc} employee{'s' if _uc != 1 else ''}. Today and Team will update when downstream processing finishes."
+            )
 
     if st.button("↺ Start fresh import", use_container_width=True):
         st.session_state.uploaded_sessions = []

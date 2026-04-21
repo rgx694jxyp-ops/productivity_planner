@@ -12,6 +12,18 @@ from services.app_logging import log_error as log_app_error
 from services.app_logging import log_info, log_warn
 
 
+_UPH_HISTORY_WRITE_COLUMNS = {
+    "tenant_id",
+    "emp_id",
+    "work_date",
+    "uph",
+    "units",
+    "hours_worked",
+    "department",
+    "order_id",
+}
+
+
 def get_all_uph_history(days: int = 30, *, limit: int = 0, tenant_id: str = "") -> list[dict]:
     """All UPH history records with pagination past Supabase default row caps."""
     sb = get_client()
@@ -188,12 +200,15 @@ def batch_store_uph_history(
             if not math.isfinite(hours_val):
                 hours_val = 0.0
 
-            safe_chunk.append({
-                **row,
-                "uph": uph_val,
-                "units": units_val,
-                "hours_worked": hours_val,
-            })
+            payload_row = {
+                key: row.get(key)
+                for key in _UPH_HISTORY_WRITE_COLUMNS
+                if key in row
+            }
+            payload_row["uph"] = uph_val
+            payload_row["units"] = units_val
+            payload_row["hours_worked"] = hours_val
+            safe_chunk.append(payload_row)
 
         try:
             sb.table("uph_history").upsert(

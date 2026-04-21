@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
 
 from services.import_pipeline.models import ImportIssue
 
@@ -23,18 +22,6 @@ def validate_rows(parsed_rows: list[dict], *, max_reasonable_uph: float = 500.0)
         work_date = str(row.get("work_date") or "").strip()[:10]
         dept = str(row.get("department") or "").strip()
 
-        if bool(row.get("_used_fallback_date")):
-            issues.append(
-                ImportIssue(
-                    code="date_parse_fallback",
-                    message="Date missing or unparseable; used selected work date",
-                    severity="warning",
-                    row_index=row_idx,
-                    field="Date",
-                    value=str(row.get("_raw_date_value") or ""),
-                )
-            )
-
         if not emp_id:
             issues.append(ImportIssue(code="missing_emp_id", message="Missing Employee ID", row_index=row_idx, field="EmployeeID"))
             continue
@@ -42,10 +29,26 @@ def validate_rows(parsed_rows: list[dict], *, max_reasonable_uph: float = 500.0)
         units = row.get("units")
         hours = row.get("hours_worked")
         if units is None:
-            issues.append(ImportIssue(code="invalid_units", message="Units must be numeric", row_index=row_idx, field="Units", value=str(row.get("units"))))
+            issues.append(
+                ImportIssue(
+                    code="invalid_units",
+                    message="Units must be numeric",
+                    row_index=row_idx,
+                    field="Units",
+                    value=str(row.get("_raw_units_value") or ""),
+                )
+            )
             continue
         if hours is None:
-            issues.append(ImportIssue(code="invalid_hours", message="Hours worked must be numeric", row_index=row_idx, field="HoursWorked", value=str(row.get("hours_worked"))))
+            issues.append(
+                ImportIssue(
+                    code="invalid_hours",
+                    message="Hours worked must be numeric",
+                    row_index=row_idx,
+                    field="HoursWorked",
+                    value=str(row.get("_raw_hours_worked_value") or ""),
+                )
+            )
             continue
 
         if units < 0:
@@ -56,8 +59,30 @@ def validate_rows(parsed_rows: list[dict], *, max_reasonable_uph: float = 500.0)
             continue
 
         if not work_date:
-            work_date = date.today().isoformat()
-            issues.append(ImportIssue(code="missing_date", message="Missing date; defaulted to today", severity="warning", row_index=row_idx, field="Date"))
+            parse_error = str(row.get("_date_parse_error") or "").strip().lower()
+            if parse_error == "missing":
+                issues.append(
+                    ImportIssue(
+                        code="missing_date",
+                        message="Missing date",
+                        severity="error",
+                        row_index=row_idx,
+                        field="Date",
+                        value=str(row.get("_raw_date_value") or ""),
+                    )
+                )
+            else:
+                issues.append(
+                    ImportIssue(
+                        code="invalid_date",
+                        message="Date is not in a supported format",
+                        severity="error",
+                        row_index=row_idx,
+                        field="Date",
+                        value=str(row.get("_raw_date_value") or ""),
+                    )
+                )
+            continue
 
         key = (emp_id, work_date, dept)
         seen_keys[key] += 1
@@ -74,7 +99,7 @@ def validate_rows(parsed_rows: list[dict], *, max_reasonable_uph: float = 500.0)
                         severity="warning",
                         row_index=row_idx,
                         field="UPH",
-                        value=str(uph_val),
+                        value=str(row.get("_raw_uph_value") or uph_val),
                     )
                 )
 

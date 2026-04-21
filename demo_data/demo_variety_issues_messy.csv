@@ -1,0 +1,11 @@
+Date,Department,EmployeeID,EmployeeName,Shift,UPH,Units,HoursWorked
+2026-04-20,Picking,EMP801,Jordan Pike,Day,49.5,396,8.0
+2026-04-20,Picking,EMP801,Jordan Pike,Day,49.5,396,8.0
+2026-04-20,Picking,emp801,Jordan  Pike,Day,48.9,391,8.0
+2026-04-20,Packing,,Riley Ford,Day,52.0,416,8.0
+2026-04-20,Packing,EMP802,Riley Ford,Day,,416,8.0
+2026-04-20,Receiving,EMP803,Casey Young,Night,not_a_number,360,8.0
+2026/04/20,Picking,EMP804,Alex Hart,Day,51.2,410,8.0
+2026-04-20,Receiving,EMP805,Morgan Lee,Night,46.3,370,
+2026-04-21,Picking,EMP801,Jordan Pike,Day,48.7,390,8.0
+2026-04-21,Packing,EMP802,Riley Ford,Day,51.4,411,8.0

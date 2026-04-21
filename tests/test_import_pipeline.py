@@ -3,6 +3,8 @@ from datetime import date
 from services import import_service
 from services.import_pipeline.models import ImportPreviewResult, ImportSummary, MappingReview
 from services.import_pipeline import orchestrator
+from services.import_pipeline.parser import parse_sessions_to_rows
+from services.import_pipeline.validator import validate_rows
 
 
 def test_sanitize_employee_name_flags_suspicious_input():
@@ -192,53 +194,204 @@ def test_find_matching_upload_by_fingerprint_reuses_cached_result(monkeypatch):
     assert calls["execute"] == 1
 
 
-def test_preview_import_surfaces_fallback_date_warning_summary(monkeypatch):
-    monkeypatch.setattr(
-        orchestrator,
-        "review_mapping",
-        lambda mapping: MappingReview(mapped={"EmployeeID": "EmployeeID", "Date": "Date"}, required_missing=[], optional_unmapped=[]),
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "parse_sessions_to_rows",
-        lambda sessions, fallback_date: [{
-            "emp_id": "E1",
-            "work_date": fallback_date.isoformat(),
-            "department": "Pack",
-            "uph": 80,
-            "units": 160,
-            "hours_worked": 2,
-            "row_index": 1,
-            "_used_fallback_date": True,
-            "_raw_date_value": "04/10/2026",
-        }],
-    )
-    monkeypatch.setattr(
-        orchestrator,
-        "validate_rows",
-        lambda rows: (
-            [{k: v for k, v in rows[0].items() if not str(k).startswith("_")}],
-            [
-                orchestrator.ImportIssue(
-                    code="date_parse_fallback",
-                    message="Date missing or unparseable; used selected work date",
-                    severity="warning",
-                    row_index=1,
-                    field="Date",
-                    value="04/10/2026",
-                )
+def test_parse_sessions_to_rows_normalizes_common_non_iso_date_values():
+    sessions = [
+        {
+            "filename": "batch.csv",
+            "mapping": {
+                "EmployeeID": "EmployeeID",
+                "EmployeeName": "EmployeeName",
+                "Department": "Department",
+                "Date": "Date",
+                "Units": "Units",
+                "HoursWorked": "HoursWorked",
+            },
+            "rows": [
+                {
+                    "EmployeeID": "E1",
+                    "EmployeeName": "Alex",
+                    "Department": "Pick",
+                    "Date": "04/10/2026",
+                    "Units": "120",
+                    "HoursWorked": "2",
+                }
             ],
-            0,
-        ),
-    )
-    monkeypatch.setattr(orchestrator, "_find_matching_upload_by_fingerprint", lambda tenant_id, fingerprint, days=3650: None)
+        }
+    ]
 
-    result = orchestrator.preview_import(
-        [{"mapping": {"EmployeeID": "EmployeeID", "Date": "Date"}}],
-        fallback_date=date(2026, 4, 10),
-        tenant_id="tenant-a",
-        user_role="manager",
-    )
+    parsed = parse_sessions_to_rows(sessions, fallback_date=date(2026, 1, 1))
 
-    assert result.success is True
-    assert result.trust_summary.warning_summary == "Some row dates could not be parsed and used the selected work date instead."
+    assert len(parsed) == 1
+    assert parsed[0]["work_date"] == "2026-04-10"
+
+
+def test_parse_sessions_to_rows_invalid_mapped_dates_do_not_fallback_to_selected_date():
+    sessions = [
+        {
+            "filename": "batch.csv",
+            "mapping": {
+                "EmployeeID": "EmployeeID",
+                "EmployeeName": "EmployeeName",
+                "Department": "Department",
+                "Date": "Date",
+                "Units": "Units",
+                "HoursWorked": "HoursWorked",
+            },
+            "rows": [
+                {
+                    "EmployeeID": "E1",
+                    "EmployeeName": "Alex",
+                    "Department": "Pick",
+                    "Date": "not-a-date",
+                    "Units": "120",
+                    "HoursWorked": "2",
+                }
+            ],
+        }
+    ]
+
+    parsed = parse_sessions_to_rows(sessions, fallback_date=date(2026, 4, 10))
+    candidates, issues, duplicate_rows = validate_rows(parsed)
+
+    assert candidates == []
+    assert duplicate_rows == 0
+    assert any(issue.code == "invalid_date" for issue in issues)
+
+
+def test_validate_rows_mixed_valid_invalid_rows_has_deterministic_exclusions_and_candidates():
+    parsed_rows = [
+        {
+            "row_index": 1,
+            "emp_id": "E1",
+            "employee_name": "Alex",
+            "department": "Pick",
+            "work_date": "2026-04-10",
+            "units": 100.0,
+            "hours_worked": 2.0,
+            "uph": None,
+            "_date_parse_error": "",
+            "_raw_date_value": "2026-04-10",
+            "_raw_units_value": "100",
+            "_raw_hours_worked_value": "2",
+            "_raw_uph_value": "",
+        },
+        {
+            "row_index": 2,
+            "emp_id": "E1",
+            "employee_name": "Alex",
+            "department": "Pick",
+            "work_date": "2026-04-10",
+            "units": 100.0,
+            "hours_worked": 2.0,
+            "uph": 55.0,
+            "_date_parse_error": "",
+            "_raw_date_value": "2026-04-10",
+            "_raw_units_value": "100",
+            "_raw_hours_worked_value": "2",
+            "_raw_uph_value": "55",
+        },
+        {
+            "row_index": 3,
+            "emp_id": "",
+            "employee_name": "No ID",
+            "department": "Pick",
+            "work_date": "2026-04-10",
+            "units": 100.0,
+            "hours_worked": 2.0,
+            "uph": None,
+            "_date_parse_error": "",
+            "_raw_date_value": "2026-04-10",
+            "_raw_units_value": "100",
+            "_raw_hours_worked_value": "2",
+            "_raw_uph_value": "",
+        },
+        {
+            "row_index": 4,
+            "emp_id": "E2",
+            "employee_name": "Missing Date",
+            "department": "Pick",
+            "work_date": "",
+            "units": 100.0,
+            "hours_worked": 2.0,
+            "uph": None,
+            "_date_parse_error": "missing",
+            "_raw_date_value": "",
+            "_raw_units_value": "100",
+            "_raw_hours_worked_value": "2",
+            "_raw_uph_value": "",
+        },
+        {
+            "row_index": 5,
+            "emp_id": "E3",
+            "employee_name": "Bad Date",
+            "department": "Pick",
+            "work_date": "",
+            "units": 100.0,
+            "hours_worked": 2.0,
+            "uph": None,
+            "_date_parse_error": "unparseable",
+            "_raw_date_value": "not-a-date",
+            "_raw_units_value": "100",
+            "_raw_hours_worked_value": "2",
+            "_raw_uph_value": "",
+        },
+        {
+            "row_index": 6,
+            "emp_id": "E4",
+            "employee_name": "Bad Units",
+            "department": "Pick",
+            "work_date": "2026-04-10",
+            "units": None,
+            "hours_worked": 2.0,
+            "uph": None,
+            "_date_parse_error": "",
+            "_raw_date_value": "2026-04-10",
+            "_raw_units_value": "abc",
+            "_raw_hours_worked_value": "2",
+            "_raw_uph_value": "",
+        },
+    ]
+
+    candidates, issues, duplicate_rows = validate_rows(parsed_rows)
+
+    assert duplicate_rows == 1
+    assert len(candidates) == 1
+    assert candidates[0]["emp_id"] == "E1"
+    assert candidates[0]["work_date"] == "2026-04-10"
+    assert candidates[0]["units"] == 200
+    assert candidates[0]["hours_worked"] == 4.0
+    assert candidates[0]["uph"] == 55.0
+
+    issue_codes = [issue.code for issue in issues]
+    assert "missing_emp_id" in issue_codes
+    assert "missing_date" in issue_codes
+    assert "invalid_date" in issue_codes
+    assert "invalid_units" in issue_codes
+
+
+def test_validate_rows_invalid_numeric_reason_preserves_raw_value():
+    parsed_rows = [
+        {
+            "row_index": 1,
+            "emp_id": "E9",
+            "employee_name": "Raw Value",
+            "department": "Pack",
+            "work_date": "2026-04-10",
+            "units": None,
+            "hours_worked": 3.0,
+            "uph": None,
+            "_date_parse_error": "",
+            "_raw_date_value": "2026-04-10",
+            "_raw_units_value": "not_a_number",
+            "_raw_hours_worked_value": "3",
+            "_raw_uph_value": "",
+        }
+    ]
+
+    candidates, issues, duplicate_rows = validate_rows(parsed_rows)
+
+    assert candidates == []
+    assert duplicate_rows == 0
+    assert len(issues) == 1
+    assert issues[0].code == "invalid_units"
+    assert issues[0].value == "not_a_number"

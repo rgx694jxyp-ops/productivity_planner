@@ -15,6 +15,8 @@ import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
+from services.import_date_service import parse_work_date
+
 _SUSPICIOUS_NAME_RE = re.compile(
     r"(<\s*/?\s*script\b|drop\s+table|;--|javascript:)", re.IGNORECASE
 )
@@ -428,13 +430,11 @@ def _build_candidate_uph_rows(sessions: list[dict], fallback_date) -> list[dict]
                 continue
             _dept = _normalize_label_text(_row.get(_dept_col, ""), max_len=40)
             _row_date = fallback_date.isoformat()
-            if _date_col and _row.get(_date_col):
-                _raw_d = str(_row.get(_date_col, "") or "").strip()[:10]
-                try:
-                    datetime.strptime(_raw_d, "%Y-%m-%d")
-                    _row_date = _raw_d
-                except Exception:
-                    pass
+            if _date_col:
+                _parsed_date = parse_work_date(_row.get(_date_col, ""))
+                if not _parsed_date:
+                    continue
+                _row_date = _parsed_date
 
             try:
                 _units = float(_row.get(_u_col, 0) or 0)
