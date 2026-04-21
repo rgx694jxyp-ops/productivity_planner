@@ -969,6 +969,46 @@ def _apply_today_styles() -> None:
     st.markdown(
         """
         <style>
+                div.block-container {
+                    padding-top: 1rem;
+                    padding-bottom: 1.2rem;
+                }
+                div[data-testid="stExpander"] details {
+                    border: 0;
+                    background: transparent;
+                }
+                div[data-testid="stExpander"] summary {
+                    font-size: 0.88rem;
+                }
+                .today-page-header {
+                    background: #FCFDFF;
+                    border: 1px solid #E8EEF7;
+                    border-radius: 0.62rem;
+                    padding: 1rem 1.125rem;
+                    margin-bottom: 1.5rem;
+                }
+                .today-page-header-kicker {
+                    font-size: 0.75rem;
+                    font-weight: 700;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
+                    color: #5d7693;
+                    margin-bottom: 0.375rem;
+                }
+                .today-page-header-headline {
+                    font-size: 1.25rem;
+                    font-weight: 800;
+                    color: #0f2d52;
+                    line-height: 1.2;
+                    margin: 0 0 0.375rem 0;
+                    letter-spacing: -0.01em;
+                }
+                .today-page-header-detail {
+                    font-size: 0.88rem;
+                    color: #5d7693;
+                    line-height: 1.4;
+                    margin: 0;
+                }
         .today-hero {
             background: linear-gradient(135deg, #0f2d52 0%, #1f4f87 65%, #d9e8f7 180%);
             border-radius: 18px;
@@ -1006,6 +1046,13 @@ def _apply_today_styles() -> None:
             letter-spacing: 0.08em;
             text-transform: uppercase;
             color: #5d7693;
+                .today-section-container {
+                    background: #FCFDFF;
+                    border: 1px solid #E8EEF7;
+                    border-radius: 0.62rem;
+                    padding: 0.875rem 1rem;
+                    margin-bottom: 1rem;
+                }
         }
         .today-home-section {
             margin-top: 12px;
@@ -1024,19 +1071,22 @@ def _apply_today_styles() -> None:
         }
         .today-insight-title {
             font-size: 1rem;
-            font-weight: 800;
             color: #0f2d52;
-            margin-bottom: 4px;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+            letter-spacing: -0.005em;
         }
         .today-insight-title-priority {
             font-size: 1.08rem;
+                        font-weight: 800;
+                        letter-spacing: -0.01em;
             margin-bottom: 6px;
         }
         .today-insight-line {
             color: #182b40;
-            font-size: 0.93rem;
-            line-height: 1.38;
-            margin: 3px 0;
+            font-size: 0.91rem;
+            line-height: 1.42;
+            margin: 0.25rem 0;
         }
         .today-insight-line-priority {
             font-size: 0.97rem;
@@ -1045,20 +1095,24 @@ def _apply_today_styles() -> None:
         }
         .today-insight-meta {
             color: #5d7693;
-            font-size: 0.83rem;
-            margin-top: 7px;
+            font-size: 0.82rem;
+            margin-top: 0.375rem;
+            line-height: 1.3;
         }
         .today-card-department {
             color: #5d7693;
-            font-size: 0.82rem;
-            margin-top: 1px;
-            margin-bottom: 3px;
+            font-size: 0.81rem;
+            margin-top: 0.125rem;
+            margin-bottom: 0.25rem;
+            font-weight: 500;
         }
         .today-card-meta-row {
             color: #60778f;
             font-size: 0.79rem;
-            margin-top: 4px;
-            margin-bottom: 2px;
+            margin-top: 0.375rem;
+            margin-bottom: 0;
+            font-weight: 500;
+            letter-spacing: 0.005em;
         }
         .today-priority-card-gap {
             height: 6px;
@@ -1148,20 +1202,23 @@ def _apply_today_styles() -> None:
             font-size: 0.9rem;
         }
         .today-supporting-note {
-            margin-top: -2px;
-            margin-bottom: 10px;
+            margin-top: 0;
+            margin-bottom: 0.625rem;
             color: #5d7693;
-            font-size: 0.92rem;
+            font-size: 0.88rem;
+            line-height: 1.4;
         }
         .today-update-indicator {
             margin-top: -6px;
-            margin-bottom: 10px;
+            margin-bottom: 0.75rem;
+                        line-height: 1.3;
             color: #5d7693;
             font-size: 0.8rem;
         }
         .today-action-helper {
             margin-top: -4px;
-            margin-bottom: 8px;
+            margin-bottom: 0.5rem;
+                        line-height: 1.35;
             color: #5d7693;
             font-size: 0.82rem;
         }
@@ -1263,6 +1320,11 @@ def _apply_today_styles() -> None:
             margin-bottom: 2px;
         }
         .today-summary-subtitle {
+                    .today-section-divider {
+                        margin: 0.625rem 0;
+                        border-top: 1px solid #EDF2F8;
+                        height: 0;
+                    }
             font-size: 0.82rem;
             color: #5d7693;
             margin-bottom: 8px;
@@ -1294,20 +1356,20 @@ def _apply_today_styles() -> None:
         .attention-score-medium { background: #fef5e7; color: #7a4500; }
         .attention-score-low   { background: #f0f0f0; color: #555; }
         .today-queue-orientation {
-            background: #f4f8fc;
-            border: 1px solid #dce9f5;
+            background: #FCFDFF;
+            border: 1px solid #E8EEF7;
             border-radius: 10px;
-            padding: 10px 14px;
-            margin-bottom: 12px;
-            font-size: 0.9rem;
+            padding: 0.875rem 1rem;
+            margin-bottom: 1rem;
+            font-size: 0.88rem;
             color: #335a80;
-            line-height: 1.55;
+            line-height: 1.5;
         }
         .today-queue-orientation-chips {
             display: flex;
             flex-wrap: wrap;
             gap: 6px;
-            margin-top: 6px;
+            margin-top: 0.5rem;
         }
         .today-queue-chip {
             display: inline-block;
@@ -1315,7 +1377,7 @@ def _apply_today_styles() -> None:
             color: #335a80;
             border-radius: 999px;
             padding: 2px 10px;
-            font-size: 0.8rem;
+            font-size: 0.79rem;
             font-weight: 600;
         }
         .today-signal-status-chip {
