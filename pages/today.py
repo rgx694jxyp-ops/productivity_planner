@@ -4673,8 +4673,6 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     },
                 )
                 st.session_state[phase2_ready_key] = True
-                st.rerun()
-                return
 
             phase2_started_at = time.perf_counter()
             _log_today_milestone(
