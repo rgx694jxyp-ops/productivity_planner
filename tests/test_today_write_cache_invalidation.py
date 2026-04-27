@@ -1145,3 +1145,38 @@ def test_failed_drain_shows_detailed_backend_error(monkeypatch):
     today_module._drain_today_async_completion_results()
 
     assert shown_errors == ["Save failed: Action event write failed."]
+
+
+def test_save_today_card_completion_passes_exception_date_to_create_operational_exception(monkeypatch):
+    """create_operational_exception must always receive exception_date (today's date as ISO string)."""
+    card = _card_for("sig-exc-date", "E12")
+    captured: dict = {}
+
+    def _capture_exception(**kwargs):
+        captured.update(kwargs)
+        return {"id": "exc-999"}
+
+    monkeypatch.setattr("pages.today.create_operational_exception", _capture_exception)
+    monkeypatch.setattr("pages.today.log_follow_through_event", lambda **_kwargs: {"id": "ft-1"})
+    monkeypatch.setattr("pages.today.set_signal_status", lambda **_kwargs: True)
+    monkeypatch.setattr("pages.today.add_coaching_note", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    today_module._save_today_card_completion(
+        card=card,
+        note_text="exception test",
+        follow_up_required=False,
+        follow_up_at=None,
+        add_operational_exception=True,
+        exception_type="Equipment",
+        exception_note="Scanner down",
+        tenant_id="tenant-a",
+        owner_value="lead@example.com",
+        user_role="manager",
+    )
+
+    assert "exception_date" in captured, "exception_date must be passed to create_operational_exception"
+    # Must be a valid YYYY-MM-DD ISO string representing today
+    from datetime import date as _date
+    assert captured["exception_date"] == _date.today().isoformat()

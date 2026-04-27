@@ -3111,6 +3111,7 @@ def _save_today_card_completion(
 
             summary_text = exception_note_clean.split("\n", 1)[0].strip() or "Operational exception linked from Today card"
             created_exception = create_operational_exception(
+                exception_date=date.today().isoformat(),
                 category=category,
                 summary=summary_text,
                 employee_id=str(card.employee_id or "").strip(),
