@@ -66,7 +66,81 @@ def test_signal_status_write_invalidates_today_caches(monkeypatch):
     completed = list(today_module.st.session_state.get("_today_completed_items") or [])
     assert any(str(item or "").startswith("signal:today-signal:e1:packing") for item in completed)
     assert len(list(today_module.st.session_state.get("_today_pending_completion_ids") or [])) == 1
+    assert str(today_module.st.session_state.get("_today_last_clicked_completion_signal_id") or "") == _card().signal_key
     assert any(str((entry.get("kwargs") or {}).get("context", {}).get("click_to_ui_update_ms", "")).strip() != "" for entry in log_events)
+
+
+def test_start_completion_write_calls_persistence_once(monkeypatch):
+    card = _card_for("sig-save-once", "E5")
+    save_calls = {"count": 0}
+
+    def _save_stub(**_kwargs):
+        save_calls["count"] += 1
+        return True
+
+    monkeypatch.setattr("pages.today._save_today_card_completion", _save_stub)
+
+    with today_module._TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS.clear()
+
+    today_module._start_today_completion_write_async(
+        completion_id="c-save-once",
+        payload={
+            "card": today_module.dataclasses.asdict(card),
+            "note_text": "done",
+            "follow_up_required": False,
+            "follow_up_at": None,
+            "owner_value": "lead@example.com",
+            "tenant_id": "tenant-a",
+            "user_role": "manager",
+        },
+    )
+
+    with today_module._TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
+        result = dict(today_module._TODAY_COMPLETION_ASYNC_RESULTS.get("c-save-once") or {})
+
+    assert save_calls["count"] == 1
+    assert str(result.get("status") or "") == "success"
+
+
+def test_successful_drain_clears_pending_and_sets_marked_complete_feedback(monkeypatch):
+    card = _card_for("sig-drain-success", "E6")
+    card_session_key = today_module._today_card_session_key(card)
+    flashed: list[str] = []
+
+    monkeypatch.setattr(
+        "pages.today.st.session_state",
+        {
+            "tenant_id": "tenant-a",
+            "user_email": "lead@example.com",
+            "_today_pending_completion_ids": ["c-success"],
+            "_today_pending_completion_signal_keys": ["sig-drain-success"],
+            "_today_pending_completion_meta": {
+                "c-success": {
+                    "signal_id": "sig-drain-success",
+                    "clicked_at": float(1.0),
+                    "queue_update_ms": 1,
+                    "click_to_ui_update_ms": 1,
+                    "card_session_key": card_session_key,
+                    "card": today_module.dataclasses.asdict(card),
+                }
+            },
+            "_today_completed_items": [card_session_key],
+        },
+    )
+    monkeypatch.setattr("pages.today.set_flash_message", lambda message: flashed.append(str(message)))
+    monkeypatch.setattr("pages.today._narrow_invalidate_today_completion_caches", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+
+    with today_module._TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS.clear()
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS["c-success"] = {"status": "success", "backend_write_ms": 2, "error": ""}
+
+    today_module._drain_today_async_completion_results()
+
+    assert list(today_module.st.session_state.get("_today_pending_completion_ids") or []) == []
+    assert list(today_module.st.session_state.get("_today_pending_completion_signal_keys") or []) == []
+    assert flashed == ["Marked complete."]
 
 
 def test_more_actions_optional_data_is_cached_per_card(monkeypatch):

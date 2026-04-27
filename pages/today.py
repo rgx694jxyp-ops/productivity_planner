@@ -3313,46 +3313,42 @@ def _optimistically_complete_today_card(
 
 
 def _start_today_completion_write_async(*, completion_id: str, payload: dict[str, Any]) -> None:
-    def _worker() -> None:
-        write_started = time.perf_counter()
-        result_payload: dict[str, Any]
-        try:
-            card_payload = dict(payload.get("card") or {})
-            card = TodayQueueCardViewModel(**card_payload)
-            write_ok = _save_today_card_completion(
-                card=card,
-                note_text=str(payload.get("note_text") or ""),
-                follow_up_required=bool(payload.get("follow_up_required", False)),
-                follow_up_at=payload.get("follow_up_at"),
-                add_operational_exception=bool(payload.get("add_operational_exception", False)),
-                exception_type=str(payload.get("exception_type") or ""),
-                exception_note=str(payload.get("exception_note") or ""),
-                linked_existing_exception_id=str(payload.get("linked_existing_exception_id") or ""),
-                add_follow_through=bool(payload.get("add_follow_through", False)),
-                follow_through_status=str(payload.get("follow_through_status") or "logged"),
-                follow_through_note=str(payload.get("follow_through_note") or ""),
-                link_follow_through_to_exception=bool(payload.get("link_follow_through_to_exception", False)),
-                owner_value=str(payload.get("owner_value") or ""),
-                tenant_id=str(payload.get("tenant_id") or ""),
-                user_role=str(payload.get("user_role") or ""),
-            )
-            result_payload = {
-                "status": "success" if bool(write_ok) else "failed",
-                "backend_write_ms": int(max(0.0, (time.perf_counter() - write_started) * 1000)),
-                "error": "" if bool(write_ok) else "write returned false",
-            }
-        except Exception as exc:
-            result_payload = {
-                "status": "failed",
-                "backend_write_ms": int(max(0.0, (time.perf_counter() - write_started) * 1000)),
-                "error": str(exc or "write failed"),
-            }
+    write_started = time.perf_counter()
+    result_payload: dict[str, Any]
+    try:
+        card_payload = dict(payload.get("card") or {})
+        card = TodayQueueCardViewModel(**card_payload)
+        write_ok = _save_today_card_completion(
+            card=card,
+            note_text=str(payload.get("note_text") or ""),
+            follow_up_required=bool(payload.get("follow_up_required", False)),
+            follow_up_at=payload.get("follow_up_at"),
+            add_operational_exception=bool(payload.get("add_operational_exception", False)),
+            exception_type=str(payload.get("exception_type") or ""),
+            exception_note=str(payload.get("exception_note") or ""),
+            linked_existing_exception_id=str(payload.get("linked_existing_exception_id") or ""),
+            add_follow_through=bool(payload.get("add_follow_through", False)),
+            follow_through_status=str(payload.get("follow_through_status") or "logged"),
+            follow_through_note=str(payload.get("follow_through_note") or ""),
+            link_follow_through_to_exception=bool(payload.get("link_follow_through_to_exception", False)),
+            owner_value=str(payload.get("owner_value") or ""),
+            tenant_id=str(payload.get("tenant_id") or ""),
+            user_role=str(payload.get("user_role") or ""),
+        )
+        result_payload = {
+            "status": "success" if bool(write_ok) else "failed",
+            "backend_write_ms": int(max(0.0, (time.perf_counter() - write_started) * 1000)),
+            "error": "" if bool(write_ok) else "write returned false",
+        }
+    except Exception as exc:
+        result_payload = {
+            "status": "failed",
+            "backend_write_ms": int(max(0.0, (time.perf_counter() - write_started) * 1000)),
+            "error": str(exc or "write failed"),
+        }
 
-        with _TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
-            _TODAY_COMPLETION_ASYNC_RESULTS[completion_id] = result_payload
-
-    worker = threading.Thread(target=_worker, daemon=True, name=f"today-complete-{completion_id[:8]}")
-    worker.start()
+    with _TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
+        _TODAY_COMPLETION_ASYNC_RESULTS[completion_id] = result_payload
 
 
 def _drain_today_async_completion_results() -> None:
@@ -3513,7 +3509,7 @@ def _drain_today_async_completion_results() -> None:
     )
 
     if completed_ok > 0:
-        set_flash_message("Action completed.")
+        set_flash_message("Marked complete.")
     if completed_failed > 0:
         show_error_state("Action completion could not be saved right now.")
 
@@ -3668,6 +3664,7 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
         owner_value = str(st.session_state.get("user_email") or st.session_state.get("user_name") or "").strip()
         tenant_id = str(st.session_state.get("tenant_id") or "").strip()
         user_role = str(st.session_state.get("user_role") or "").strip()
+        st.session_state["_today_last_clicked_completion_signal_id"] = signal_id
         write_payload = {
             "card": dataclasses.asdict(card),
             "note_text": str(note_text or ""),
