@@ -238,24 +238,100 @@ def format_selected_employee_subheader(department: str, trend_label: str) -> str
     return f"{department} | {trend_label}"
 
 
-def format_selected_summary(*, status_bucket: str, trend_text: str, note_count: int, follow_up_text: str, target_uph: float | None) -> str:
-    """Build selected-employee summary sentence using descriptive tone."""
+def format_selected_summary(
+    *,
+    status_bucket: str,
+    change_pct: float | None = None,
+    avg_uph: float | None = None,
+    target_uph: float | None = None,
+    trend_text: str = "",
+    note_count: int = 0,
+    follow_up_text: str = "",
+) -> str:
+    """Build focused current-state summary sentence."""
     normalized = str(status_bucket or "").strip().lower()
-    base = "Recent performance is steady."
+    has_target = target_uph is not None and target_uph > 0
+    is_below = avg_uph is not None and has_target and avg_uph < target_uph
+    is_above = avg_uph is not None and has_target and avg_uph >= target_uph
+
+    direction = ""
+    if change_pct is not None:
+        if change_pct >= 3.0:
+            direction = "up"
+        elif change_pct <= -3.0:
+            direction = "down"
+
     if normalized == "needs attention":
-        base = "Recent performance is below target." if target_uph is not None else "Recent performance needs review."
-    elif normalized == "improved recently":
-        base = "Recent performance is improving."
+        if is_below and direction == "down":
+            return "Performance is below target and trending down."
+        if is_below and direction == "up":
+            return "Performance is below target but improving."
+        if is_below:
+            return "Performance is below target."
+        return "Performance needs review."
 
-    if note_count <= 0:
-        note_part = "No recent notes."
-    elif note_count == 1:
-        note_part = "1 recent note."
-    else:
-        note_part = f"{note_count} recent notes."
+    if normalized == "improved recently":
+        if is_above:
+            return "Performance is above target and improving."
+        return "Performance is improving."
 
-    follow_up_part = str(follow_up_text or "").strip()
-    return " ".join(part for part in [base, f"{trend_text}.", note_part, follow_up_part] if part).strip()
+    if is_above and direction == "up":
+        return "Performance is above target and trending up."
+    if is_above and direction == "down":
+        return "Performance is above target but softening."
+    if is_above:
+        return "Performance is at or above target."
+    if direction == "down":
+        return "Performance has softened slightly in this period."
+    return "Performance is holding steady."
+
+
+def format_what_changed_line(
+    *,
+    change_pct: float | None,
+    status_bucket: str,
+    observed_days: int,
+    avg_uph: float | None = None,
+    target_uph: float | None = None,
+    trend: str = "",
+) -> str:
+    """One plain-language sentence explaining why this employee surfaced."""
+    bucket = str(status_bucket or "").strip().lower()
+    trend_lower = str(trend or "").strip().lower()
+    safe_days = max(1, int(observed_days or 1))
+    is_below = (
+        avg_uph is not None
+        and target_uph is not None
+        and target_uph > 0
+        and avg_uph < target_uph
+    )
+
+    if change_pct is not None:
+        if bucket == "needs attention":
+            if change_pct <= -5.0 and is_below:
+                return f"Performance dropped {abs(change_pct):.0f}% over the last {safe_days} days and is now below target."
+            if change_pct <= -3.0:
+                return f"Performance has been declining over the last {safe_days} days."
+            if is_below:
+                return f"Performance has been below target throughout this period."
+            return f"Performance has been below expected levels over the last {safe_days} days."
+        if bucket == "improved recently":
+            if change_pct >= 5.0:
+                return f"Performance is up {change_pct:.0f}% over the last {safe_days} days."
+            return f"Performance has been improving over the last {safe_days} days."
+        if abs(change_pct) < 2.0:
+            return f"Performance has been steady over the last {safe_days} days."
+        if change_pct < 0:
+            return f"Performance has softened slightly over the last {safe_days} days."
+        return f"Performance has edged up over the last {safe_days} days."
+
+    if "variable" in trend_lower or "inconsistent" in trend_lower:
+        return f"Performance has been inconsistent over the last {safe_days} days."
+    if bucket == "needs attention":
+        return f"Performance has been below expected levels over the last {safe_days} days."
+    if bucket == "improved recently":
+        return f"Performance has been improving over the last {safe_days} days."
+    return f"Performance has been steady over the last {safe_days} days."
 
 
 def format_trend_intro(days: int) -> str:
@@ -284,8 +360,10 @@ def format_trend_interpretation_limited_days(observed_days: int) -> str:
     return f"Only {max(0, int(observed_days))} day(s) are available, so this direction may change."
 
 
-def format_trend_interpretation_improving_but_below_target(*, below_count: int, observed_days: int) -> str:
+def format_trend_interpretation_improving_but_below_target(*, below_count: int, observed_days: int, change_pct: float | None = None) -> str:
     """Format interpretation for improving-but-below-target pattern."""
+    if change_pct is not None and change_pct >= 3.0:
+        return f"Performance is up {change_pct:.0f}%, but was below target on {below_count} of the last {observed_days} days."
     return f"Performance is improving, but stayed below target on {below_count} of the last {observed_days} days."
 
 
@@ -294,18 +372,24 @@ def format_trend_interpretation_recent_dip() -> str:
     return "Performance dipped in the last 2 days."
 
 
-def format_trend_interpretation_below_target(*, below_count: int, observed_days: int) -> str:
+def format_trend_interpretation_below_target(*, below_count: int, observed_days: int, change_pct: float | None = None) -> str:
     """Format interpretation for sustained below-target pattern."""
+    if change_pct is not None and change_pct <= -3.0:
+        return f"Performance is down {abs(change_pct):.0f}% over this period and was below target on {below_count} of the last {observed_days} days."
     return f"Performance stayed below target on {below_count} of the last {observed_days} days."
 
 
-def format_trend_interpretation_above_target_and_improving() -> str:
+def format_trend_interpretation_above_target_and_improving(*, change_pct: float | None = None) -> str:
     """Format interpretation for above-target improving trend."""
+    if change_pct is not None and change_pct >= 3.0:
+        return f"Performance is above target and up {change_pct:.0f}% over this period."
     return "Performance is above target and still improving."
 
 
-def format_trend_interpretation_above_target_softening() -> str:
+def format_trend_interpretation_above_target_softening(*, change_pct: float | None = None) -> str:
     """Format interpretation for above-target but declining trend."""
+    if change_pct is not None and abs(change_pct) >= 3.0:
+        return f"Performance is above target but eased {abs(change_pct):.0f}% in this period."
     return "Performance is above target, but momentum has softened."
 
 
@@ -314,13 +398,17 @@ def format_trend_interpretation_near_or_above_target() -> str:
     return "Performance stayed near or above target in this time range."
 
 
-def format_trend_interpretation_improving() -> str:
+def format_trend_interpretation_improving(*, change_pct: float | None = None) -> str:
     """Format interpretation for non-target improving trend."""
+    if change_pct is not None and change_pct >= 3.0:
+        return f"Performance improved {change_pct:.0f}% in this time range."
     return "Performance is improving in this time range."
 
 
-def format_trend_interpretation_declining() -> str:
+def format_trend_interpretation_declining(*, change_pct: float | None = None) -> str:
     """Format interpretation for non-target declining trend."""
+    if change_pct is not None and abs(change_pct) >= 3.0:
+        return f"Performance slipped {abs(change_pct):.0f}% in this time range."
     return "Performance is slipping in this time range."
 
 
@@ -640,3 +728,15 @@ def format_status_summary_line(*, trend_state: str, goal_state: str) -> str:
 def format_comparison_section_title() -> str:
     """Return comparison section title."""
     return _SECTION_TITLES["comparison"]
+
+
+def format_comparison_context_brief(comparison_full_text: str) -> str:
+    """Convert full comparison text to a short chip-friendly summary."""
+    text = str(comparison_full_text or "").strip().lower()
+    if not text:
+        return ""
+    if "below the department midpoint" in text:
+        return "Below department average"
+    if "above the department midpoint" in text:
+        return "Above department average"
+    return ""

@@ -19,6 +19,7 @@ from services.exception_tracking_service import build_exception_context_line, li
 from services.perf_profile import profile_block
 from services.team_page_language_service import (
     format_bridge_helper,
+    format_comparison_context_brief,
     format_comparison_section_title,
     format_comparison_text,
     format_confidence_meta,
@@ -53,7 +54,6 @@ from services.team_page_language_service import (
     format_show_older_exceptions_label,
     format_show_older_notes_label,
     format_status_filter_option,
-    format_status_summary_line,
     format_timeline_description_fallback,
     format_timeline_entry,
     format_timeline_event_display,
@@ -73,6 +73,7 @@ from services.team_page_language_service import (
     format_trend_label,
     format_trend_no_history,
     format_trend_no_points,
+    format_what_changed_line,
     format_window_trend,
     get_team_filter_labels,
     get_team_section_titles,
@@ -92,6 +93,21 @@ def _safe_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+_TIMELINE_NARRATIVE_WEIGHT: dict[str, int] = {
+    "Exception opened": 0,
+    "Status updated": 1,
+    "Follow-up created": 2,
+    "Escalation opened": 2,
+    "Escalation reopened": 2,
+    "Coaching note added": 3,
+    "Recognition shared": 3,
+    "Priority lowered": 3,
+    "Update added": 4,
+    "Completed": 5,
+    "Follow-up completed": 5,
+}
 
 
 def _format_display_dt(when_text: str) -> str:
@@ -272,19 +288,38 @@ def _open_follow_up_state_text(row: dict) -> str:
     return format_follow_up_unavailable()
 
 
+def _what_changed_line(
+    row: dict,
+    *,
+    status_bucket: str,
+    time_window_days: int,
+    avg_uph: float | None,
+    target_uph: float | None,
+) -> str:
+    """Plain-language sentence explaining what changed for the selected employee."""
+    change_pct = _safe_float(row.get("change_pct"))
+    trend = str(row.get("trend") or "").strip().lower()
+    return format_what_changed_line(
+        change_pct=change_pct,
+        status_bucket=status_bucket,
+        observed_days=time_window_days,
+        avg_uph=avg_uph,
+        target_uph=target_uph,
+        trend=trend,
+    )
+
+
 def _selected_employee_summary_sentence(
     *,
     status_bucket: str,
-    trend_text: str,
-    note_count: int,
-    follow_up_text: str,
+    change_pct: float | None,
+    avg_uph: float | None,
     target_uph: float | None,
 ) -> str:
     return format_selected_summary(
         status_bucket=status_bucket,
-        trend_text=trend_text,
-        note_count=note_count,
-        follow_up_text=follow_up_text,
+        change_pct=change_pct,
+        avg_uph=avg_uph,
         target_uph=target_uph,
     )
 
@@ -324,6 +359,7 @@ def _trend_interpretation_sentence(chart_rows: list[dict], target_uph: float | N
                 return format_trend_interpretation_improving_but_below_target(
                     below_count=below_count,
                     observed_days=observed_days,
+                    change_pct=change_pct,
                 )
             if observed_days >= 5:
                 prior_values = uph_values[:-2]
@@ -333,17 +369,18 @@ def _trend_interpretation_sentence(chart_rows: list[dict], target_uph: float | N
             return format_trend_interpretation_below_target(
                 below_count=below_count,
                 observed_days=observed_days,
+                change_pct=change_pct,
             )
         if change_pct >= 3.0:
-            return format_trend_interpretation_above_target_and_improving()
+            return format_trend_interpretation_above_target_and_improving(change_pct=change_pct)
         if change_pct <= -3.0:
-            return format_trend_interpretation_above_target_softening()
+            return format_trend_interpretation_above_target_softening(change_pct=change_pct)
         return format_trend_interpretation_near_or_above_target()
 
     if change_pct >= 3.0:
-        return format_trend_interpretation_improving()
+        return format_trend_interpretation_improving(change_pct=change_pct)
     if change_pct <= -3.0:
-        return format_trend_interpretation_declining()
+        return format_trend_interpretation_declining(change_pct=change_pct)
     return format_trend_interpretation_stable()
 
 
@@ -437,10 +474,10 @@ def _normalize_recent_activity_timeline(
 
     deduped.sort(
         key=lambda event: (
-            float(event["event_at"].timestamp()) if isinstance(event.get("event_at"), datetime) else float("-inf"),
-            str(event.get("event_at_raw") or ""),
+            -(event["event_at"].date().toordinal() if isinstance(event.get("event_at"), datetime) else 0),
+            _TIMELINE_NARRATIVE_WEIGHT.get(str(event.get("event_type") or "").strip(), 4),
+            -(float(event["event_at"].timestamp()) if isinstance(event.get("event_at"), datetime) else 0.0),
         ),
-        reverse=True,
     )
     return deduped[:limit]
 
@@ -784,6 +821,13 @@ def _render_team_page_styles() -> None:
             margin: 0.5rem 0 0.25rem 0;
             border-top: 1px solid #EDF2F8;
             height: 0;
+        }
+        .team-summary-context {
+            font-size: 0.88rem;
+            font-weight: 400;
+            color: var(--dpd-text-muted);
+            line-height: 1.42;
+            margin: 0 0 0.25rem 0;
         }
         .team-summary-primary {
             font-size: 1.04rem;
@@ -1147,15 +1191,27 @@ def page_team() -> None:
         current_vs_target_text = _current_vs_target_text(avg_uph, target_uph)
         selected_window_trend_text = _selected_window_trend_text(selected_row, time_window_days)
         follow_up_state_text = _open_follow_up_state_text(selected_row)
+        change_pct = _safe_float(selected_row.get("change_pct"))
         summary_sentence = _selected_employee_summary_sentence(
             status_bucket=status_bucket,
-            trend_text=selected_window_trend_text,
-            note_count=note_count,
-            follow_up_text=follow_up_state_text,
+            change_pct=change_pct,
+            avg_uph=avg_uph,
             target_uph=target_uph,
         )
         primary_summary_line = _primary_summary_line(summary_sentence)
-        secondary_summary_line = format_status_summary_line(trend_state=trend_state, goal_state=goal_state)
+        what_changed_text = _what_changed_line(
+            selected_row,
+            status_bucket=status_bucket,
+            time_window_days=time_window_days,
+            avg_uph=avg_uph,
+            target_uph=target_uph,
+        )
+        comparison_text = _department_comparison_context(
+            goal_status_rows=goal_status,
+            selected_row=selected_row,
+            department=department,
+        )
+        comparison_brief = format_comparison_context_brief(comparison_text)
 
         with profile.stage("load_selected_employee_snapshot_history"):
             employee_snapshot_history = list(
@@ -1174,12 +1230,16 @@ def page_team() -> None:
                 st.markdown("<div class='team-section-anchor team-section-anchor--summary'></div>", unsafe_allow_html=True)
                 st.markdown(f"### {employee_name}")
                 st.caption(format_selected_employee_subheader(department, status_label))
+                if what_changed_text:
+                    st.markdown(f"<div class='team-summary-context'>{escape(what_changed_text)}</div>", unsafe_allow_html=True)
                 if primary_summary_line:
-                    st.markdown(f"<div class='team-summary-primary'>{primary_summary_line}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='team-summary-primary'>{escape(primary_summary_line)}</div>", unsafe_allow_html=True)
                 _summary_chips: list[str] = [
                     format_chip_current_vs_target(current_vs_target_text),
                     format_chip_trend(selected_window_trend_text),
                 ]
+                if comparison_brief:
+                    _summary_chips.append(comparison_brief)
                 _row_confidence = str(selected_row.get("confidence_label") or "").strip()
                 _row_completeness = str(selected_row.get("data_completeness_status") or "").strip()
                 if _row_confidence:
@@ -1188,6 +1248,10 @@ def page_team() -> None:
                     _summary_chips.append(format_data_completeness_meta(_row_completeness))
                 _summary_chips.append(format_chip_follow_up(follow_up_state_text))
                 st.caption(" | ".join(_summary_chips))
+
+                # Bridge to Today: subtle control to pass employee context and navigate.
+                bridge_col_1, bridge_col_2 = st.columns([0.5, 3.0], gap="small")
+                with bridge_col_1:
                     if st.button(format_bridge_button_label(), key=f"team_bridge_to_today_{selected_employee_id}"):
                         if selected_employee_id and str(selected_employee_id).strip():
                             st.session_state["cn_selected_emp"] = selected_employee_id
@@ -1333,11 +1397,6 @@ def page_team() -> None:
                             for index, exception_row in enumerate(exception_history[visible_count:], start=visible_count + 1):
                                 _render_exception_history_entry(exception_row, index=index)
 
-            comparison_text = _department_comparison_context(
-                goal_status_rows=goal_status,
-                selected_row=selected_row,
-                department=department,
-            )
             if comparison_text:
                 with st.container():
                     st.markdown("<div class='team-section-anchor team-section-anchor--comparison'></div>", unsafe_allow_html=True)
