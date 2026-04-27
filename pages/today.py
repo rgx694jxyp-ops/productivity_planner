@@ -3814,9 +3814,14 @@ def _render_attention_card(
                 )
 
         if signal_status_map is not None and not compact:
-            if is_lead:
-                st.markdown('<div class="today-card-handle-cue">↓ Start here</div>', unsafe_allow_html=True)
-            with st.expander("Handle this", expanded=False):
+            with st.expander("Handle this", expanded=is_lead):
+                if is_lead:
+                    st.markdown(
+                        '<div style="font-size:0.8rem;color:#5d7693;margin-bottom:0.5rem;">'
+                        'Add a note and choose follow-up before marking complete.'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
                 _render_guided_completion_controls(
                     card=card,
                     key_prefix=f"{key_prefix}_complete",
