@@ -52,8 +52,8 @@ def test_window_trend_fallback_and_directional_wording():
 
 
 def test_timeline_event_wording_avoids_raw_event_log_labels():
-    assert format_timeline_event("follow_up_logged") == "Follow-up created"
-    assert format_timeline_event("coached") == "Coaching note added"
+    assert format_timeline_event("follow_up_logged") == "Follow-up scheduled"
+    assert format_timeline_event("coached") == "Added note"
     assert format_timeline_event("today_signal_status_set") == "Status updated"
     assert format_timeline_event("some_internal_code") == "Update added"
     assert format_timeline_event("", status="") == "Update added"
@@ -75,7 +75,7 @@ def test_timeline_entry_hides_internal_event_codes_and_reduces_noise():
         action_id="a-1",
         raw_description="completed",
     )
-    assert completion["label"] == "Follow-up completed"
+    assert completion["label"] == "Issue marked as handled"
     assert completion["description"] == ""
 
 
@@ -105,11 +105,11 @@ def test_comparison_text_preserves_meaning_with_plain_language():
     above = format_comparison_text(delta_pct=10.0, share_below_target=0.1)
     aligned = format_comparison_text(delta_pct=1.0, share_below_target=None)
 
-    assert "below the department midpoint" in below[0]
-    assert "appears across much of the department" in below[1]
-    assert "above the department midpoint" in above[0]
-    assert "Most of the department" in above[1]
-    assert "Performance is in line with the department midpoint" in aligned[0]
+    assert "below department average" in below[0]
+    assert "similar pattern across team" in below[0]
+    assert "above department average" in above[0]
+    assert "most of team at or above target" in above[0]
+    assert "In line with department average" in aligned[0]
 
 
 def test_empty_state_copy_is_human_and_specific():
@@ -148,17 +148,18 @@ def test_section_chips_and_heading_wording_stays_consistent():
 
 def test_format_timeline_event_display_completed_returns_handled_sentence():
     result = format_timeline_event_display({"event_type": "resolved", "status": "", "action_id": "a-1"})
-    assert result["title"] == "Follow-up completed"
-    assert result["description"] == "Marked this issue as handled."
+    assert result["title"] == "Issue marked as handled"
+    assert result["description"] == ""
 
     result2 = format_timeline_event_display({"event_type": "follow_up_logged", "status": "completed", "action_id": ""})
-    assert result2["description"] == "Marked this issue as handled."
+    assert result2["title"] == "Issue marked as handled"
+    assert result2["description"] == ""
 
 
 def test_format_timeline_event_display_exception_opened_uses_fixed_sentence():
     result = format_timeline_event_display({"event_type": "exception_opened", "status": "open", "notes": "bad"})
-    assert result["title"] == "Exception opened"
-    assert result["description"] == "Performance concern recorded for tracking."
+    assert result["title"] == "Issue logged for tracking"
+    assert result["description"] == "bad"
 
 
 def test_format_timeline_event_display_follow_up_formats_due_date():
@@ -167,13 +168,13 @@ def test_format_timeline_event_display_follow_up_formats_due_date():
         "status": "",
         "next_follow_up_at": "2026-05-04T09:00",
     })
-    assert result["title"] == "Follow-up created"
-    assert result["description"] == "Check back on May 4 at 9:00 AM"
+    assert result["title"] == "Follow-up scheduled for May 4 at 9:00 AM"
+    assert result["description"] == ""
 
 
 def test_format_timeline_event_display_follow_up_no_due_date_returns_empty():
     result = format_timeline_event_display({"event_type": "follow_up_logged", "status": "", "next_follow_up_at": ""})
-    assert result["title"] == "Follow-up created"
+    assert result["title"] == "Follow-up scheduled"
     assert result["description"] == ""
 
 
@@ -182,8 +183,8 @@ def test_format_timeline_event_display_coached_shows_note_text_only():
         "event_type": "coached",
         "notes": "Training",
     })
-    assert result["title"] == "Coaching note added"
-    assert result["description"] == "Training"
+    assert result["title"] == "Added note: 'Training'"
+    assert result["description"] == ""
 
 
 def test_format_timeline_event_display_coached_strips_json_blob():
@@ -215,7 +216,7 @@ def test_format_timeline_event_display_unknown_event_uses_clean_outcome():
         "event_type": "escalated",
         "outcome": "Escalation reviewed by shift lead.",
     })
-    assert result["title"] == "Escalation opened"
+    assert result["title"] == "Escalation logged"
     assert "Escalation reviewed by shift lead." in result["description"]
 
 
@@ -232,4 +233,5 @@ def test_format_timeline_event_display_follow_up_date_only():
         "event_type": "follow_up_logged",
         "next_follow_up_at": "2026-05-04",
     })
-    assert result["description"] == "Check back on May 4"
+    assert result["title"] == "Follow-up scheduled for May 4"
+    assert result["description"] == ""

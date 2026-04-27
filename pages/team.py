@@ -85,6 +85,9 @@ from services.team_page_language_service import (
     format_note_preview_text,
     format_timeline_row_heading,
     format_exception_preview_text,
+    format_primary_statement,
+    format_secondary_context_subline,
+    format_sustained_context_line,
 )
 
 
@@ -95,19 +98,20 @@ def _safe_float(value: object) -> float | None:
         return None
 
 
-_TIMELINE_NARRATIVE_WEIGHT: dict[str, int] = {
-    "Exception opened": 0,
-    "Status updated": 1,
-    "Follow-up created": 2,
-    "Escalation opened": 2,
-    "Escalation reopened": 2,
-    "Coaching note added": 3,
-    "Recognition shared": 3,
-    "Priority lowered": 3,
-    "Update added": 4,
-    "Completed": 5,
-    "Follow-up completed": 5,
-}
+def _narrative_weight(event_type: str) -> int:
+    """Return narrative sort weight (signal → action → follow-up → completion)."""
+    base = str(event_type or "").strip()
+    if base.startswith("Issue logged"):
+        return 0
+    if base == "Status updated":
+        return 1
+    if base.startswith("Follow-up scheduled") or base.startswith("Escalation"):
+        return 2
+    if base.startswith("Added note") or base in {"Recognition shared", "Priority lowered"}:
+        return 3
+    if base.startswith("Issue marked"):
+        return 5
+    return 4
 
 
 def _format_display_dt(when_text: str) -> str:
@@ -286,6 +290,28 @@ def _open_follow_up_state_text(row: dict) -> str:
     if follow_up_context:
         return str(follow_up_context.get("summary") or "").strip()
     return format_follow_up_unavailable()
+
+
+def _follow_up_subline(row: dict, *, today: datetime | None = None) -> str:
+    """Compact follow-up timing for summary sub-line. E.g. 'Follow-up due May 4'."""
+    today_dt = today or datetime.utcnow()
+    due_raw = str(
+        row.get("follow_up_due_at")
+        or row.get("next_follow_up_at")
+        or row.get("follow_up_due")
+        or ""
+    ).strip()
+    due_dt = _parse_dt(due_raw)
+    if due_dt is not None:
+        day_delta = (due_dt.date() - today_dt.date()).days
+        month_day = f"{due_dt.strftime('%b')} {due_dt.day}"
+        if day_delta < 0:
+            return "Follow-up overdue"
+        return f"Follow-up due {month_day}"
+    due_flag = str(row.get("follow_up_due") or "").strip().lower()
+    if due_flag in {"true", "yes", "1", "y", "pending", "due"}:
+        return "Follow-up pending"
+    return ""
 
 
 def _what_changed_line(
@@ -475,7 +501,7 @@ def _normalize_recent_activity_timeline(
     deduped.sort(
         key=lambda event: (
             -(event["event_at"].date().toordinal() if isinstance(event.get("event_at"), datetime) else 0),
-            _TIMELINE_NARRATIVE_WEIGHT.get(str(event.get("event_type") or "").strip(), 4),
+            _narrative_weight(str(event.get("event_type") or "").strip()),
             -(float(event["event_at"].timestamp()) if isinstance(event.get("event_at"), datetime) else 0.0),
         ),
     )
@@ -1225,28 +1251,44 @@ def page_team() -> None:
         profile.set("selected_history_rows", len(employee_snapshot_history))
         profile.query(rows=len(employee_snapshot_history), count=1)
 
+        primary_statement = format_primary_statement(
+            status_bucket=status_bucket,
+            change_pct=change_pct,
+            avg_uph=avg_uph,
+            target_uph=target_uph,
+            time_window_days=time_window_days,
+        )
+        follow_up_subline = _follow_up_subline(selected_row)
+        secondary_context = format_secondary_context_subline(
+            comparison_brief=comparison_brief,
+            follow_up_text=follow_up_subline,
+        )
+        sustained_context = format_sustained_context_line(
+            status_bucket=status_bucket,
+            change_pct=change_pct,
+            time_window_days=time_window_days,
+        )
+
         with shell_right:
             with st.container():
                 st.markdown("<div class='team-section-anchor team-section-anchor--summary'></div>", unsafe_allow_html=True)
                 st.markdown(f"### {employee_name}")
                 st.caption(format_selected_employee_subheader(department, status_label))
+                if primary_statement:
+                    st.markdown(f"<div class='team-summary-primary'>{escape(primary_statement)}</div>", unsafe_allow_html=True)
+                if secondary_context:
+                    st.markdown(f"<div class='team-summary-secondary'>{escape(secondary_context)}</div>", unsafe_allow_html=True)
                 if what_changed_text:
                     st.markdown(f"<div class='team-summary-context'>{escape(what_changed_text)}</div>", unsafe_allow_html=True)
-                if primary_summary_line:
-                    st.markdown(f"<div class='team-summary-primary'>{escape(primary_summary_line)}</div>", unsafe_allow_html=True)
-                _summary_chips: list[str] = [
-                    format_chip_current_vs_target(current_vs_target_text),
-                    format_chip_trend(selected_window_trend_text),
-                ]
-                if comparison_brief:
-                    _summary_chips.append(comparison_brief)
+                if sustained_context:
+                    st.markdown(f"<div class='team-summary-context'>{escape(sustained_context)}</div>", unsafe_allow_html=True)
                 _row_confidence = str(selected_row.get("confidence_label") or "").strip()
                 _row_completeness = str(selected_row.get("data_completeness_status") or "").strip()
+                _summary_chips: list[str] = [format_chip_current_vs_target(current_vs_target_text)]
                 if _row_confidence:
                     _summary_chips.append(format_confidence_meta(_row_confidence))
                 elif _row_completeness:
                     _summary_chips.append(format_data_completeness_meta(_row_completeness))
-                _summary_chips.append(format_chip_follow_up(follow_up_state_text))
                 st.caption(" | ".join(_summary_chips))
 
                 # Bridge to Today: subtle control to pass employee context and navigate.
