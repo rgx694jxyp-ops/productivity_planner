@@ -484,24 +484,26 @@ def _render_today_phase1_top_cards(
     signal_status_map: dict[str, dict[str, str]],
     people_needing_attention: int,
 ) -> None:
-    st.markdown(_today_signal_surface_heading(people_needing_attention))
-    st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
-
     if not top_cards:
         st.markdown(f'<div class="today-placeholder">{_today_loading_placeholder()}</div>', unsafe_allow_html=True)
         return
 
-    st.markdown(f'<div class="today-section-label">{_today_queue_intro_label()}</div>', unsafe_allow_html=True)
-    for idx, card in enumerate(list(top_cards or [])[:_TODAY_QUEUE_DEFAULT_VISIBLE_CARDS]):
-        _render_attention_card(
-            card=card,
-            key_prefix=f"today_attention_primary_{idx}",
-            emphasize=False,
-            focused=False,
+    st.markdown('<div class="today-action-frame-heading">Handle these first</div>', unsafe_allow_html=True)
+    st.markdown('<div class="today-action-frame-sub">These are the strongest signals from today\'s available data.</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
+    _phase1_cards = list(top_cards or [])[:_TODAY_QUEUE_DEFAULT_VISIBLE_CARDS]
+    _phase1_cols = st.columns(min(max(len(_phase1_cards), 1), 3))
+    for idx, card in enumerate(_phase1_cards):
+        with _phase1_cols[idx]:
             # Phase 1 is scan-only; keep action widgets out to avoid duplicate keys
             # before Phase 2 renders the full actionable queue in the same run.
-            signal_status_map=None,
-        )
+            _render_attention_card(
+                card=card,
+                key_prefix=f"today_attention_primary_{idx}",
+                emphasize=False,
+                focused=False,
+                signal_status_map=None,
+            )
 
 
 def _run_today_auto_refresh(*, tenant_id: str, today_value: date) -> dict[str, Any]:
@@ -988,6 +990,7 @@ def _apply_today_styles() -> None:
                 div.block-container {
                     padding-top: 1rem;
                     padding-bottom: 1.2rem;
+                    max-width: min(1800px, 95vw) !important;
                 }
                 div[data-testid="stExpander"] details {
                     border: 0;
@@ -1130,8 +1133,29 @@ def _apply_today_styles() -> None:
             font-weight: 500;
             letter-spacing: 0.005em;
         }
+        .today-card-next-check {
+            color: #7a90a8;
+            font-size: 0.81rem;
+            margin-top: 0.5rem;
+            margin-bottom: 0;
+            font-style: italic;
+            line-height: 1.35;
+        }
         .today-priority-card-gap {
             height: 6px;
+        }
+        .today-action-frame-heading {
+            font-size: 1.35rem;
+            font-weight: 700;
+            color: #0f2d52;
+            margin-bottom: 3px;
+            margin-top: 0;
+        }
+        .today-action-frame-sub {
+            font-size: 0.86rem;
+            color: #5d7693;
+            margin-bottom: 12px;
+            margin-top: 0;
         }
         .today-card-focus {
             border: 2px solid #9bc2e8;
@@ -3664,6 +3688,41 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
         st.rerun()
 
 
+def _today_card_next_check_cue(card: TodayQueueCardViewModel, line_5_text: str) -> str:
+    """Return a short, non-prescriptive next-check cue derived from card fields only."""
+    state = str(card.state or "").strip().upper()
+    norm_state = str(card.normalized_action_state or "").strip().lower()
+    norm_detail = str(card.normalized_action_state_detail or "").strip().lower()
+    line_3_lower = str(card.line_3 or "").strip().lower()
+    line_4_lower = str(card.line_4 or "").strip().lower()
+    line_5_lower = str(line_5_text or "").strip().lower()
+
+    overdue_fields = (norm_state, norm_detail, line_3_lower, line_4_lower)
+    if any("overdue" in f for f in overdue_fields):
+        return "Check whether the follow-up is still open."
+
+    if state == "PATTERN" or int(card.repeat_count or 0) > 0:
+        return "Check for shift changes, assignment changes, or missing context."
+
+    if state == "LOW_DATA" or "low confidence" in line_5_lower or "confidence: low" in line_5_lower:
+        return "Confirm with floor context before acting."
+
+    if "limited" in line_5_lower and "data" in line_5_lower:
+        return "Confirm with floor context before acting."
+
+    if state == "EARLY_TREND":
+        return "Review what changed since the recent baseline."
+
+    if state == "STABLE_TREND":
+        return "Review whether the trend reflects a structural change."
+
+    # CURRENT state with no specific signal: suppress generic fallback noise
+    if state == "CURRENT":
+        return ""
+
+    return "Review the context before marking complete."
+
+
 def _render_attention_card(
     *,
     card: TodayQueueCardViewModel,
@@ -3721,6 +3780,11 @@ def _render_attention_card(
         metadata_row = " · ".join(part for part in metadata_parts if str(part or "").strip())
         if metadata_row:
             st.markdown(f'<div class="today-card-meta-row">{metadata_row}</div>', unsafe_allow_html=True)
+
+        if not compact:
+            next_check = _today_card_next_check_cue(card, line_5_text)
+            if next_check:
+                st.markdown(f'<div class="today-card-next-check">{next_check}</div>', unsafe_allow_html=True)
 
         if compact:
             detail_text = str(card.line_3 or "").strip()
@@ -3885,7 +3949,9 @@ def _render_unified_attention_queue(
     if not active_ranked_cards and plan.primary_placeholder:
         st.markdown(f'<div class="today-placeholder">{plan.primary_placeholder}</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="today-section-label">{_today_queue_intro_label()}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-action-frame-heading">Handle these first</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-action-frame-sub">These are the strongest signals from today\'s available data.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
         st.session_state.pop(_TODAY_FOCUS_NEXT_CARD_KEY, None)
 
         # Honor cn_selected_emp when navigating from Team: focus the matching employee's card on arrival.
@@ -3893,28 +3959,38 @@ def _render_unified_attention_queue(
         today_value = date.today()
         handoff_rendered_key = _TODAY_HANDOFF_FOCUS_RENDERED_KEY_PREFIX + today_value.isoformat()
         handoff_focus_already_rendered = bool(st.session_state.get(handoff_rendered_key))
-        
+
         focused_employee_id = str(st.session_state.get("cn_selected_emp") or "").strip()
         is_first_handoff_render = bool(focused_employee_id and not handoff_focus_already_rendered)
 
+        _top_cols = st.columns(min(max(len(top_cards), 1), 3))
         for idx, card in enumerate(top_cards):
             card_employee_id = str(card.employee_id or "").strip()
             is_focused = bool(is_first_handoff_render and card_employee_id == focused_employee_id)
-            _render_attention_card(
-                card=card,
-                key_prefix=f"today_attention_primary_{idx}",
-                emphasize=False,
-                focused=is_focused,
-                signal_status_map=signal_status_map,
-            )
+            with _top_cols[idx]:
+                _render_attention_card(
+                    card=card,
+                    key_prefix=f"today_attention_primary_{idx}",
+                    emphasize=False,
+                    focused=is_focused,
+                    signal_status_map=signal_status_map,
+                )
             # Mark handoff as rendered after the first matching card is rendered.
             if is_focused and not handoff_focus_already_rendered:
                 st.session_state[handoff_rendered_key] = True
 
     if overflow_cards:
-        overflow_caption = str(plan.secondary_caption or "").strip() or "Remaining queue items"
-        with st.expander("Other items", expanded=False):
-            st.caption(overflow_caption)
+        st.markdown(
+            '<div style="margin-top:1.5rem;margin-bottom:0.25rem;">'
+            '<span style="font-size:0.88rem;font-weight:600;color:#5d7693;letter-spacing:0.03em;text-transform:uppercase;">Review if time</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div style="font-size:0.82rem;color:#8097b0;margin-bottom:0.75rem;">Lower-priority signals from the same data set.</div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander(f"{len(overflow_cards)} additional signal{'s' if len(overflow_cards) != 1 else ''}", expanded=False):
             for idx, card in enumerate(overflow_cards):
                 _render_attention_card(
                     card=card,
@@ -5107,8 +5183,6 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 profile.set("widget_state_cleaned_keys", int(cleaned_widget_keys))
 
                 people_needing_attention = int(prepared_queue_render.get("people_needing_attention") or 0)
-                st.markdown(_today_signal_surface_heading(people_needing_attention))
-                st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
 
                 _log_operational_event(
                     "today_top3_render_timing",
