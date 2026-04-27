@@ -70,6 +70,38 @@ def test_signal_status_write_invalidates_today_caches(monkeypatch):
     assert any(str((entry.get("kwargs") or {}).get("context", {}).get("click_to_ui_update_ms", "")).strip() != "" for entry in log_events)
 
 
+def test_mark_complete_captures_note_and_follow_up_in_pending_meta(monkeypatch):
+    monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
+    monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Checked root cause and logged update")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Yes")
+    monkeypatch.setattr("pages.today.st.date_input", lambda *_args, **_kwargs: today_module.date(2026, 4, 22))
+    monkeypatch.setattr("pages.today.st.time_input", lambda *_args, **_kwargs: today_module.dt_time(10, 30))
+    monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.rerun", lambda: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    captured_payload: dict[str, object] = {}
+    monkeypatch.setattr(
+        "pages.today._start_today_completion_write_async",
+        lambda **kwargs: captured_payload.update(kwargs),
+    )
+
+    card = _card_for("sig-meta-capture", "E3")
+    today_module._render_guided_completion_controls(card=card, key_prefix="sig-meta", status_map={})
+
+    pending_ids = list(today_module.st.session_state.get("_today_pending_completion_ids") or [])
+    assert len(pending_ids) == 1
+    meta = dict((today_module.st.session_state.get("_today_pending_completion_meta") or {}).get(pending_ids[0]) or {})
+    assert str(meta.get("note_text") or "") == "Checked root cause and logged update"
+    assert str(meta.get("follow_up_choice") or "") == "Yes"
+    assert isinstance(meta.get("follow_up_at"), datetime)
+    assert str((captured_payload.get("payload") or {}).get("note_text") or "") == "Checked root cause and logged update"
+    assert bool((captured_payload.get("payload") or {}).get("follow_up_required")) is True
+
+
 def test_start_completion_write_calls_persistence_once(monkeypatch):
     card = _card_for("sig-save-once", "E5")
     save_calls = {"count": 0}
@@ -418,6 +450,40 @@ def test_pending_signal_is_not_rendered_during_rerun(monkeypatch):
     )
 
     assert list(prepared.get("active_ranked_cards") or []) == []
+
+
+def test_completed_item_removal_promotes_fourth_card_into_top3(monkeypatch):
+    cards = [_card_for(f"sig-promote-{idx}", f"E{idx}") for idx in range(1, 5)]
+    plan = today_module.TodayQueueRenderPlan(
+        section_title="Today",
+        weak_data_note="",
+        start_note="",
+        primary_cards=cards,
+        secondary_cards=[],
+        primary_placeholder="",
+        secondary_caption="",
+        secondary_expanded=False,
+        suppressed_debug_rows=[],
+    )
+
+    completed_session_key = today_module._today_card_session_key(cards[0])
+    monkeypatch.setattr(
+        "pages.today.st.session_state",
+        {
+            "_today_completed_items": [completed_session_key],
+            "_today_pending_completion_signal_keys": [],
+        },
+    )
+    monkeypatch.setattr("pages.today._cached_today_signal_status_map", lambda **_kwargs: {})
+
+    prepared = today_module._prepare_today_top_queue_render(
+        plan=plan,
+        tenant_id="tenant-a",
+        today_value=today_module.date(2026, 4, 20),
+    )
+
+    top_cards = list(prepared.get("top_cards") or [])
+    assert [str(card.employee_id or "") for card in top_cards] == ["E2", "E3", "E4"]
 
 
 def test_note_text_survives_harmless_rerun(monkeypatch):
@@ -962,6 +1028,35 @@ def test_today_wording_helpers_use_signal_first_copy():
     assert today_module._today_loading_placeholder() == "Loading today's signals..."
 
 
+def test_show_flash_message_consumes_marked_complete_once(monkeypatch):
+    calls = {"count": 0}
+
+    monkeypatch.setattr("pages.today.st.session_state", {"_action_flash_message": "Marked complete."})
+
+    def _consume_once() -> None:
+        message = str(today_module.st.session_state.pop("_action_flash_message", "") or "")
+        if message:
+            calls["count"] += 1
+
+    monkeypatch.setattr("pages.today.consume_flash_message", _consume_once)
+
+    today_module._show_flash_message()
+    today_module._show_flash_message()
+
+    assert calls["count"] == 1
+
+
+def test_phase2_ready_reset_is_guarded_to_non_today_navigation():
+    import inspect
+    import re
+
+    source = inspect.getsource(today_module)
+    assert re.search(
+        r'if\s+entered_from_page\s+and\s+entered_from_page\.strip\(\)\.lower\(\)\s*!=\s*"today":\s*\n\s*st\.session_state\[phase2_ready_key\]\s*=\s*False',
+        source,
+    ), "Phase2 ready flag reset must stay guarded to non-Today navigation."
+
+
 def test_phase1_ends_with_rerun_not_bare_return():
     """Phase 1 must call st.rerun() after setting phase2_ready so the action-ready
     queue is always rendered on the next pass — not only after a user interaction."""
@@ -991,3 +1086,62 @@ def test_phase1_ends_with_rerun_not_bare_return():
         "Could not find 'session_state[phase2_ready_key] = True' in today.py source. "
         "The Phase 1 → Phase 2 rerun guard may have moved."
     )
+
+
+def test_save_today_card_completion_raises_when_tenant_missing(monkeypatch):
+    card = _card_for("sig-missing-tenant", "E10")
+    monkeypatch.setattr("pages.today.st.session_state", {"user_email": "lead@example.com"})
+
+    try:
+        today_module._save_today_card_completion(
+            card=card,
+            note_text="completed",
+            follow_up_required=False,
+            follow_up_at=None,
+            tenant_id="",
+        )
+    except ValueError as exc:
+        assert "tenant_id is required" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for missing tenant_id")
+
+
+def test_failed_drain_shows_detailed_backend_error(monkeypatch):
+    card = _card_for("sig-detailed-error", "E11")
+    card_session_key = today_module._today_card_session_key(card)
+    shown_errors: list[str] = []
+
+    monkeypatch.setattr(
+        "pages.today.st.session_state",
+        {
+            "tenant_id": "tenant-a",
+            "user_email": "lead@example.com",
+            "_today_pending_completion_ids": ["c-detailed-error"],
+            "_today_pending_completion_signal_keys": ["sig-detailed-error"],
+            "_today_pending_completion_meta": {
+                "c-detailed-error": {
+                    "signal_id": "sig-detailed-error",
+                    "clicked_at": float(1.0),
+                    "queue_update_ms": 1,
+                    "click_to_ui_update_ms": 1,
+                    "card_session_key": card_session_key,
+                    "card": today_module.dataclasses.asdict(card),
+                }
+            },
+            "_today_completed_items": [card_session_key],
+        },
+    )
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.show_error_state", lambda message: shown_errors.append(str(message)))
+
+    with today_module._TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS.clear()
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS["c-detailed-error"] = {
+            "status": "failed",
+            "backend_write_ms": 4,
+            "error": "Action event write failed.",
+        }
+
+    today_module._drain_today_async_completion_results()
+
+    assert shown_errors == ["Save failed: Action event write failed."]

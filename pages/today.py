@@ -3053,79 +3053,111 @@ def _save_today_card_completion(
     tenant_id: str = "",
     user_role: str = "",
 ) -> bool:
+    signal_id = _today_card_signal_id(card)
     signal_key = str(getattr(card, "signal_key", "") or "").strip()
     employee_id = str(card.employee_id or "").strip()
     clean_note = str(note_text or "").strip()
-    if not employee_id or not clean_note:
-        return
-
     owner_value = str(owner_value or st.session_state.get("user_email") or st.session_state.get("user_name") or "").strip()
     tenant_id = str(tenant_id or st.session_state.get("tenant_id") or "").strip()
     user_role = str(user_role or st.session_state.get("user_role") or "").strip()
+
+    if not signal_id:
+        signal_id = signal_key or employee_id
+    if not signal_id:
+        raise ValueError("signal_id is required for completion persistence.")
+    if not employee_id:
+        raise ValueError("employee_id is required for completion persistence.")
+    if not tenant_id:
+        raise ValueError("tenant_id is required for completion persistence.")
+    if not clean_note:
+        raise ValueError("note is required for completion persistence.")
+
     follow_up_due_date = follow_up_at.date().isoformat() if follow_up_required and follow_up_at else ""
     due_at_label = follow_up_at.isoformat(timespec="minutes") if follow_up_required and follow_up_at else ""
     linked_exception_id = ""
     linked_existing_exception_id = str(linked_existing_exception_id or "").strip()
 
-    if add_operational_exception:
-        category = str(exception_type or "").strip()
-        exception_note_clean = str(exception_note or "").strip()
-        if not category or not exception_note_clean:
-            return False
-
-        line_1 = str(getattr(card, "line_1", "") or "").strip()
-        line_1_parts = [part.strip() for part in line_1.split("·") if str(part or "").strip()]
-        employee_name = line_1_parts[0] if line_1_parts else str(card.employee_id or "").strip()
-        department = str(getattr(card, "process_id", "") or "").strip()
-
-        summary_text = exception_note_clean.split("\n", 1)[0].strip() or "Operational exception linked from Today card"
-        created_exception = create_operational_exception(
-            category=category,
-            summary=summary_text,
-            employee_id=str(card.employee_id or "").strip(),
-            employee_name=employee_name,
-            department=department,
-            shift="",
-            process_name=department,
-            notes=exception_note_clean,
-            created_by=owner_value or "supervisor",
-            tenant_id=tenant_id,
-            user_role=user_role,
-        )
-        linked_exception_id = str((created_exception or {}).get("id") or "").strip()
-        if not linked_exception_id:
-            return False
-
-    resolved_exception_id = linked_exception_id or linked_existing_exception_id
-
-    details_lines = [
-        "Today queue completion",
-        f"signal_key={signal_key}",
-        f"follow_up_required={'yes' if follow_up_required else 'no'}",
-    ]
-    if due_at_label:
-        details_lines.append(f"follow_up_due_at={due_at_label}")
-    if resolved_exception_id:
-        details_lines.append(f"linked_exception_id={resolved_exception_id}")
-    details_lines.append(f"note={clean_note}")
-    details_payload = "\n".join(details_lines)
-
-    follow_through_saved = log_follow_through_event(
-        employee_id=employee_id,
-        linked_exception_id=resolved_exception_id,
-        owner=owner_value or "supervisor",
-        status="pending" if follow_up_required else "done",
-        due_date=follow_up_due_date,
-        details=details_payload,
-        outcome="pending" if follow_up_required else "not_applicable",
+    _log_operational_event(
+        "today_mark_complete_persistence_payload",
+        status="info",
         tenant_id=tenant_id,
+        user_email=owner_value,
+        context={
+            "signal_id": signal_id,
+            "signal_key": signal_key,
+            "employee_id": employee_id,
+            "tenant_id": tenant_id,
+            "note": clean_note,
+            "follow_up_required": bool(follow_up_required),
+            "follow_up_at": due_at_label,
+            "add_operational_exception": bool(add_operational_exception),
+            "exception_type": str(exception_type or ""),
+            "link_existing_exception": bool(linked_existing_exception_id),
+            "add_follow_through": bool(add_follow_through),
+            "follow_through_status": str(follow_through_status or "logged"),
+        },
     )
+    try:
+        if add_operational_exception:
+            category = str(exception_type or "").strip()
+            exception_note_clean = str(exception_note or "").strip()
+            if not category or not exception_note_clean:
+                raise ValueError("exception_type and exception_note are required when add_operational_exception is selected.")
 
-    secondary_follow_through_saved = True
-    clean_follow_through_note = str(follow_through_note or "").strip()
-    if add_follow_through and clean_follow_through_note:
-        secondary_follow_through_saved = bool(
-            log_follow_through_event(
+            line_1 = str(getattr(card, "line_1", "") or "").strip()
+            line_1_parts = [part.strip() for part in line_1.split("·") if str(part or "").strip()]
+            employee_name = line_1_parts[0] if line_1_parts else str(card.employee_id or "").strip()
+            department = str(getattr(card, "process_id", "") or "").strip()
+
+            summary_text = exception_note_clean.split("\n", 1)[0].strip() or "Operational exception linked from Today card"
+            created_exception = create_operational_exception(
+                category=category,
+                summary=summary_text,
+                employee_id=str(card.employee_id or "").strip(),
+                employee_name=employee_name,
+                department=department,
+                shift="",
+                process_name=department,
+                notes=exception_note_clean,
+                created_by=owner_value or "supervisor",
+                tenant_id=tenant_id,
+                user_role=user_role,
+            )
+            linked_exception_id = str((created_exception or {}).get("id") or "").strip()
+            if not linked_exception_id:
+                raise RuntimeError("Operational exception write returned no id.")
+
+        resolved_exception_id = linked_exception_id or linked_existing_exception_id
+
+        details_lines = [
+            "Today queue completion",
+            f"signal_key={signal_key}",
+            f"signal_id={signal_id}",
+            f"follow_up_required={'yes' if follow_up_required else 'no'}",
+        ]
+        if due_at_label:
+            details_lines.append(f"follow_up_due_at={due_at_label}")
+        if resolved_exception_id:
+            details_lines.append(f"linked_exception_id={resolved_exception_id}")
+        details_lines.append(f"note={clean_note}")
+        details_payload = "\n".join(details_lines)
+
+        follow_through_saved = log_follow_through_event(
+            employee_id=employee_id,
+            linked_exception_id=resolved_exception_id,
+            owner=owner_value or "supervisor",
+            status="pending" if follow_up_required else "done",
+            due_date=follow_up_due_date,
+            details=details_payload,
+            outcome="pending" if follow_up_required else "not_applicable",
+            tenant_id=tenant_id,
+        )
+        if not follow_through_saved:
+            raise RuntimeError("Primary follow-through write returned no row.")
+
+        clean_follow_through_note = str(follow_through_note or "").strip()
+        if add_follow_through and clean_follow_through_note:
+            secondary_follow_through_saved = log_follow_through_event(
                 employee_id=employee_id,
                 linked_exception_id=(resolved_exception_id if link_follow_through_to_exception else ""),
                 owner=owner_value or "supervisor",
@@ -3135,33 +3167,53 @@ def _save_today_card_completion(
                 outcome="pending" if follow_up_required else "not_applicable",
                 tenant_id=tenant_id,
             )
-        )
+            if not secondary_follow_through_saved:
+                raise RuntimeError("Secondary follow-through write returned no row.")
 
-    # Preserve existing coaching journal history used by employee timelines.
-    try:
-        coaching_note = (
-            "reason=Today queue completion\n"
-            f"follow_up_required={'yes' if follow_up_required else 'no'}\n"
-            + (f"follow_up_due_at={due_at_label}\n" if due_at_label else "")
-            + clean_note
-        )
-        add_coaching_note(employee_id, coaching_note, owner_value or "supervisor")
-    except Exception:
-        pass
-
-    status_saved = True
-    if signal_key:
-        status_saved = bool(
-            set_signal_status(
-                signal_key=signal_key,
-                employee_id=employee_id,
-                signal_status=SIGNAL_STATUS_LOOKED_AT,
-                owner=owner_value,
-                tenant_id=tenant_id,
+        # Preserve existing coaching journal history used by employee timelines.
+        try:
+            coaching_note = (
+                "reason=Today queue completion\n"
+                f"follow_up_required={'yes' if follow_up_required else 'no'}\n"
+                + (f"follow_up_due_at={due_at_label}\n" if due_at_label else "")
+                + clean_note
             )
-        )
+            add_coaching_note(employee_id, coaching_note, owner_value or "supervisor")
+        except Exception:
+            pass
 
-    return bool(follow_through_saved) and bool(secondary_follow_through_saved) and bool(status_saved)
+        if signal_key:
+            status_saved = bool(
+                set_signal_status(
+                    signal_key=signal_key,
+                    employee_id=employee_id,
+                    signal_status=SIGNAL_STATUS_LOOKED_AT,
+                    owner=owner_value,
+                    tenant_id=tenant_id,
+                )
+            )
+            if not status_saved:
+                raise RuntimeError("Signal status write returned false.")
+
+        return True
+    except Exception as error:
+        _log_operational_event(
+            "today_mark_complete_error",
+            status="error",
+            tenant_id=tenant_id,
+            user_email=owner_value,
+            context={
+                "signal_id": signal_id,
+                "signal_key": signal_key,
+                "employee_id": employee_id,
+                "tenant_id": tenant_id,
+                "note": clean_note,
+                "follow_up_required": bool(follow_up_required),
+                "follow_up": due_at_label,
+                "error": str(error),
+            },
+        )
+        raise
 
 
 def _narrow_invalidate_today_completion_caches(*, card: TodayQueueCardViewModel) -> None:
@@ -3318,6 +3370,22 @@ def _start_today_completion_write_async(*, completion_id: str, payload: dict[str
     try:
         card_payload = dict(payload.get("card") or {})
         card = TodayQueueCardViewModel(**card_payload)
+        _log_operational_event(
+            "today_mark_complete_write_payload",
+            status="info",
+            tenant_id=str(payload.get("tenant_id") or ""),
+            user_email=str(payload.get("owner_value") or ""),
+            context={
+                "completion_id": str(completion_id),
+                "signal_id": _today_card_signal_id(card),
+                "signal_key": str(getattr(card, "signal_key", "") or ""),
+                "employee_id": str(getattr(card, "employee_id", "") or ""),
+                "tenant_id": str(payload.get("tenant_id") or ""),
+                "note": str(payload.get("note_text") or "").strip(),
+                "follow_up": bool(payload.get("follow_up_required", False)),
+                "follow_up_at": str(payload.get("follow_up_at") or ""),
+            },
+        )
         write_ok = _save_today_card_completion(
             card=card,
             note_text=str(payload.get("note_text") or ""),
@@ -3335,10 +3403,12 @@ def _start_today_completion_write_async(*, completion_id: str, payload: dict[str
             tenant_id=str(payload.get("tenant_id") or ""),
             user_role=str(payload.get("user_role") or ""),
         )
+        if not write_ok:
+            raise RuntimeError("Completion write returned false.")
         result_payload = {
-            "status": "success" if bool(write_ok) else "failed",
+            "status": "success",
             "backend_write_ms": int(max(0.0, (time.perf_counter() - write_started) * 1000)),
-            "error": "" if bool(write_ok) else "write returned false",
+            "error": "",
         }
     except Exception as exc:
         result_payload = {
@@ -3361,6 +3431,7 @@ def _drain_today_async_completion_results() -> None:
     remaining_ids: list[str] = []
     completed_ok = 0
     completed_failed = 0
+    failed_errors: list[str] = []
 
     for completion_id in pending_ids:
         with _TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
@@ -3416,6 +3487,7 @@ def _drain_today_async_completion_results() -> None:
             continue
 
         completed_failed += 1
+        failed_errors.append(str(result.get("error") or "write failed"))
         card_session_key = str(meta.get("card_session_key") or "").strip()
         if card_session_key:
             completed_items = [
@@ -3511,7 +3583,8 @@ def _drain_today_async_completion_results() -> None:
     if completed_ok > 0:
         set_flash_message("Marked complete.")
     if completed_failed > 0:
-        show_error_state("Action completion could not be saved right now.")
+        first_error = next((err for err in failed_errors if str(err or "").strip()), "write failed")
+        show_error_state(f"Save failed: {first_error}")
 
 
 def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_prefix: str, status_map: dict[str, dict[str, str]]) -> None:

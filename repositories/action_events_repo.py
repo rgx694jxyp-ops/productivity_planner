@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from repositories._common import get_client, get_tenant_id
-from services.app_logging import log_error, log_warn
+from services.app_logging import log_error, log_info, log_warn
 
 
 def log_action_event(
@@ -27,16 +27,23 @@ def log_action_event(
         log_error(
             "action_events_missing_fields",
             "log_action_event called without tenant_id or event_type — event not written.",
-            detail=f"tid={repr(tid)}, event_type={repr(event_type)}, action_id={repr(action_id)}",
-            severity="warning",
+            tenant_id=str(tid or ""),
+            context={
+                "tid": repr(tid),
+                "event_type": repr(event_type),
+                "action_id": repr(action_id),
+            },
         )
         raise ValueError("tenant_id and event_type are required for action event logging.")
     if not str(action_id or "").strip() and not str(employee_id or "").strip() and not str(linked_exception_id or "").strip():
         log_error(
             "action_events_missing_fields",
             "log_action_event called without action_id, employee_id, or linked_exception_id — event not written.",
-            detail=f"tid={repr(tid)}, event_type={repr(event_type)}",
-            severity="warning",
+            tenant_id=str(tid or ""),
+            context={
+                "tid": repr(tid),
+                "event_type": repr(event_type),
+            },
         )
         raise ValueError("action_id, employee_id, or linked_exception_id is required for action event logging.")
 
@@ -63,10 +70,41 @@ def log_action_event(
     if str(linked_exception_id or "").strip():
         payload["linked_exception_id"] = linked_exception_id
 
+    log_info(
+        "repo_action_events_insert_payload",
+        "Inserting action event payload.",
+        tenant_id=str(tid or ""),
+        context={
+            "action_id": str(action_id or ""),
+            "employee_id": str(employee_id or ""),
+            "linked_exception_id": str(linked_exception_id or ""),
+            "event_type": str(event_type or ""),
+            "payload": dict(payload),
+        },
+    )
+
     try:
         sb = get_client()
         result = sb.table("action_events").insert(payload).execute()
-        return result.data[0] if result.data else {}
+        response_error = getattr(result, "error", None)
+        log_info(
+            "repo_action_events_insert_response",
+            "Action event insert response received.",
+            tenant_id=str(tid or ""),
+            context={
+                "action_id": str(action_id or ""),
+                "employee_id": str(employee_id or ""),
+                "event_type": str(event_type or ""),
+                "data_count": len(list(result.data or [])),
+                "error": str(response_error or ""),
+            },
+        )
+
+        if response_error:
+            raise RuntimeError(f"Supabase action_events insert error: {response_error}")
+        if not result.data:
+            raise RuntimeError("Supabase action_events insert returned no rows.")
+        return result.data[0]
     except Exception as error:
         log_error(
             "repo_action_events_insert_failed",
@@ -77,6 +115,7 @@ def log_action_event(
                 "employee_id": str(employee_id or ""),
                 "linked_exception_id": str(linked_exception_id or ""),
                 "event_type": str(event_type or ""),
+                "payload": dict(payload),
             },
             error=error,
         )
