@@ -6,6 +6,7 @@ query behavior, or state semantics.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -421,6 +422,100 @@ def format_timeline_entry(
         event_type=event_type,
     )
     return {"label": label, "description": description}
+
+
+def _is_internal_debug_text(text: str) -> bool:
+    """Return True if text looks like system/debug data rather than user-facing content."""
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    if clean.startswith("{") or clean.startswith("["):
+        return True
+    if re.search(r'\b(?:reason|signal_key|scope|signal_status|follow_up_required)\s*=', clean, re.IGNORECASE):
+        return True
+    return False
+
+
+def _format_followup_due_text(raw: str) -> str:
+    """Format a follow-up due datetime as plain language: 'Check back on May 4 at 9:00 AM'."""
+    clean = str(raw or "").strip()
+    if not clean:
+        return ""
+    # Map (format_string, expected_char_length, has_time)
+    candidates = [
+        ("%Y-%m-%dT%H:%M:%S", 19, True),
+        ("%Y-%m-%dT%H:%M", 16, True),
+        ("%Y-%m-%d %H:%M:%S", 19, True),
+        ("%Y-%m-%d %H:%M", 16, True),
+        ("%Y-%m-%d", 10, False),
+    ]
+    for fmt, length, has_time in candidates:
+        try:
+            dt = datetime.strptime(clean[:length], fmt)
+            month_day = f"{dt.strftime('%B')} {dt.day}"
+            if has_time:
+                hour = int(dt.strftime("%I"))
+                minute = dt.strftime("%M")
+                ampm = dt.strftime("%p")
+                return f"Check back on {month_day} at {hour}:{minute} {ampm}"
+            return f"Check back on {month_day}"
+        except ValueError:
+            continue
+    return ""
+
+
+def format_timeline_event_display(event: dict) -> dict[str, str]:
+    """Map a raw event dict to {title, description} for display.
+
+    Strips internal fields (signal_key, scope, signal_status, JSON blobs,
+    reason= prefixes). Formats follow-up due dates as plain language.
+
+    Args:
+        event: dict with keys: event_type, status, action_id, notes,
+               outcome, next_follow_up_at.
+
+    Returns:
+        dict with "title" (human-readable event label) and
+        "description" (one plain sentence, or empty string).
+    """
+    raw_event_type = str(event.get("event_type") or "").strip().lower()
+    raw_status = str(event.get("status") or "").strip().lower()
+    action_id = str(event.get("action_id") or "").strip()
+
+    title = format_timeline_event(raw_event_type, status=raw_status, action_id=action_id)
+    description = ""
+
+    if raw_event_type == "resolved" or raw_status in {"done", "resolved", "completed"}:
+        description = "Marked this issue as handled."
+
+    elif raw_event_type == "exception_opened":
+        description = "Performance concern recorded for tracking."
+
+    elif raw_event_type in {"follow_up_logged", "follow_through_logged"}:
+        due_raw = str(event.get("next_follow_up_at") or "").strip()
+        description = _format_followup_due_text(due_raw)
+
+    elif raw_event_type in {"coached", "recognized"}:
+        note_raw = str(event.get("notes") or "").strip()
+        if note_raw and not _is_internal_debug_text(note_raw):
+            description = " ".join(note_raw.split())[:140]
+
+    else:
+        for candidate in [
+            str(event.get("outcome") or "").strip(),
+            str(event.get("notes") or "").strip(),
+        ]:
+            if (
+                candidate
+                and not _is_internal_debug_text(candidate)
+                and candidate.lower() not in {
+                    "done", "resolved", "completed", "open", "closed", "logged", "recorded",
+                }
+            ):
+                description = " ".join(candidate.split())[:140]
+                break
+
+    return {"title": title, "description": description}
 
 
 def format_timeline_when(dt: datetime | None, *, fallback: str = "") -> str:

@@ -12,6 +12,7 @@ from services.team_page_language_service import (
     format_timeline_description,
     format_timeline_entry,
     format_timeline_event,
+    format_timeline_event_display,
     format_timeline_row_heading,
     format_trend_interpretation_limited_days,
     format_trend_interpretation_no_days,
@@ -143,3 +144,92 @@ def test_section_chips_and_heading_wording_stays_consistent():
     heading = format_timeline_row_heading("2026-04-20 11:00", "Follow-up completed")
     assert "2026-04-20 11:00" in heading
     assert "Follow-up completed" in heading
+
+
+def test_format_timeline_event_display_completed_returns_handled_sentence():
+    result = format_timeline_event_display({"event_type": "resolved", "status": "", "action_id": "a-1"})
+    assert result["title"] == "Follow-up completed"
+    assert result["description"] == "Marked this issue as handled."
+
+    result2 = format_timeline_event_display({"event_type": "follow_up_logged", "status": "completed", "action_id": ""})
+    assert result2["description"] == "Marked this issue as handled."
+
+
+def test_format_timeline_event_display_exception_opened_uses_fixed_sentence():
+    result = format_timeline_event_display({"event_type": "exception_opened", "status": "open", "notes": "bad"})
+    assert result["title"] == "Exception opened"
+    assert result["description"] == "Performance concern recorded for tracking."
+
+
+def test_format_timeline_event_display_follow_up_formats_due_date():
+    result = format_timeline_event_display({
+        "event_type": "follow_up_logged",
+        "status": "",
+        "next_follow_up_at": "2026-05-04T09:00",
+    })
+    assert result["title"] == "Follow-up created"
+    assert result["description"] == "Check back on May 4 at 9:00 AM"
+
+
+def test_format_timeline_event_display_follow_up_no_due_date_returns_empty():
+    result = format_timeline_event_display({"event_type": "follow_up_logged", "status": "", "next_follow_up_at": ""})
+    assert result["title"] == "Follow-up created"
+    assert result["description"] == ""
+
+
+def test_format_timeline_event_display_coached_shows_note_text_only():
+    result = format_timeline_event_display({
+        "event_type": "coached",
+        "notes": "Training",
+    })
+    assert result["title"] == "Coaching note added"
+    assert result["description"] == "Training"
+
+
+def test_format_timeline_event_display_coached_strips_json_blob():
+    result = format_timeline_event_display({
+        "event_type": "coached",
+        "notes": '{"signal_key": "uph_below_target", "scope": "team"}',
+    })
+    assert result["description"] == ""
+
+
+def test_format_timeline_event_display_strips_reason_prefix_debug_text():
+    result = format_timeline_event_display({
+        "event_type": "created",
+        "notes": "reason=Today queue completion follow_up_required=yes",
+    })
+    assert result["description"] == ""
+
+
+def test_format_timeline_event_display_strips_signal_key_debug_text():
+    result = format_timeline_event_display({
+        "event_type": "today_signal_status_set",
+        "notes": "signal_key=uph_below_target scope=team signal_status=flagged",
+    })
+    assert result["description"] == ""
+
+
+def test_format_timeline_event_display_unknown_event_uses_clean_outcome():
+    result = format_timeline_event_display({
+        "event_type": "escalated",
+        "outcome": "Escalation reviewed by shift lead.",
+    })
+    assert result["title"] == "Escalation opened"
+    assert "Escalation reviewed by shift lead." in result["description"]
+
+
+def test_format_timeline_event_display_skips_raw_status_words_as_outcome():
+    result = format_timeline_event_display({
+        "event_type": "created",
+        "outcome": "logged",
+    })
+    assert result["description"] == ""
+
+
+def test_format_timeline_event_display_follow_up_date_only():
+    result = format_timeline_event_display({
+        "event_type": "follow_up_logged",
+        "next_follow_up_at": "2026-05-04",
+    })
+    assert result["description"] == "Check back on May 4"

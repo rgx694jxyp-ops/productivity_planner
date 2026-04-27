@@ -56,6 +56,7 @@ from services.team_page_language_service import (
     format_status_summary_line,
     format_timeline_description_fallback,
     format_timeline_entry,
+    format_timeline_event_display,
     format_timeline_when,
     format_trend_intro,
     format_trend_interpretation_above_target_and_improving,
@@ -345,16 +346,15 @@ def _normalize_recent_activity_timeline(
     for row in notes or []:
         event_at_raw = str(row.get("created_at") or row.get("date") or "").strip()
         event_at = _parse_dt(event_at_raw)
-        entry = format_timeline_entry(
-            source="note",
-            event_type="coached",
-            raw_description=_compact_text(row.get("note") or row.get("notes") or "", max_len=140),
-        )
+        entry = format_timeline_event_display({
+            "event_type": "coached",
+            "notes": str(row.get("note") or row.get("notes") or "").strip(),
+        })
         events.append(
             {
                 "event_at": event_at,
                 "event_at_raw": event_at_raw,
-                "event_type": entry["label"],
+                "event_type": entry["title"],
                 "description": entry["description"],
                 "source": "note",
                 "dedupe_key": f"note|{event_at_raw}|{entry['description'].lower()}",
@@ -367,25 +367,19 @@ def _normalize_recent_activity_timeline(
         action_id = str(row.get("action_id") or "").strip()
         raw_event_type = str(row.get("event_type") or "").strip().lower()
         raw_status = str(row.get("status") or "").strip().lower()
-        entry = format_timeline_entry(
-            source="action_event",
-            event_type=raw_event_type,
-            status=raw_status,
-            action_id=action_id,
-            raw_description=_compact_text(
-                row.get("notes")
-                or row.get("outcome")
-                or row.get("trigger_summary")
-                or row.get("status")
-                or format_timeline_description_fallback("action_event"),
-                max_len=140,
-            ),
-        )
+        entry = format_timeline_event_display({
+            "event_type": raw_event_type,
+            "status": raw_status,
+            "action_id": action_id,
+            "notes": str(row.get("notes") or "").strip(),
+            "outcome": str(row.get("outcome") or "").strip(),
+            "next_follow_up_at": str(row.get("next_follow_up_at") or "").strip(),
+        })
         events.append(
             {
                 "event_at": event_at,
                 "event_at_raw": event_at_raw,
-                "event_type": entry["label"],
+                "event_type": entry["title"],
                 "description": entry["description"],
                 "source": "action_event",
                 "dedupe_key": f"action|{action_id}|{raw_event_type}|{event_at_raw}|{entry['description'].lower()}",
@@ -397,24 +391,21 @@ def _normalize_recent_activity_timeline(
         event_at = _parse_dt(event_at_raw)
         resolved_at = str(row.get("resolved_at") or "").strip()
         status = str(row.get("status") or "").strip().lower()
-        entry = format_timeline_entry(
-            source="exception",
-            event_type=("resolved" if (resolved_at or status == "resolved") else "exception_opened"),
-            status=status,
-            raw_description=_compact_text(
-                row.get("summary") or row.get("notes") or row.get("category") or format_timeline_description_fallback("exception"),
-                max_len=140,
-            ),
-        )
+        is_resolved = bool(resolved_at or status == "resolved")
+        entry = format_timeline_event_display({
+            "event_type": "resolved" if is_resolved else "exception_opened",
+            "status": status,
+            "notes": str(row.get("summary") or row.get("notes") or "").strip(),
+        })
         exception_id = str(row.get("id") or "").strip()
         events.append(
             {
                 "event_at": event_at,
                 "event_at_raw": event_at_raw,
-                "event_type": entry["label"],
+                "event_type": entry["title"],
                 "description": entry["description"],
                 "source": "exception",
-                "dedupe_key": f"exception|{exception_id}|{entry['label'].lower()}|{event_at_raw}|{entry['description'].lower()}",
+                "dedupe_key": f"exception|{exception_id}|{entry['title'].lower()}|{event_at_raw}|{entry['description'].lower()}",
             }
         )
 
@@ -1251,7 +1242,7 @@ def page_team() -> None:
                 else:
                     for event in unified_timeline:
                         when_text = _timeline_when_text(event.get("event_at"), fallback=str(event.get("event_at_raw") or ""))
-                        event_type = str(event.get("event_type") or format_timeline_description_fallback("action_event"))
+                        event_type = str(event.get("event_type") or "Update added")
                         description = str(event.get("description") or "")
                         detail_html = ""
                         if description:
