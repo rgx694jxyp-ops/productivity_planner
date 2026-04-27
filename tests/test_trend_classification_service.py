@@ -37,7 +37,7 @@ def test_classify_trend_state_returns_declining_when_recent_average_drops():
     )
 
     assert result["state"] == "declining"
-    assert result["label"] == "slipping from recent pace"
+    assert result["label"] == "Lower than recent pace"
 
 
 def test_classify_trend_state_returns_improving_when_recent_average_rises():
@@ -50,7 +50,7 @@ def test_classify_trend_state_returns_improving_when_recent_average_rises():
     )
 
     assert result["state"] == "improving"
-    assert result["label"] == "moving up from recent pace"
+    assert result["label"] == "Higher than recent pace"
 
 
 def test_classify_trend_state_returns_below_expected_when_under_target_without_strong_direction():
@@ -63,7 +63,7 @@ def test_classify_trend_state_returns_below_expected_when_under_target_without_s
     )
 
     assert result["state"] == "below_expected"
-    assert result["label"] == "below expected pace"
+    assert result["label"] == "Below expected pace"
 
 
 def test_classify_trend_state_returns_stable_when_no_other_rule_applies():
@@ -76,7 +76,7 @@ def test_classify_trend_state_returns_stable_when_no_other_rule_applies():
     )
 
     assert result["state"] == "stable"
-    assert result["label"] == "holding steady"
+    assert result["label"] == "Worth review"
 
 
 def test_normalize_trend_state_maps_legacy_values():

@@ -184,7 +184,7 @@ def _build_coaching_recommendations():
         elif target and gap_pct < 0:
             rec["priority"] = "low"
             rec["status"] = f"{gap_pct}% below target"
-            rec["actions"].append(f"Slightly below target. Encourage {name} and recognize effort.")
+            rec["actions"].append(f"Below target. {name} is near the threshold.")
             rec["actions"].append("Small workflow adjustments may close the gap.")
         elif target and gap_pct >= 20:
             rec["priority"] = "star"

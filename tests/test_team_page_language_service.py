@@ -3,6 +3,16 @@ from services.team_page_language_service import (
     format_chip_follow_up,
     format_chip_notes,
     format_chip_trend,
+    format_trend_label,
+    format_trend_interpretation_above_target_declining,
+    format_trend_interpretation_above_target_and_improving,
+    format_trend_interpretation_below_target,
+    format_trend_interpretation_declining,
+    format_trend_interpretation_improving,
+    format_trend_interpretation_improving_but_below_target,
+    format_trend_interpretation_near_or_above_target,
+    format_trend_interpretation_recent_dip,
+    format_trend_interpretation_stable,
     format_comparison_text,
     clean_note_text_for_display,
     format_empty_state,
@@ -48,7 +58,7 @@ def test_window_trend_fallback_and_directional_wording():
     assert "Holding steady" in format_window_trend(0.2, 14)
     assert "Improving over the last 14 days" in format_window_trend(3.2, 14)
     assert "(+3.2%)" in format_window_trend(3.2, 14)
-    assert "Slipping over the last 14 days" in format_window_trend(-2.0, 14)
+    assert "Declining over the last 14 days" in format_window_trend(-2.0, 14)
     assert "(-4.0%)" in format_window_trend(-4.0, 14)
 
 
@@ -76,7 +86,7 @@ def test_timeline_entry_hides_internal_event_codes_and_reduces_noise():
         action_id="a-1",
         raw_description="completed",
     )
-    assert completion["label"] == "Issue marked as handled"
+    assert completion["label"] == "Reviewed and logged"
     assert completion["description"] == ""
 
 
@@ -161,17 +171,17 @@ def test_section_chips_and_heading_wording_stays_consistent():
 
 def test_format_timeline_event_display_completed_returns_handled_sentence():
     result = format_timeline_event_display({"event_type": "resolved", "status": "", "action_id": "a-1"})
-    assert result["title"] == "Issue marked as handled"
+    assert result["title"] == "Reviewed and logged"
     assert result["description"] == ""
 
     result2 = format_timeline_event_display({"event_type": "follow_up_logged", "status": "completed", "action_id": ""})
-    assert result2["title"] == "Issue marked as handled"
+    assert result2["title"] == "Reviewed and logged"
     assert result2["description"] == ""
 
 
 def test_format_timeline_event_display_exception_opened_uses_fixed_sentence():
     result = format_timeline_event_display({"event_type": "exception_opened", "status": "open", "notes": "bad"})
-    assert result["title"] == "Issue logged for tracking"
+    assert result["title"] == "Performance concern identified"
     assert result["description"] == "bad"
 
 
@@ -248,3 +258,56 @@ def test_format_timeline_event_display_follow_up_date_only():
     })
     assert result["title"] == "Follow-up scheduled for May 4"
     assert result["description"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Banned wording: no trend function may emit "softening", "slipping", "slightly"
+# ---------------------------------------------------------------------------
+
+_BANNED_TREND_WORDS = ("softening", "slipping", "slightly")
+
+
+def _assert_no_banned_wording(text: str, context: str = "") -> None:
+    lower = text.lower()
+    for word in _BANNED_TREND_WORDS:
+        assert word not in lower, (
+            f"Banned word '{word}' found in output {context!r}: {text!r}"
+        )
+
+
+def test_format_trend_label_only_returns_three_deterministic_values():
+    allowed = {"Declining", "Holding steady", "Improving"}
+    for bucket in ("needs attention", "improved recently", "stable", "unknown", "", "anything"):
+        result = format_trend_label(bucket)
+        assert result in allowed, f"format_trend_label({bucket!r}) returned unexpected {result!r}"
+        _assert_no_banned_wording(result, f"format_trend_label({bucket!r})")
+
+
+def test_trend_interpretation_functions_contain_no_banned_wording():
+    outputs = [
+        format_trend_interpretation_above_target_declining(),
+        format_trend_interpretation_above_target_declining(change_pct=-5.0),
+        format_trend_interpretation_above_target_declining(change_pct=-1.0),
+        format_trend_interpretation_above_target_and_improving(),
+        format_trend_interpretation_above_target_and_improving(change_pct=5.0),
+        format_trend_interpretation_below_target(below_count=3, observed_days=7),
+        format_trend_interpretation_below_target(below_count=3, observed_days=7, change_pct=-4.0),
+        format_trend_interpretation_declining(),
+        format_trend_interpretation_declining(change_pct=-5.0),
+        format_trend_interpretation_improving(),
+        format_trend_interpretation_improving(change_pct=5.0),
+        format_trend_interpretation_improving_but_below_target(below_count=2, observed_days=5),
+        format_trend_interpretation_improving_but_below_target(below_count=2, observed_days=5, change_pct=4.0),
+        format_trend_interpretation_near_or_above_target(),
+        format_trend_interpretation_recent_dip(),
+        format_trend_interpretation_stable(),
+    ]
+    for text in outputs:
+        _assert_no_banned_wording(text, "trend_interpretation")
+
+
+def test_describe_change_pct_contains_no_banned_wording():
+    from services.plain_language_service import describe_change_pct
+    for pct in (-25.0, -5.0, -1.0, 0.0, 1.0, 5.0, 15.0):
+        result = describe_change_pct(pct)
+        _assert_no_banned_wording(result, f"describe_change_pct({pct})")

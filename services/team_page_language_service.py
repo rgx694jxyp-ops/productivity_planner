@@ -54,10 +54,13 @@ def format_status_filter_option(option: str) -> str:
 
 
 def format_trend_label(status_bucket: str) -> str:
-    """Format internal trend buckets into concise display labels."""
+    """Format internal trend buckets into one of three deterministic display labels.
+
+    Allowed outputs: "Declining", "Holding steady", "Improving".
+    """
     key = str(status_bucket or "").strip().lower()
     if key == "needs attention":
-        return "Needs review"
+        return "Declining"
     if key == "improved recently":
         return "Improving"
     return "Holding steady"
@@ -144,8 +147,8 @@ def format_window_trend(change_pct: float | None, days: int) -> str:
         return f"Improving over the last {safe_days} days"
 
     if abs(change_pct) >= 3.0:
-        return f"Slipping over the last {safe_days} days ({change_pct:+.1f}%)"
-    return f"Slipping over the last {safe_days} days"
+        return f"Declining over the last {safe_days} days ({change_pct:+.1f}%)"
+    return f"Declining over the last {safe_days} days"
 
 
 def format_follow_up_summary_overdue(due_iso: str) -> str:
@@ -235,7 +238,11 @@ def format_data_completeness_meta(status: str) -> str:
 
 def format_selected_employee_subheader(department: str, trend_label: str) -> str:
     """Format selected employee subheader line."""
-    return f"{department} | {trend_label}"
+    dept = str(department or "").strip() or "Unknown"
+    trend = str(trend_label or "").strip()
+    if trend:
+        return f"{dept} | {trend}"
+    return dept
 
 
 def format_selected_summary(
@@ -278,11 +285,11 @@ def format_selected_summary(
     if is_above and direction == "up":
         return "Performance is above target and trending up."
     if is_above and direction == "down":
-        return "Performance is above target but softening."
+        return "Performance is above target and declining."
     if is_above:
         return "Performance is at or above target."
     if direction == "down":
-        return "Performance has softened slightly in this period."
+        return "Performance has been declining in this period."
     return "Performance is holding steady."
 
 
@@ -334,11 +341,11 @@ def format_primary_statement(
         if is_above and direction == "up":
             state = "Above target and trending up"
         elif is_above and direction == "down":
-            state = "Above target, softening"
+            state = "Above target and declining"
         elif is_above:
             state = "At or above target"
         elif direction == "down":
-            state = "Softening slightly"
+            state = "Declining"
         else:
             state = "Holding steady"
 
@@ -412,7 +419,7 @@ def format_what_changed_line(
         if abs(change_pct) < 2.0:
             return f"Performance has been steady over the last {safe_days} days"
         if change_pct < 0:
-            return f"Performance has softened slightly over the last {safe_days} days"
+            return f"Performance has been declining over the last {safe_days} days"
         return f"Performance has edged up over the last {safe_days} days"
 
     if "variable" in trend_lower or "inconsistent" in trend_lower:
@@ -476,11 +483,11 @@ def format_trend_interpretation_above_target_and_improving(*, change_pct: float 
     return "Above target and still improving"
 
 
-def format_trend_interpretation_above_target_softening(*, change_pct: float | None = None) -> str:
+def format_trend_interpretation_above_target_declining(*, change_pct: float | None = None) -> str:
     """Format interpretation for above-target but declining trend."""
     if change_pct is not None and abs(change_pct) >= 3.0:
-        return f"Above target \u00b7 eased {abs(change_pct):.0f}% over this period"
-    return "Above target \u00b7 momentum has softened"
+        return f"Above target \u00b7 down {abs(change_pct):.0f}% over this period"
+    return "Above target \u00b7 recent decline"
 
 
 def format_trend_interpretation_near_or_above_target() -> str:
@@ -498,8 +505,8 @@ def format_trend_interpretation_improving(*, change_pct: float | None = None) ->
 def format_trend_interpretation_declining(*, change_pct: float | None = None) -> str:
     """Format interpretation for non-target declining trend."""
     if change_pct is not None and abs(change_pct) >= 3.0:
-        return f"Down {abs(change_pct):.0f}% \u00b7 slipping direction"
-    return "Slipping direction"
+        return f"Down {abs(change_pct):.0f}% \u00b7 declining direction"
+    return "Declining direction"
 
 
 def format_trend_interpretation_stable() -> str:
@@ -529,13 +536,13 @@ def format_timeline_event(event_type: str, *, status: str = "", action_id: str =
         "reopened": "Escalation reopened",
         "deprioritized": "Priority lowered",
         "today_signal_status_set": "Status updated",
-        "exception_opened": "Issue logged for tracking",
-        "resolved": "Issue marked as handled",
+        "exception_opened": "Performance concern identified",
+        "resolved": "Reviewed and logged",
         "created": "Update added",
     }
 
     if raw in {"resolved"} or status_raw in {"done", "resolved", "completed"}:
-        return "Issue marked as handled"
+        return "Reviewed and logged"
 
     if raw in event_labels:
         return event_labels[raw]
@@ -691,7 +698,7 @@ def format_timeline_event_display(event: dict) -> dict[str, str]:
     description = ""
 
     if raw_event_type == "resolved" or raw_status in {"done", "resolved", "completed"}:
-        pass  # title already says "Issue marked as handled"
+        pass  # title already uses "Reviewed and logged"
 
     elif raw_event_type == "exception_opened":
         notes_raw = str(event.get("notes") or "").strip()

@@ -1008,7 +1008,7 @@ def _emp_coaching():
 
         reasons = []
         if trend == "declining":
-            reasons.append(f"Performance slipping ({change_pct:+.1f}%)")
+            reasons.append(f"Performance declining ({change_pct:+.1f}%)")
         elif trend == "inconsistent":
             reasons.append(signal_wording("inconsistent_performance"))
         if goal_st == "below_goal":

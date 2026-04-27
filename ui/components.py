@@ -425,7 +425,7 @@ def build_operation_status(gs: list[dict]) -> dict:
     if below:
         reasons.append(f"{len(below)} employees below target")
     if len(trending) >= 2:
-        reasons.append(f"{len(trending)} employees slipping")
+        reasons.append(f"{len(trending)} employees declining")
     if not reasons:
         reasons.append("No major issues detected")
 

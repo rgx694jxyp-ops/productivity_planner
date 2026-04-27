@@ -104,11 +104,11 @@ def describe_change_pct(change_pct: float) -> str:
     if change_pct <= -10:
         return f"below expected pace ({change_pct:.1f}%)"
     if change_pct < -2:
-        return f"slightly below expected pace ({change_pct:.1f}%)"
+        return f"below expected pace ({change_pct:.1f}%)"
     if change_pct >= 10:
         return f"above expected pace (+{change_pct:.1f}%)"
     if change_pct > 2:
-        return f"slightly above expected pace (+{change_pct:.1f}%)"
+        return f"above expected pace (+{change_pct:.1f}%)"
     sign = "+" if change_pct > 0 else ""
     return f"near expected pace ({sign}{change_pct:.1f}%)"
 

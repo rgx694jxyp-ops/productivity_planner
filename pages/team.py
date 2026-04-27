@@ -61,7 +61,7 @@ from services.team_page_language_service import (
     format_timeline_when,
     format_trend_intro,
     format_trend_interpretation_above_target_and_improving,
-    format_trend_interpretation_above_target_softening,
+    format_trend_interpretation_above_target_declining,
     format_trend_interpretation_below_target,
     format_trend_interpretation_declining,
     format_trend_interpretation_improving,
@@ -737,7 +737,7 @@ def _trend_interpretation_sentence(chart_rows: list[dict], target_uph: float | N
         if change_pct >= 3.0:
             return format_trend_interpretation_above_target_and_improving(change_pct=change_pct)
         if change_pct <= -3.0:
-            return format_trend_interpretation_above_target_softening(change_pct=change_pct)
+            return format_trend_interpretation_above_target_declining(change_pct=change_pct)
         return format_trend_interpretation_near_or_above_target()
 
     if change_pct >= 3.0:
