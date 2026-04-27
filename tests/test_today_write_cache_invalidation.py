@@ -780,3 +780,56 @@ def test_phase1_prepare_exposes_status_map_ms_and_queue_build_ms(monkeypatch):
     assert "queue_build_ms" in prepared
     assert isinstance(prepared["signal_status_map_ms"], int)
     assert isinstance(prepared["queue_build_ms"], int)
+
+
+def test_post_import_recovery_runs_sync_snapshot_and_clears_payload_session_cache(monkeypatch):
+    today_value = date(2026, 4, 20)
+    cache_key = f"{today_module._TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX}tenant-a_{today_value.isoformat()}"
+    session_state = {
+        "tenant_id": "tenant-a",
+        "user_email": "lead@example.com",
+        "_post_import_refresh_pending": True,
+        cache_key: {"queue_items": [{"employee_id": "E1"}]},
+    }
+    calls = {"sync_recompute": 0, "async_schedule": 0, "compute_signals": 0}
+
+    monkeypatch.setattr("pages.today.st.session_state", session_state)
+    monkeypatch.setattr("pages.today._log_today_milestone", lambda *args, **kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("pages.today._log_app_error", lambda *args, **kwargs: None)
+    monkeypatch.setattr("pages.today.show_error_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "pages.today._schedule_today_snapshot_recompute_async",
+        lambda **_kwargs: calls.__setitem__("async_schedule", calls["async_schedule"] + 1) or True,
+    )
+    monkeypatch.setattr(
+        "services.daily_snapshot_service.get_latest_snapshot_goal_status",
+        lambda **_kwargs: ([], [], "2026-04-19"),
+    )
+    monkeypatch.setattr(
+        "services.daily_snapshot_service.recompute_daily_employee_snapshots",
+        lambda **_kwargs: calls.__setitem__("sync_recompute", calls["sync_recompute"] + 1),
+    )
+    monkeypatch.setattr(
+        "services.daily_signals_service.compute_daily_signals",
+        lambda **_kwargs: calls.__setitem__("compute_signals", calls["compute_signals"] + 1),
+    )
+
+    recovered = today_module._attempt_signal_payload_recovery(
+        tenant_id="tenant-a",
+        today_value=today_value,
+    )
+
+    assert recovered is True
+    assert calls["sync_recompute"] == 1
+    assert calls["async_schedule"] == 0
+    assert calls["compute_signals"] == 1
+    assert cache_key not in session_state
+    assert session_state.get("_post_import_refresh_pending") is False
+
+
+def test_today_wording_helpers_use_signal_first_copy():
+    assert today_module._today_signal_surface_heading(3) == "## Today: 3 signals surfaced"
+    assert today_module._today_signal_surface_heading(1) == "## Today: 1 signal surfaced"
+    assert today_module._today_queue_intro_label() == "Signals surfaced now"
+    assert today_module._today_loading_placeholder() == "Loading today's signals..."

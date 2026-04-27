@@ -2,8 +2,8 @@
   "dataset_summary": {
     "employees": 32,
     "history_days": 18,
-    "history_start": "2026-03-22",
-    "history_end": "2026-04-08",
+    "history_start": "2026-03-26",
+    "history_end": "2026-04-12",
     "preseeded_actions": 9
   },
   "scenario_index": [

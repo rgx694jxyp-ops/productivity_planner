@@ -347,16 +347,20 @@ def test_import_success_message_emphasizes_immediate_value(monkeypatch):
         {
             "valid_rows": 120,
             "emp_count": 14,
-        }
+            "effect_added_rows": 120,
+            "effect_replaced_rows": 0,
+            "effect_changed_rows": 120,
+        },
+        downstream_ready=True,
     )
 
     assert captured
     rendered = captured[0]
-    assert "Import complete: first signal view is ready" in rendered
+    assert "Review data is available in this workspace" in rendered
     assert "120" in rendered
     assert "14" in rendered
-    assert "Compared using available targets and recent history." in rendered
-    assert "Signals are surfaced to establish an initial baseline." in rendered
+    assert "This import added 120 new usable row(s)." in rendered
+    assert "Today and Team can reflect those added rows now." in rendered
 
 
 def test_import_success_message_sets_expectation_for_future_comparisons(monkeypatch):
@@ -368,13 +372,40 @@ def test_import_success_message_sets_expectation_for_future_comparisons(monkeypa
         {
             "rows_processed": 48,
             "emp_count": 6,
+            "effect_added_rows": 0,
+            "effect_replaced_rows": 48,
+            "effect_changed_rows": 48,
         }
     )
 
     assert captured
     rendered = captured[0]
-    assert "Compared using available targets and recent history." in rendered
+    assert "This import replaced 48 existing row(s)." in rendered
+    assert "Today and Team will reflect those replaced rows after downstream processing finishes." in rendered
     assert "Confidence: Low based on available data completeness and sample depth." in rendered
+
+
+def test_import_ready_message_for_noop_duplicate_import_stays_effect_neutral(monkeypatch):
+    captured: list[str] = []
+
+    monkeypatch.setattr(import_page.st, "markdown", lambda body, unsafe_allow_html=False: captured.append(body))
+
+    import_page._render_import_ready_message(
+        {
+            "rows_processed": 48,
+            "emp_count": 6,
+            "effect_added_rows": 0,
+            "effect_replaced_rows": 0,
+            "effect_changed_rows": 0,
+        },
+        downstream_ready=True,
+    )
+
+    assert captured
+    rendered = captured[0]
+    assert "Review data is available in this workspace" in rendered
+    assert "This file did not add or replace usable rows." in rendered
+    assert "Today and Team may already show reviewable data from earlier history." in rendered
 
 
 def test_render_import_trust_summary_shows_warning_summary(monkeypatch):

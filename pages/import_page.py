@@ -719,21 +719,44 @@ def _render_import_ready_message(summary: dict, *, downstream_ready: bool = Fals
     if confidence_level == "Moderate":
         confidence_level = "Medium"
 
+    added_rows = int(summary.get("effect_added_rows", 0) or 0)
+    replaced_rows = int(summary.get("effect_replaced_rows", 0) or 0)
+    changed_rows = int(summary.get("effect_changed_rows", 0) or (added_rows + replaced_rows))
+
     _title = (
-        "Import complete: first signal view is ready"
+        "Review data is available in this workspace"
         if downstream_ready
-        else "Import saved: final signal view is still being prepared"
+        else "Import saved"
     )
-    _status_line = (
-        "Compared using available targets and recent history."
-        if downstream_ready
-        else "Your data was written successfully. Today and Team will update when downstream processing finishes."
-    )
-    _support_line = (
-        "Signals are surfaced to establish an initial baseline."
-        if downstream_ready
-        else "Post-import materialization is running asynchronously in the background."
-    )
+
+    if changed_rows <= 0:
+        _status_line = "This file did not add or replace usable rows."
+        _support_line = (
+            "Today and Team may already show reviewable data from earlier history."
+            if downstream_ready
+            else "Today and Team will stay the same because this file did not change usable history."
+        )
+    elif added_rows > 0 and replaced_rows > 0:
+        _status_line = f"This import added {added_rows:,} new row(s) and replaced {replaced_rows:,} existing row(s)."
+        _support_line = (
+            "Today and Team can reflect those history changes now."
+            if downstream_ready
+            else "Today and Team will reflect those history changes after downstream processing finishes."
+        )
+    elif added_rows > 0:
+        _status_line = f"This import added {added_rows:,} new usable row(s)."
+        _support_line = (
+            "Today and Team can reflect those added rows now."
+            if downstream_ready
+            else "Today and Team will reflect those added rows after downstream processing finishes."
+        )
+    else:
+        _status_line = f"This import replaced {replaced_rows:,} existing row(s)."
+        _support_line = (
+            "Today and Team can reflect those replaced rows now."
+            if downstream_ready
+            else "Today and Team will reflect those replaced rows after downstream processing finishes."
+        )
 
     st.markdown(
         f'<div class="dpd-import-done" style="background:#ffffff;border:1px solid #d9e2ef;border-radius:10px;padding:14px 16px;">'
@@ -1710,14 +1733,19 @@ def _import_step3(tenant_id: str):
     if st.session_state.get("_import_complete_summary"):
         _sm = st.session_state["_import_complete_summary"]
         _downstream_ready = st.session_state.get("_post_import_refresh_pending") is False
+        _changed_rows = int(_sm.get("effect_changed_rows", 0) or 0)
         _ic_below = _sm.get("below", 0)
         _ic_risks = _sm.get("risks", 0)
         _ic_trust = _sm.get("trust") or {}
         _focus_first_insight = bool(st.session_state.pop(_FOCUS_FIRST_INSIGHT_ONCE_FLAG, False))
-        if _focus_first_insight and _downstream_ready:
-            st.success("Sample data is ready. Showing your first insight now.")
+        if _focus_first_insight and _changed_rows > 0 and _downstream_ready:
+            st.success("Sample data changed usable history. Showing the current signal view now.")
+        elif _focus_first_insight and _changed_rows > 0:
+            st.info("Sample data changed usable history. Today and Team will refresh when downstream processing finishes.")
+        elif _focus_first_insight and _downstream_ready:
+            st.info("This sample file did not change usable history. Current review data is still available.")
         elif _focus_first_insight:
-            st.info("Sample data was saved. Insights will appear once downstream processing finishes.")
+            st.info("This sample file did not change usable history.")
         _render_import_ready_message(_sm, downstream_ready=_downstream_ready)
 
         # ── First interpreted insight ─────────────────────────────────────────
@@ -2087,29 +2115,110 @@ def _import_step3(tenant_id: str):
 
     _preview_overlap_count = _preview_dup_count
     _preview_new_count = 0 if _preview_exact_duplicate_import else len(_candidate_preview_rows)
+    _outcome_processed = int(len(_candidate_preview_rows or []))
+    _outcome_replaced = 0 if _preview_exact_duplicate_import else int(_preview_overlap_count or 0)
+    _outcome_added = 0 if _preview_exact_duplicate_import else max(0, _outcome_processed - _outcome_replaced)
+    _outcome_ignored = int(len(_preview_mismatch_rows or []))
+    if _preview_exact_duplicate_import:
+        _outcome_ignored += _outcome_processed
 
-    with st.expander("👀 Preview parsed data before import", expanded=True):
+    if "import_preview_continue_path" not in st.session_state:
+        st.session_state["import_preview_continue_path"] = "continue_with_warnings"
+
+    _trust_status = str(_preview_trust_summary.get("status", "") or "").strip().lower()
+    _trust_warnings = int(_preview_trust_summary.get("warnings", 0) or 0)
+    _trust_rejected = int(_preview_trust_summary.get("rejected_rows", 0) or 0)
+    _has_quality_issues = bool(_trust_warnings > 0 or _trust_rejected > 0 or _preview_row_issues or _preview_mismatch_rows)
+    _will_change_today_team = bool((_outcome_added + _outcome_replaced) > 0)
+
+    if _preview_exact_duplicate_import or not _will_change_today_team:
+        _decision_state = "blocked"
+        _decision_title = "Blocked: this run will not change history"
+        _decision_detail = "No new or replacement rows are available with the current preview and handling choices."
+    elif _trust_status == "invalid":
+        _decision_state = "blocked"
+        _decision_title = "Blocked: preview is not usable yet"
+        _decision_detail = "Resolve critical row issues before running so history is written correctly."
+    elif _has_quality_issues:
+        _decision_state = "warning"
+        _decision_title = "Usable with warnings"
+        _decision_detail = "The import can run, and some rows may be ignored or need follow-up."
+    else:
+        _decision_state = "usable"
+        _decision_title = "Usable: ready to run"
+        _decision_detail = "Rows are ready to write to history with no major quality blockers detected."
+
+    if _preview_exact_duplicate_import:
+        _duplicate_line = f"Exact duplicate import: {_outcome_processed:,} row(s) already exist and will be ignored."
+    elif _preview_overlap_count > 0:
+        _duplicate_line = (
+            f"Overlap detected: {_preview_overlap_count:,} existing employee/date row(s) will be replaced by this file."
+        )
+    else:
+        _duplicate_line = "No duplicate employee/date keys detected in this preview."
+
+    _handling_required = bool(_has_quality_issues)
+
+    st.markdown("### Import decision")
+    if _decision_state == "usable":
+        st.success(f"{_decision_title}. {_decision_detail}")
+    elif _decision_state == "warning":
+        st.warning(f"{_decision_title}. {_decision_detail}")
+    else:
+        st.error(f"{_decision_title}. {_decision_detail}")
+
+    st.caption(_duplicate_line)
+
+    with st.container(border=True):
+        st.markdown("**What will happen if you run now**")
+        st.markdown(f"- Processed from preview: **{_outcome_processed:,}** row(s)")
+        st.markdown(f"- Added to history: **{_outcome_added:,}** row(s)")
+        st.markdown(f"- Replaced in history: **{_outcome_replaced:,}** row(s)")
+        st.markdown(f"- Ignored or excluded: **{_outcome_ignored:,}** row(s)")
+        st.markdown(
+            "- Today/Team impact: **Will update after run**"
+            if _will_change_today_team
+            else "- Today/Team impact: **No change from this run**"
+        )
+
+    if _handling_required:
+        st.markdown("**Handling choices**")
+        _render_issue_group_handling(
+            trust=_preview_trust_summary,
+            row_issues=_preview_row_issues,
+            preview_rows=_preview_rows,
+            excluded_rows=_preview_mismatch_rows,
+            state_key="import_issue_handling_preview",
+        )
+        st.radio(
+            "Next action",
+            ["continue_with_warnings", "review_later", "proceed_using_available_data"],
+            format_func=lambda value: {
+                "continue_with_warnings": "Continue with warnings",
+                "review_later": "Review later",
+                "proceed_using_available_data": "Proceed using available data",
+            }.get(value, value),
+            key="import_preview_continue_path",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+    else:
+        st.session_state["import_preview_continue_path"] = "continue_with_warnings"
+
+    with st.expander("Preview details", expanded=False):
         _preview_days = len(_preview_dates) if _preview_dates else 1
         st.caption(
-            f"Sample preview of parsed rows. About {_preview_days} day(s) and "
-            f"{len(_preview_emp_ids)} unique employee ID(s) detected."
+            f"Detected about {_preview_days} day(s), {len(_preview_emp_ids)} unique employee ID(s), "
+            f"and {len(sessions)} source file(s)."
         )
-        if _candidate_preview_rows:
-            if _preview_exact_duplicate_import:
-                _duplicate_message = (
-                    f"{len(_candidate_preview_rows):,} rows are duplicates and will be ignored. "
-                    "These rows already exist in your data. Running the pipeline will not add new rows for them."
-                )
-            elif _preview_overlap_count > 0:
-                _duplicate_message = (
-                    f"{_preview_overlap_count:,} rows already exist and will be replaced. "
-                    "These rows already exist in your data. Running the pipeline will replace the existing values with this new data."
-                )
-            else:
-                _duplicate_message = "No duplicates detected in this preview."
-            st.warning(_duplicate_message)
+        for s in sessions:
+            m = s.get("mapping", {})
+            st.caption(
+                f"{s['filename']}: {s['row_count']:,} rows · mapped fields {sum(1 for v in m.values() if v)}"
+            )
+
         if _preview_trust_summary:
-            _render_import_trust_summary(_preview_trust_summary, heading="Projected data quality and trust")
+            _render_import_trust_summary(_preview_trust_summary, heading="Data quality details")
             _render_latest_import_summary(
                 build_latest_import_summary(
                     rows_processed=int(len(_candidate_preview_rows)),
@@ -2118,20 +2227,10 @@ def _import_step3(tenant_id: str):
                     rejected_rows=int(_preview_trust_summary.get("rejected_rows", 0) or 0),
                     ignored_or_excluded_rows=int((_preview_trust_summary.get("duplicates", 0) or 0) + len(_preview_mismatch_rows or [])),
                 ),
-                heading="Latest import summary",
+                heading="Validation totals",
             )
             _render_data_confidence_panel(_preview_trust_summary)
-            _render_issue_group_handling(
-                trust=_preview_trust_summary,
-                row_issues=_preview_row_issues,
-                preview_rows=_preview_rows,
-                excluded_rows=_preview_mismatch_rows,
-                state_key="import_issue_handling_preview",
-            )
-            st.caption("How data issues affect interpretation: unresolved quality issues can reduce confidence in today’s trend comparisons.")
-        if _preview_row_issues:
-            with st.expander("Show row-level validation issues", expanded=False):
-                _render_row_error_summary(_preview_row_issues)
+
         _preview_exclusion_reason_counts = {}
         for _issue in (_preview_row_issues or []):
             if str(_issue.get("severity", "error") or "error").strip().lower() != "error":
@@ -2152,61 +2251,25 @@ def _import_step3(tenant_id: str):
                 for _k, _v in sorted(_preview_exclusion_reason_counts.items())
             )
             st.caption(f"Excluded/ignored reason counts: {_preview_reason_bits}")
+
+        if _preview_row_issues:
+            st.markdown("**Row-level validation issues**")
+            _render_row_error_summary(_preview_row_issues)
         if _preview_mismatch_rows:
-            with st.expander("Show excluded/ignored rows", expanded=False):
-                st.dataframe(pd.DataFrame(_preview_mismatch_rows[:120]), use_container_width=True, hide_index=True)
-        if _candidate_preview_rows:
-            if _preview_exact_duplicate_import:
-                st.markdown(
-                    f"**Duplicate summary**\n"
-                    f"File rows selected: **{total_rows:,}**  \n"
-                    f"History rows derived from file: **{len(_candidate_preview_rows):,}**  \n"
-                    f"Exact duplicates already in system: **{len(_candidate_preview_rows):,}**  \n"
-                    f"Rows that will be uploaded: **0**"
-                )
-                st.caption(
-                    "This upload matches a previously imported dataset fingerprint exactly."
-                )
-            else:
-                st.markdown(
-                    f"**Import summary**\n"
-                    f"File rows selected: **{total_rows:,}**  \n"
-                    f"History rows derived from file: **{len(_candidate_preview_rows):,}**  \n"
-                    f"Existing employee/day keys already in system: **{_preview_overlap_count:,}**  \n"
-                    f"Rows that will be uploaded after overlap replacement: **{_preview_new_count:,}**"
-                )
-                if _preview_overlap_count:
-                    st.caption(
-                        "These rows already exist in your data. "
-                        "Running the pipeline will replace the existing values with this new data."
-                    )
-            if _preview_exact_duplicate_import:
-                st.warning("All derived rows are duplicates. Running the pipeline will not add new rows.")
-                if _matching_upload:
-                    st.caption(
-                        "Matched a previously uploaded dataset fingerprint "
-                        f"(upload id: {_matching_upload.get('id')}, "
-                        f"created: {str(_matching_upload.get('created_at', ''))[:19].replace('T', ' ')})."
-                    )
+            st.markdown("**Excluded/ignored rows**")
+            st.dataframe(pd.DataFrame(_preview_mismatch_rows[:120]), use_container_width=True, hide_index=True)
         if _preview_rows:
-            with st.expander("Show parsed sample rows", expanded=False):
-                st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
+            st.markdown("**Parsed sample rows**")
+            st.dataframe(pd.DataFrame(_preview_rows), use_container_width=True, hide_index=True)
         else:
             st.info("No preview rows available from mapped data.")
 
-        st.markdown("**Continue path**")
-        st.radio(
-            "Choose how to continue",
-            ["continue_with_warnings", "review_later", "proceed_using_available_data"],
-            format_func=lambda value: {
-                "continue_with_warnings": "Continue with warnings",
-                "review_later": "Review later",
-                "proceed_using_available_data": "Proceed using available data",
-            }.get(value, value),
-            key="import_preview_continue_path",
-            horizontal=True,
-            label_visibility="collapsed",
-        )
+        if _preview_exact_duplicate_import and _matching_upload:
+            st.caption(
+                "Matched a previously uploaded dataset fingerprint "
+                f"(upload id: {_matching_upload.get('id')}, "
+                f"created: {str(_matching_upload.get('created_at', ''))[:19].replace('T', ' ')})."
+            )
 
     _auto_run_sample_pipeline = _consume_auto_run_sample_pipeline_once()
     if _preview_exact_duplicate_import and _infer_import_path(sessions=sessions) == "sample":
@@ -2229,30 +2292,9 @@ def _import_step3(tenant_id: str):
         )
         st.info("Loading sample data and preparing your first insight. This can take a few seconds.")
 
-    _outcome_processed = int(len(_candidate_preview_rows or []))
-    _outcome_replaced = 0 if _preview_exact_duplicate_import else int(_preview_overlap_count or 0)
-    _outcome_added = 0 if _preview_exact_duplicate_import else max(0, _outcome_processed - _outcome_replaced)
-    _outcome_ignored = int(len(_preview_mismatch_rows or []))
-    if _preview_exact_duplicate_import:
-        _outcome_ignored += _outcome_processed
+    st.markdown("**Run import**")
+    st.caption("Run now to commit this preview to history, or adjust handling choices first if needed.")
 
-    st.markdown("**What will happen when you run this pipeline**")
-    with st.container(border=True):
-        st.markdown(f"{_outcome_processed:,} rows will be processed")
-        st.markdown(f"{_outcome_added:,} new rows will be added")
-        st.markdown(f"{_outcome_replaced:,} existing rows will be replaced")
-        st.markdown(f"{_outcome_ignored:,} rows will be ignored/excluded")
-
-        if (_outcome_added + _outcome_replaced) > 0:
-            st.caption(
-                "After this runs, only rows that are new or replaced will be available for signal generation in Today and Team."
-            )
-        else:
-            st.warning("This import will not create new signal rows with the current handling choices.")
-            st.caption(
-                "After this runs, your current Today and Team signals will stay the same until new usable rows are imported."
-            )
-    
     _confirm_preview = st.checkbox(
         "I reviewed the preview and want to write this data to history",
         key="confirm_import_preview",
@@ -3110,6 +3152,9 @@ def _import_step3(tenant_id: str):
                 "below":     _below_final,
                 "risks":     _risks_final,
                 "days":      _estimated_days,
+                "effect_added_rows": int(max(0, len(uph_batch) - int(_replaced_existing_rows or 0))),
+                "effect_replaced_rows": int(_replaced_existing_rows or 0),
+                "effect_changed_rows": int(len(uph_batch or [])),
                 "source_mode": "demo"
                 if sessions and all(str(s.get("source_mode") or "").strip().lower() == "demo" for s in sessions)
                 else "upload",
@@ -3167,13 +3212,19 @@ def _import_step3(tenant_id: str):
 
     if st.session_state.get("pipeline_done") and st.session_state.get("alloc_rows"):
         _uc = len({r["emp_id"] for r in st.session_state.alloc_rows})
-        if st.session_state.get("_post_import_refresh_pending") is False:
+        _summary = dict(st.session_state.get("_import_complete_summary") or {})
+        _changed_rows = int(_summary.get("effect_changed_rows", 0) or 0)
+        _added_rows = int(_summary.get("effect_added_rows", 0) or 0)
+        _replaced_rows = int(_summary.get("effect_replaced_rows", 0) or 0)
+        if _changed_rows <= 0:
+            col2.info("✓ This import did not add or replace usable rows. Current Today and Team data stays as-is.")
+        elif st.session_state.get("_post_import_refresh_pending") is False:
             col2.success(
-                f"✓ Your data is ready — {_uc} employee{'s' if _uc != 1 else ''} available for review now."
+                f"✓ Review data is available. This import added {_added_rows:,} row(s) and replaced {_replaced_rows:,} row(s)."
             )
         else:
             col2.info(
-                f"✓ Import saved for {_uc} employee{'s' if _uc != 1 else ''}. Today and Team will update when downstream processing finishes."
+                f"✓ Import saved. This import added {_added_rows:,} row(s) and replaced {_replaced_rows:,} row(s). Today and Team will reflect those changes when downstream processing finishes."
             )
 
     if st.button("↺ Start fresh import", use_container_width=True):

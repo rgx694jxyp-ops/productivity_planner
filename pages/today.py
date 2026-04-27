@@ -411,9 +411,23 @@ def _today_should_show_first_paint_shell(*, entered_from_page: str, today_value:
     return True
 
 
-def _render_today_loading_shell(*, reason: str = "Preparing today's signals...") -> None:
+def _render_today_loading_shell(*, reason: str | None = None) -> None:
     st.markdown("## Today")
-    st.caption(str(reason or "Preparing today's signals...").strip())
+    st.caption(str(reason or _today_loading_placeholder()).strip())
+
+
+def _today_signal_surface_heading(signal_count: int) -> str:
+    count = int(max(0, signal_count))
+    label = "signal" if count == 1 else "signals"
+    return f"## Today: {count} {label} surfaced"
+
+
+def _today_queue_intro_label() -> str:
+    return "Signals surfaced now"
+
+
+def _today_loading_placeholder() -> str:
+    return "Loading today's signals..."
 
 
 def _today_phase2_render_ready_key(today_value: date) -> str:
@@ -470,14 +484,14 @@ def _render_today_phase1_top_cards(
     signal_status_map: dict[str, dict[str, str]],
     people_needing_attention: int,
 ) -> None:
-    st.markdown(f"## Today: {int(max(0, people_needing_attention))} people need review now")
+    st.markdown(_today_signal_surface_heading(people_needing_attention))
     st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
 
     if not top_cards:
-        st.markdown('<div class="today-placeholder">Getting your queue ready...</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-placeholder">{_today_loading_placeholder()}</div>', unsafe_allow_html=True)
         return
 
-    st.markdown('<div class="today-section-label">Prioritize these first</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="today-section-label">{_today_queue_intro_label()}</div>', unsafe_allow_html=True)
     for idx, card in enumerate(list(top_cards or [])[:_TODAY_QUEUE_DEFAULT_VISIBLE_CARDS]):
         _render_attention_card(
             card=card,
@@ -1737,8 +1751,9 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
             latest_snapshot_date = ""
         snapshot_check_ms = int(max(0.0, (time.perf_counter() - snapshot_check_at) * 1000))
 
+        post_import_refresh_pending = bool(st.session_state.get("_post_import_refresh_pending"))
         should_recompute_snapshots = bool(
-            st.session_state.get("_post_import_refresh_pending")
+            post_import_refresh_pending
             or latest_snapshot_date != today_value.isoformat()
         )
         has_snapshot_data = bool(str(latest_snapshot_date or "").strip())
@@ -1755,23 +1770,64 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
 
         snapshot_recompute_ms = 0
         if should_recompute_snapshots:
-            async_started = _schedule_today_snapshot_recompute_async(
-                tenant_id=tenant_id,
-                today_value=today_value,
-                run_id=str(st.session_state.get(_TODAY_RUN_ID_DATE_KEY_PREFIX + today_value.isoformat()) or ""),
-                snapshot_available=bool(has_snapshot_data),
-                latest_snapshot_date=str(latest_snapshot_date or ""),
-            )
-            _log_today_milestone(
-                "today_snapshot_recompute_skipped_for_ui",
-                tenant_id=tenant_id,
-                context={
-                    "async_started": bool(async_started),
-                    "snapshot_available": bool(has_snapshot_data),
-                    "latest_snapshot_date": str(latest_snapshot_date or ""),
-                    "reason": ("stale_snapshot_available" if has_snapshot_data else "snapshot_missing"),
-                },
-            )
+            if post_import_refresh_pending:
+                try:
+                    from services.daily_snapshot_service import recompute_daily_employee_snapshots
+
+                    recompute_started_at = time.perf_counter()
+                    recompute_daily_employee_snapshots(tenant_id=tenant_id, days=1)
+                    snapshot_recompute_ms = int(max(0.0, (time.perf_counter() - recompute_started_at) * 1000))
+                    _log_today_milestone(
+                        "today_snapshot_recompute_completed_sync",
+                        tenant_id=tenant_id,
+                        context={
+                            "snapshot_recompute_ms": int(snapshot_recompute_ms),
+                            "snapshot_available": bool(has_snapshot_data),
+                            "latest_snapshot_date": str(latest_snapshot_date or ""),
+                            "reason": "post_import_pending",
+                        },
+                    )
+                except Exception as recompute_err:
+                    _log_app_error(
+                        "today_snapshot_recompute_sync_failed",
+                        f"Sync snapshot recompute failed: {recompute_err}",
+                        severity="warning",
+                    )
+                    async_started = _schedule_today_snapshot_recompute_async(
+                        tenant_id=tenant_id,
+                        today_value=today_value,
+                        run_id=str(st.session_state.get(_TODAY_RUN_ID_DATE_KEY_PREFIX + today_value.isoformat()) or ""),
+                        snapshot_available=bool(has_snapshot_data),
+                        latest_snapshot_date=str(latest_snapshot_date or ""),
+                    )
+                    _log_today_milestone(
+                        "today_snapshot_recompute_skipped_for_ui",
+                        tenant_id=tenant_id,
+                        context={
+                            "async_started": bool(async_started),
+                            "snapshot_available": bool(has_snapshot_data),
+                            "latest_snapshot_date": str(latest_snapshot_date or ""),
+                            "reason": "post_import_sync_failed",
+                        },
+                    )
+            else:
+                async_started = _schedule_today_snapshot_recompute_async(
+                    tenant_id=tenant_id,
+                    today_value=today_value,
+                    run_id=str(st.session_state.get(_TODAY_RUN_ID_DATE_KEY_PREFIX + today_value.isoformat()) or ""),
+                    snapshot_available=bool(has_snapshot_data),
+                    latest_snapshot_date=str(latest_snapshot_date or ""),
+                )
+                _log_today_milestone(
+                    "today_snapshot_recompute_skipped_for_ui",
+                    tenant_id=tenant_id,
+                    context={
+                        "async_started": bool(async_started),
+                        "snapshot_available": bool(has_snapshot_data),
+                        "latest_snapshot_date": str(latest_snapshot_date or ""),
+                        "reason": ("stale_snapshot_available" if has_snapshot_data else "snapshot_missing"),
+                    },
+                )
 
         # Compute daily signals
         signal_compute_at = time.perf_counter()
@@ -1816,6 +1872,17 @@ def _attempt_signal_payload_recovery(*, tenant_id: str, today_value: date) -> bo
                 "today_iso": today_value.isoformat(),
             },
         )
+
+        # Clear session and in-process caches to force re-read of fresh payloads.
+        try:
+            stale_session_payload_keys = [
+                k for k in st.session_state
+                if str(k or "").startswith(_TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX)
+            ]
+            for k in stale_session_payload_keys:
+                st.session_state.pop(k, None)
+        except Exception:
+            pass
 
         # Clear caches to force re-read
         for func in [get_today_signals, _cached_today_signals_payload]:
@@ -2139,11 +2206,11 @@ def _render_queue_orientation_block(
 
     # Non-empty queue
     if total == 1:
-        heading = "1 signal needs attention now"
+        heading = "1 signal surfaced now"
     elif total <= 3:
-        heading = "A few signals need attention now"
+        heading = "A few signals surfaced now"
     else:
-        heading = f"{total} signals need attention now"
+        heading = f"{total} signals surfaced now"
 
     if in_early:
         mode_label = (
@@ -2232,10 +2299,10 @@ def _render_weekly_summary_block(summary: TodayWeeklySummaryViewModel) -> None:
 
 def _render_empty_state() -> None:
     with st.container(border=True):
-        st.markdown("### No priority signals right now")
+        st.markdown("### No strong signals surfaced today")
         st.write(
             "That means the queue is clear for the moment. This page becomes valuable when fresh productivity data "
-            "turns into a short list of people with noteworthy changes, follow-up context, or recognition signals."
+            "turns into a short list of surfaced signals with noteworthy changes, follow-up context, or recognition patterns."
         )
         st.info("The queue updates when newer data snapshots are available.")
 
@@ -2243,7 +2310,7 @@ def _render_empty_state() -> None:
 def _render_first_time_empty_state() -> None:
     """Onboarding-focused empty state for users who just completed first import."""
     with st.container(border=True):
-        st.markdown("### First signals are ready")
+        st.markdown("### Early signals are ready")
         st.markdown(
             "You have enough data for early signal visibility. Some signals may be low confidence until "
             "more shifts are imported."
@@ -3655,8 +3722,18 @@ def _render_attention_card(
         if metadata_row:
             st.markdown(f'<div class="today-card-meta-row">{metadata_row}</div>', unsafe_allow_html=True)
 
-        if compact and str(card.line_3 or "").strip():
-            st.markdown(f'<div class="today-insight-meta">{card.line_3}</div>', unsafe_allow_html=True)
+        if compact:
+            detail_text = str(card.line_3 or "").strip()
+            evidence_text = str(card.line_4 or "").strip()
+            if detail_text:
+                st.markdown(f'<div class="today-insight-meta">{detail_text}</div>', unsafe_allow_html=True)
+            if evidence_text:
+                st.markdown(f'<div class="today-insight-meta">{evidence_text}</div>', unsafe_allow_html=True)
+            if _is_low_confidence_overdue_card(card, line_5_text):
+                st.markdown(
+                    '<div class="today-insight-meta">Overdue follow-up shown with limited confidence.</div>',
+                    unsafe_allow_html=True,
+                )
 
         if signal_status_map is not None and not compact:
             _render_guided_completion_controls(
@@ -3808,7 +3885,7 @@ def _render_unified_attention_queue(
     if not active_ranked_cards and plan.primary_placeholder:
         st.markdown(f'<div class="today-placeholder">{plan.primary_placeholder}</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="today-section-label">Prioritize these first</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-section-label">{_today_queue_intro_label()}</div>', unsafe_allow_html=True)
         st.session_state.pop(_TODAY_FOCUS_NEXT_CARD_KEY, None)
 
         # Honor cn_selected_emp when navigating from Team: focus the matching employee's card on arrival.
@@ -4505,7 +4582,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                         )
                         if not precomputed or force_recompute or payload_stale:
                             profile.increment("recovery_attempt_count", 1)
-                            with st.spinner("Preparing today's signals..."):
+                            with st.spinner(_today_loading_placeholder()):
                                 recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
                             profile.set("initial_recovery_succeeded", bool(recovery_succeeded))
                             if recovery_succeeded:
@@ -4520,7 +4597,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                         today_value=today_value,
                     ):
                         profile.increment("recovery_attempt_count", 1)
-                        with st.spinner("Refreshing today's signal summary..."):
+                        with st.spinner(_today_loading_placeholder()):
                             recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
                         profile.set("stale_recovery_succeeded", bool(recovery_succeeded))
                         if recovery_succeeded:
@@ -4528,7 +4605,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     if not precomputed:
                         if not recovery_attempted:
                             profile.increment("recovery_attempt_count", 1)
-                            with st.spinner("Getting your queue ready..."):
+                            with st.spinner(_today_loading_placeholder()):
                                 recovery_succeeded = _attempt_signal_payload_recovery(tenant_id=tenant_id, today_value=today_value)
                                 recovery_attempted = recovery_succeeded
                             profile.set("fallback_recovery_succeeded", bool(recovery_succeeded))
@@ -4737,6 +4814,9 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     },
                 )
                 st.session_state[phase2_ready_key] = True
+                # Phase 1 intentionally renders only the initial top cards.
+                # Exit this pass so phase 2 does not render in the same run.
+                return
 
             phase2_started_at = time.perf_counter()
             _log_today_milestone(
@@ -5027,7 +5107,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 profile.set("widget_state_cleaned_keys", int(cleaned_widget_keys))
 
                 people_needing_attention = int(prepared_queue_render.get("people_needing_attention") or 0)
-                st.markdown(f"## Today: {people_needing_attention} people need review now")
+                st.markdown(_today_signal_surface_heading(people_needing_attention))
                 st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
 
                 _log_operational_event(
