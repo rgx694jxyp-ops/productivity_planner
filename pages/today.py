@@ -111,6 +111,8 @@ _TODAY_COMPLETED_ITEMS_SESSION_KEY = "_today_completed_items"
 _TODAY_LAST_COMPLETED_LABEL_KEY = "_today_last_completed_label"
 _TODAY_FOCUS_NEXT_CARD_KEY = "_today_focus_next_card"
 _TODAY_HANDOFF_FOCUS_RENDERED_KEY_PREFIX = "_today_handoff_focus_rendered_"
+_TODAY_TO_TEAM_HANDOFF_KEY = "_today_to_team_handoff"
+_TEAM_TO_TODAY_FOCUS_KEY = "_team_to_today_focus"
 _TODAY_AUTO_REFRESH_MIN_SECONDS = 60
 _TODAY_PENDING_COMPLETION_IDS_KEY = "_today_pending_completion_ids"
 _TODAY_PENDING_COMPLETION_META_KEY = "_today_pending_completion_meta"
@@ -2599,6 +2601,56 @@ def _render_open_exceptions(*, tenant_id: str) -> None:
 
 
 def _go_to_drill_down(item: InsightCardContract) -> None:
+    def _clean_handoff_text(value: str) -> str:
+        clean = " ".join(str(value or "").split()).strip()
+        if not clean:
+            return ""
+        lowered = clean.lower()
+        blocked_tokens = (
+            "signal_key=",
+            "signal_id=",
+            "employee_id=",
+            "tenant_id=",
+            "debug",
+            "internal",
+            "{",
+            "[",
+        )
+        if any(token in lowered for token in blocked_tokens):
+            return ""
+        return clean[:140]
+
+    def _build_handoff_payload(card: InsightCardContract, employee_id: str) -> dict[str, str]:
+        metadata = dict(getattr(card, "metadata", {}) or {})
+        reason = _clean_handoff_text(str(getattr(card, "what_happened", "") or ""))
+        if not reason:
+            reason = _clean_handoff_text(str(getattr(card, "why_flagged", "") or ""))
+        follow_up_status = _clean_handoff_text(
+            str(
+                metadata.get("follow_up_status")
+                or metadata.get("follow_up_due")
+                or metadata.get("follow_up_due_at")
+                or ""
+            )
+        )
+        signal_id = str(
+            metadata.get("signal_id")
+            or metadata.get("today_signal_id")
+            or ""
+        ).strip()
+        signal_key = str(
+            metadata.get("signal_key")
+            or metadata.get("today_signal_key")
+            or ""
+        ).strip()
+        return {
+            "employee_id": str(employee_id or "").strip(),
+            "signal_id": signal_id,
+            "signal_key": signal_key,
+            "reason": reason,
+            "follow_up_status": follow_up_status,
+        }
+
     screen = str(item.drill_down.screen or "")
     entity_id = str(item.drill_down.entity_id or "")
     st.session_state["_drill_traceability_context"] = traceability_payload_from_card(item)
@@ -2608,6 +2660,8 @@ def _go_to_drill_down(item: InsightCardContract) -> None:
         st.session_state["emp_view"] = "Performance Journal"
         if entity_id:
             st.session_state["cn_selected_emp"] = entity_id
+            st.session_state[_TODAY_TO_TEAM_HANDOFF_KEY] = _build_handoff_payload(item, entity_id)
+            st.session_state.pop(_TEAM_TO_TODAY_FOCUS_KEY, None)
     elif screen == "team_process":
         st.session_state["goto_page"] = "team"
     elif screen == "import_data_trust":
@@ -4084,19 +4138,29 @@ def _render_unified_attention_queue(
         st.markdown('<div class="today-action-instruction">Open a card, add a note, and mark it complete when handled.</div>', unsafe_allow_html=True)
         st.session_state.pop(_TODAY_FOCUS_NEXT_CARD_KEY, None)
 
-        # Honor cn_selected_emp when navigating from Team: focus the matching employee's card on arrival.
+        # Honor one-time Team return focus payload first, then legacy cn_selected_emp behavior.
         # Track per-day whether we've already rendered the handoff focus to avoid sticky behavior on reruns.
         today_value = date.today()
         handoff_rendered_key = _TODAY_HANDOFF_FOCUS_RENDERED_KEY_PREFIX + today_value.isoformat()
         handoff_focus_already_rendered = bool(st.session_state.get(handoff_rendered_key))
 
+        focus_payload = st.session_state.get(_TEAM_TO_TODAY_FOCUS_KEY)
+        focus_payload = focus_payload if isinstance(focus_payload, dict) else {}
+        payload_employee_id = str(focus_payload.get("employee_id") or "").strip()
+
         focused_employee_id = str(st.session_state.get("cn_selected_emp") or "").strip()
-        is_first_handoff_render = bool(focused_employee_id and not handoff_focus_already_rendered)
+        is_first_handoff_render = bool(
+            (payload_employee_id or focused_employee_id)
+            and not handoff_focus_already_rendered
+        )
+        consumed_payload = False
 
         _top_cols = st.columns(min(max(len(top_cards), 1), 3))
         for idx, card in enumerate(top_cards):
             card_employee_id = str(card.employee_id or "").strip()
-            is_focused = bool(is_first_handoff_render and card_employee_id == focused_employee_id)
+            payload_match = bool(payload_employee_id and card_employee_id == payload_employee_id)
+            fallback_match = bool((not payload_employee_id) and focused_employee_id and card_employee_id == focused_employee_id)
+            is_focused = bool(is_first_handoff_render and (payload_match or fallback_match))
             with _top_cols[idx]:
                 _render_attention_card(
                     card=card,
@@ -4109,6 +4173,14 @@ def _render_unified_attention_queue(
             # Mark handoff as rendered after the first matching card is rendered.
             if is_focused and not handoff_focus_already_rendered:
                 st.session_state[handoff_rendered_key] = True
+                if payload_match:
+                    consumed_payload = True
+
+        if payload_employee_id:
+            # Consume return-focus payload once per render cycle to prevent sticky highlighting.
+            st.session_state.pop(_TEAM_TO_TODAY_FOCUS_KEY, None)
+            if consumed_payload:
+                st.session_state["cn_selected_emp"] = payload_employee_id
 
     if overflow_cards:
         st.markdown(
@@ -4145,7 +4217,7 @@ def _render_today_value_strip(
         return
 
     if subdued:
-        st.markdown('<div class="today-secondary-context-label">Supporting context</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-secondary-context-label">Secondary context</div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="today-secondary-context-note">Secondary snapshot context, shown beneath the main queue.</div>',
             unsafe_allow_html=True,
@@ -5350,31 +5422,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 phase2_top3_ready_ms = int(max(0.0, (time.perf_counter() - page_started_at) * 1000))
                 profile.set("today_top3_ready_ms", int(phase2_top3_ready_ms))
 
-            with profile.stage("supporting_context"):
-                value_strip = build_today_value_strip_view_model(
-                    goal_status=goal_status,
-                    import_summary=meaning.import_summary,
-                )
-                profile.set("supporting_context_cards", len(value_strip.cards or []))
-
-                with st.expander("Supporting context", expanded=False):
-                    _render_top_status_area(meaning=meaning)
-                    _render_return_trigger(return_trigger)
-                    _render_queue_orientation_block(
-                        orientation_model,
-                        meaning=meaning,
-                        surface_state=orientation_state,
-                        signal_mode=signal_mode,
-                    )
-                    _render_attention_summary_strip(attention_strip)
-                    _render_weekly_summary_block(weekly_summary)
-                    if value_strip.cards:
-                        _render_today_value_strip(
-                            value_strip,
-                            freshness_note=meaning.freshness_note,
-                            is_stale=bool(meaning.state_flags.get("stale_data")),
-                            subdued=True,
-                        )
+            profile.set("supporting_context_cards", 0)
 
             phase2_render_ms = int(max(0.0, (time.perf_counter() - phase2_started_at) * 1000))
             profile.set("today_phase2_render_ms", int(phase2_render_ms))

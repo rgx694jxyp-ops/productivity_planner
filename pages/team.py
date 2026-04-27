@@ -75,7 +75,6 @@ from services.team_page_language_service import (
     format_trend_no_history,
     format_trend_no_points,
     format_what_changed_line,
-    format_window_trend,
     get_team_filter_labels,
     get_team_section_titles,
     format_bridge_button_label,
@@ -102,23 +101,46 @@ def _safe_float(value: object) -> float | None:
 def _narrative_weight(event_type: str) -> int:
     """Return narrative sort weight (signal → action → follow-up → completion)."""
     base = str(event_type or "").strip()
-    if base == "Issue recorded":
+    if base == "Performance concern identified":
         return 0
     if base == "Note added":
         return 1
     if base == "Follow-up scheduled":
         return 2
-    if base == "Issue resolved":
+    if base == "Reviewed and logged":
         return 3
     return 4
 
 
 _ALLOWED_TIMELINE_EVENT_TYPES = {
-    "Issue recorded",
+    "Performance concern identified",
     "Note added",
     "Follow-up scheduled",
-    "Issue resolved",
+    "Reviewed and logged",
 }
+
+_TODAY_TO_TEAM_HANDOFF_KEY = "_today_to_team_handoff"
+_TEAM_TO_TODAY_FOCUS_KEY = "_team_to_today_focus"
+
+
+def _clean_plain_handoff_reason(text: str) -> str:
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return ""
+    lower = clean.lower()
+    blocked = (
+        "signal_key=",
+        "signal_id=",
+        "employee_id=",
+        "tenant_id=",
+        "debug",
+        "internal",
+        "{",
+        "[",
+    )
+    if any(token in lower for token in blocked):
+        return ""
+    return clean[:160]
 
 
 def _canonical_timeline_event_type(*, raw_event_type: str, status: str, title: str, source: str) -> str:
@@ -128,11 +150,11 @@ def _canonical_timeline_event_type(*, raw_event_type: str, status: str, title: s
     source_clean = str(source or "").strip().lower()
 
     if raw in {"resolved"} or status_raw in {"done", "resolved", "completed"} or title_clean.startswith("Issue marked"):
-        return "Issue resolved"
+        return "Reviewed and logged"
     if raw in {"follow_up_logged", "follow_through_logged"} or title_clean.startswith("Follow-up scheduled"):
         return "Follow-up scheduled"
     if raw in {"exception_opened"} or title_clean.startswith("Issue logged"):
-        return "Issue recorded"
+        return "Performance concern identified"
     if raw in {"coached", "recognized"} or source_clean == "note" or title_clean.startswith("Added note"):
         return "Note added"
     return ""
@@ -340,9 +362,264 @@ def _current_vs_target_text(avg_uph: float | None, target_uph: float | None) -> 
     return format_current_vs_target(avg_uph, target_uph)
 
 
-def _selected_window_trend_text(row: dict, time_window_days: int) -> str:
-    change_pct = _safe_float(row.get("change_pct"))
-    return format_window_trend(change_pct, time_window_days)
+def _trend_direction_from_slope(slope: float, *, epsilon: float = 1e-6) -> str:
+    if slope > epsilon:
+        return "positive"
+    if slope < -epsilon:
+        return "negative"
+    return "flat"
+
+
+def _trend_direction_from_change_pct(change_pct: float | None, *, epsilon: float = 1e-6) -> str | None:
+    if change_pct is None:
+        return None
+    if change_pct > epsilon:
+        return "positive"
+    if change_pct < -epsilon:
+        return "negative"
+    return "flat"
+
+
+def _trend_label_from_direction(direction: str) -> str:
+    if direction == "negative":
+        return "Declining"
+    if direction == "positive":
+        return "Improving"
+    return "Holding steady"
+
+
+def _compute_window_trend_metrics(chart_rows: list[dict]) -> dict[str, object]:
+    """Compute trend direction from slope and percent change from same chart window."""
+    ordered = sorted(chart_rows or [], key=lambda row: str(row.get("Date") or ""))
+    if not ordered:
+        return {
+            "slope": 0.0,
+            "slope_direction": "flat",
+            "change_pct": None,
+            "change_direction": None,
+            "label": None,
+        }
+
+    y_values: list[float] = []
+    for row in ordered:
+        uph = _safe_float(row.get("UPH"))
+        if uph is None:
+            continue
+        y_values.append(uph)
+
+    if not y_values:
+        return {
+            "slope": 0.0,
+            "slope_direction": "flat",
+            "change_pct": None,
+            "change_direction": None,
+            "label": None,
+        }
+
+    n = len(y_values)
+    slope = 0.0
+    if n >= 2:
+        x_values = list(range(n))
+        sum_x = float(sum(x_values))
+        sum_y = float(sum(y_values))
+        sum_xy = float(sum(x * y for x, y in zip(x_values, y_values)))
+        sum_xx = float(sum(x * x for x in x_values))
+        denominator = (n * sum_xx) - (sum_x * sum_x)
+        if denominator != 0:
+            slope = ((n * sum_xy) - (sum_x * sum_y)) / denominator
+
+    first_uph = y_values[0]
+    last_uph = y_values[-1]
+    change_pct = None
+    if first_uph > 0:
+        change_pct = ((last_uph - first_uph) / first_uph) * 100.0
+
+    slope_direction = _trend_direction_from_slope(slope)
+    change_direction = _trend_direction_from_change_pct(change_pct)
+
+    label: str | None = None
+    if change_direction is not None and change_direction == slope_direction:
+        label = _trend_label_from_direction(slope_direction)
+
+    return {
+        "slope": slope,
+        "slope_direction": slope_direction,
+        "change_pct": change_pct,
+        "change_direction": change_direction,
+        "label": label,
+    }
+
+
+def _format_window_trend_summary(metrics: dict[str, object], days: int) -> str:
+    """Build trend summary line with mismatch fail-safe (percent-only when needed)."""
+    safe_days = max(1, int(days or 1))
+    change_pct = _safe_float(metrics.get("change_pct"))
+    label = str(metrics.get("label") or "").strip()
+
+    if change_pct is None:
+        return f"Not enough data to calculate change over the last {safe_days} days"
+
+    pct_text = f"{change_pct:+.1f}% over the last {safe_days} days"
+    if label:
+        return f"{label} ({pct_text})"
+    return pct_text
+
+
+def _format_month_day(dt: datetime, *, include_time: bool = False) -> str:
+    month_day = f"{dt.strftime('%b')} {dt.day}"
+    if not include_time or (dt.hour == 0 and dt.minute == 0):
+        return month_day
+    hour = dt.hour % 12 or 12
+    minute = f"{dt.minute:02d}"
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{month_day} at {hour}:{minute} {ampm}"
+
+
+def _build_follow_up_status_lines(*, row: dict, notes: list[dict], action_rows: list[dict]) -> list[str]:
+    due_raw = str(
+        row.get("follow_up_due_at")
+        or row.get("next_follow_up_at")
+        or row.get("follow_up_due")
+        or ""
+    ).strip()
+    due_dt = _parse_dt(due_raw)
+
+    lines: list[str] = []
+    if due_dt is not None:
+        lines.append(f"Follow-up scheduled for {_format_month_day(due_dt, include_time=True)}")
+    else:
+        due_flag = str(row.get("follow_up_due") or "").strip().lower()
+        if due_flag in {"true", "yes", "1", "y", "pending", "due"}:
+            lines.append("Follow-up scheduled")
+        else:
+            lines.append("No follow-up scheduled")
+
+    latest_review: datetime | None = None
+    review_candidates: list[datetime] = []
+
+    row_review_dt = _parse_dt(
+        str(
+            row.get("last_follow_up_at")
+            or row.get("last_followup_at")
+            or row.get("last_note_at")
+            or row.get("last_coached_at")
+            or ""
+        ).strip()
+    )
+    if row_review_dt is not None:
+        review_candidates.append(row_review_dt)
+
+    for note in notes or []:
+        note_dt = _parse_dt(str(note.get("created_at") or note.get("date") or "").strip())
+        if note_dt is not None:
+            review_candidates.append(note_dt)
+
+    for ev in action_rows or []:
+        event_dt = _parse_dt(str(ev.get("event_at") or "").strip())
+        if event_dt is not None:
+            review_candidates.append(event_dt)
+
+    if review_candidates:
+        latest_review = max(review_candidates)
+
+    if latest_review is not None:
+        lines.append(f"Last reviewed {_format_month_day(latest_review)}")
+
+    # Add a concise last-check result from recent follow-up outcome first,
+    # then fall back to the most recent human-readable note.
+    last_check_text = ""
+
+    sorted_actions = sorted(
+        list(action_rows or []),
+        key=lambda ev: (_parse_dt(str(ev.get("event_at") or "").strip()) or datetime.min),
+        reverse=True,
+    )
+    for event in sorted_actions:
+        event_type = str(event.get("event_type") or "").strip().lower()
+        if event_type not in {"follow_up_logged", "follow_through_logged", "resolved"}:
+            continue
+        for candidate in (
+            str(event.get("outcome") or "").strip(),
+            str(event.get("result") or "").strip(),
+            str(event.get("notes") or "").strip(),
+        ):
+            clean_candidate = clean_note_text_for_display(candidate)
+            if clean_candidate:
+                last_check_text = clean_candidate
+                break
+        if last_check_text:
+            break
+
+    if not last_check_text:
+        sorted_notes = sorted(
+            list(notes or []),
+            key=lambda note: (_parse_dt(str(note.get("created_at") or note.get("date") or "").strip()) or datetime.min),
+            reverse=True,
+        )
+        for note in sorted_notes:
+            note_text = _note_text(note)
+            if note_text:
+                last_check_text = note_text
+                break
+
+    if last_check_text:
+        compact_last_check = " ".join(last_check_text.split())
+        if len(compact_last_check) > 88:
+            compact_last_check = f"{compact_last_check[:87].rstrip()}..."
+        lines.append(f"Last check: {compact_last_check}")
+
+    return lines
+
+
+def _build_current_situation_lines(*, trend_metrics: dict[str, object], days: int, target_uph: float | None, chart_rows: list[dict]) -> list[str]:
+    safe_days = max(1, int(days or 1))
+    label = str(trend_metrics.get("label") or "").strip()
+    change_pct = _safe_float(trend_metrics.get("change_pct"))
+
+    lines: list[str] = []
+    if label:
+        lines.append(f"{label} performance over {safe_days} days")
+    elif change_pct is not None:
+        lines.append(f"{change_pct:+.1f}% change over {safe_days} days")
+    else:
+        lines.append(f"Not enough data over {safe_days} days")
+
+    if target_uph is not None and target_uph > 0 and chart_rows:
+        values = [float(row.get("UPH") or 0.0) for row in chart_rows if _safe_float(row.get("UPH")) is not None]
+        observed_days = len(values)
+        below_count = sum(1 for value in values if value < target_uph)
+        if observed_days > 0:
+            if below_count > (observed_days / 2):
+                lines.append("Below target on most days")
+            elif below_count > 0:
+                lines.append(f"Below target on {below_count} of {observed_days} days")
+            else:
+                lines.append("At or above target on all observed days")
+
+    return lines
+
+
+def _build_why_happening_lines(*, chart_rows: list[dict], target_uph: float | None, exception_history: list[dict], note_history: list[dict]) -> list[str]:
+    lines: list[str] = []
+    values = [float(row.get("UPH") or 0.0) for row in chart_rows if _safe_float(row.get("UPH")) is not None]
+
+    if values:
+        low = min(values)
+        high = max(values)
+        if high > low:
+            lines.append(f"Daily output ranged from {low:.1f} to {high:.1f} UPH")
+        if target_uph is not None and target_uph > 0:
+            below_count = sum(1 for value in values if value < target_uph)
+            if below_count > 0:
+                lines.append(f"{below_count} of {len(values)} observed days were below target")
+
+    if exception_history:
+        lines.append(f"{len(exception_history)} recent exception event(s) were recorded")
+
+    if note_history:
+        lines.append(f"{len(note_history)} review note(s) were logged")
+
+    return lines[:3]
 
 
 def _open_follow_up_state_text(row: dict) -> str:
@@ -377,13 +654,13 @@ def _follow_up_subline(row: dict, *, today: datetime | None = None) -> str:
 def _what_changed_line(
     row: dict,
     *,
+    change_pct: float | None,
     status_bucket: str,
     time_window_days: int,
     avg_uph: float | None,
     target_uph: float | None,
 ) -> str:
     """Plain-language sentence explaining what changed for the selected employee."""
-    change_pct = _safe_float(row.get("change_pct"))
     trend = str(row.get("trend") or "").strip().lower()
     return format_what_changed_line(
         change_pct=change_pct,
@@ -902,8 +1179,40 @@ def _render_team_page_styles() -> None:
             margin-top: 0.25rem;
         }
         div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label {
-            padding-top: 0.25rem;
-            padding-bottom: 0.25rem;
+            padding: 0.42rem 0.5rem;
+            border-radius: 0.6rem;
+            border: 1px solid transparent;
+            background: transparent;
+            transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 120ms ease;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label:hover {
+            background: #F1F6FF;
+            border-color: #DCE8FA;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label p {
+            margin: 0;
+            line-height: 1.35;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label:has(input[type="radio"]:checked) {
+            background: #EAF2FF;
+            border-color: #C8DBF8;
+            box-shadow: 0 0 0 1px rgba(99, 136, 199, 0.14);
+            transform: translateX(1px);
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label:has(input[type="radio"]:checked) p {
+            color: #13335C;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label:has(input[type="radio"]:checked) p::first-line {
+            font-weight: 700;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label [data-testid="stMarkdownContainer"] {
+            transition: opacity 120ms ease;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label:has(input[type="radio"]:checked) [data-testid="stMarkdownContainer"] {
+            opacity: 1;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-roster-anchor) div[data-testid="stRadio"] label input[type="radio"] {
+            accent-color: #4B74B8;
         }
         .team-section-anchor {
             height: 0;
@@ -962,6 +1271,24 @@ def _render_team_page_styles() -> None:
             color: var(--dpd-text-muted);
             line-height: 1.55;
             margin: 0 0 0.38rem 0;
+        }
+        .team-focus-banner {
+            margin: 0 0 0.6rem 0;
+            padding: 0.35rem 0.55rem;
+            border-radius: 0.5rem;
+            background: #EEF5FF;
+            border: 1px solid #D6E6FB;
+            color: #214C84;
+            font-size: 0.86rem;
+            font-weight: 550;
+            line-height: 1.35;
+        }
+        .team-summary-context-highlight {
+            background: #F2F8FF;
+            border-left: 3px solid #7AA2D8;
+            border-radius: 0.35rem;
+            padding: 0.2rem 0.45rem;
+            color: #244E81;
         }
         .team-summary-primary {
             font-size: 1.62rem;
@@ -1266,8 +1593,18 @@ def page_team() -> None:
     employee_ids = [item["employee_id"] for item in roster_summaries]
     summary_by_id = {item["employee_id"]: item for item in roster_summaries}
 
+    handoff_payload_raw = st.session_state.get(_TODAY_TO_TEAM_HANDOFF_KEY)
+    handoff_payload = handoff_payload_raw if isinstance(handoff_payload_raw, dict) else {}
+    handoff_employee_id = str(handoff_payload.get("employee_id") or "").strip()
+    handoff_reason = _clean_plain_handoff_reason(str(handoff_payload.get("reason") or ""))
+    handoff_follow_up_status = _clean_plain_handoff_reason(str(handoff_payload.get("follow_up_status") or ""))
+    handoff_signal_id = str(handoff_payload.get("signal_id") or "").strip()
+    handoff_signal_key = str(handoff_payload.get("signal_key") or "").strip()
+    has_today_handoff = bool(handoff_employee_id and handoff_employee_id in employee_ids)
+
     requested_employee_id = str(
-        st.session_state.get("team_selected_emp_id")
+        (handoff_employee_id if has_today_handoff else "")
+        or st.session_state.get("team_selected_emp_id")
         or st.session_state.get("cn_selected_emp")
         or ""
     ).strip()
@@ -1310,10 +1647,8 @@ def page_team() -> None:
 
         avg_uph = _safe_float(selected_row.get("Average UPH"))
         target_uph = _safe_float(selected_row.get("Target UPH"))
-        trend_state = str(selected_row.get("trend") or "stable").replace("_", " ").title()
-        goal_state = str(selected_row.get("goal_status") or "unknown").replace("_", " ").title()
         status_bucket = _team_status_bucket(selected_row)
-        status_label = format_trend_label(status_bucket)
+        status_label = ""
 
         with profile.stage("load_selected_employee_detail"):
             notes = list(_cached_coaching_notes_for(employee_id) or [])
@@ -1325,7 +1660,6 @@ def page_team() -> None:
         profile.set("exception_rows", len(exceptions or []))
         profile.query(rows=len(notes) + len(timeline_rows) + len(exceptions or []), count=3)
 
-        note_count = len(notes)
         unified_timeline = _normalize_recent_activity_timeline(
             notes=notes,
             action_rows=timeline_rows,
@@ -1333,23 +1667,6 @@ def page_team() -> None:
             limit=5,
         )
         current_vs_target_text = _current_vs_target_text(avg_uph, target_uph)
-        selected_window_trend_text = _selected_window_trend_text(selected_row, time_window_days)
-        follow_up_state_text = _open_follow_up_state_text(selected_row)
-        change_pct = _safe_float(selected_row.get("change_pct"))
-        summary_sentence = _selected_employee_summary_sentence(
-            status_bucket=status_bucket,
-            change_pct=change_pct,
-            avg_uph=avg_uph,
-            target_uph=target_uph,
-        )
-        primary_summary_line = _primary_summary_line(summary_sentence)
-        what_changed_text = _what_changed_line(
-            selected_row,
-            status_bucket=status_bucket,
-            time_window_days=time_window_days,
-            avg_uph=avg_uph,
-            target_uph=target_uph,
-        )
         comparison_text = _department_comparison_context(
             goal_status_rows=goal_status,
             selected_row=selected_row,
@@ -1369,6 +1686,41 @@ def page_team() -> None:
         profile.set("selected_history_rows", len(employee_snapshot_history))
         profile.query(rows=len(employee_snapshot_history), count=1)
 
+        window_start: datetime | None = None
+        if time_window_days > 0:
+            window_start = datetime.utcnow() - timedelta(days=time_window_days)
+
+        employee_history: list[dict] = []
+        for row in employee_snapshot_history:
+            row_dt = _parse_dt(str(row.get("snapshot_date") or "").strip())
+            if window_start is not None and row_dt is not None and row_dt < window_start:
+                continue
+            employee_history.append(row)
+
+        chart_rows: list[dict] = []
+        if employee_history:
+            for row in employee_history:
+                dt_value = _parse_dt(str(row.get("snapshot_date") or "").strip())
+                if dt_value is None:
+                    continue
+                uph = _safe_float(row.get("performance_uph"))
+                if uph is None:
+                    continue
+                chart_rows.append({"Date": dt_value.date().isoformat(), "UPH": uph})
+
+        trend_metrics = _compute_window_trend_metrics(chart_rows)
+        change_pct = _safe_float(trend_metrics.get("change_pct"))
+        status_label = str(trend_metrics.get("label") or "").strip()
+        selected_window_trend_text = _format_window_trend_summary(trend_metrics, time_window_days)
+        what_changed_text = _what_changed_line(
+            selected_row,
+            change_pct=change_pct,
+            status_bucket=status_bucket,
+            time_window_days=time_window_days,
+            avg_uph=avg_uph,
+            target_uph=target_uph,
+        )
+
         primary_statement = format_primary_statement(
             status_bucket=status_bucket,
             change_pct=change_pct,
@@ -1386,6 +1738,30 @@ def page_team() -> None:
             change_pct=change_pct,
             time_window_days=time_window_days,
         )
+        note_history = _normalize_notes_history(notes, preview_chars=180)
+        exception_history = _normalize_exception_history(exceptions, preview_chars=140)
+        follow_up_status_lines = _build_follow_up_status_lines(
+            row=selected_row,
+            notes=notes,
+            action_rows=timeline_rows,
+        )
+        if handoff_follow_up_status and all(
+            handoff_follow_up_status.lower() not in str(line or "").lower()
+            for line in follow_up_status_lines
+        ):
+            follow_up_status_lines.append(handoff_follow_up_status)
+        current_situation_lines = _build_current_situation_lines(
+            trend_metrics=trend_metrics,
+            days=time_window_days,
+            target_uph=target_uph,
+            chart_rows=chart_rows,
+        )
+        why_happening_lines = _build_why_happening_lines(
+            chart_rows=chart_rows,
+            target_uph=target_uph,
+            exception_history=exception_history,
+            note_history=note_history,
+        )
 
         with shell_right:
             st.markdown("<div class='team-detail-view-anchor'></div>", unsafe_allow_html=True)
@@ -1393,6 +1769,32 @@ def page_team() -> None:
                 st.markdown("<div class='team-section-anchor team-section-anchor--summary'></div>", unsafe_allow_html=True)
                 st.markdown(f"### {employee_name}")
                 st.caption(format_selected_employee_subheader(department, status_label))
+                if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
+                    st.markdown(
+                        f"<div class='team-focus-banner'>Opened from Today: {escape(handoff_reason)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                st.markdown(
+                    f"<div class='team-summary-context'>Main state: {escape(selected_window_trend_text)}</div>",
+                    unsafe_allow_html=True,
+                )
+                attention_line = (
+                    "Needs attention this week"
+                    if status_bucket == "needs attention"
+                    else "Monitor this week"
+                )
+                st.markdown(
+                    f"<div class='team-summary-context'>Attention level: {escape(attention_line)}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("#### Follow-up status")
+                for line in follow_up_status_lines:
+                    st.markdown(f"<div class='team-summary-context'>{escape(line)}</div>", unsafe_allow_html=True)
+                if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
+                    st.markdown(
+                        f"<div class='team-summary-context team-summary-context-highlight'>{escape(handoff_reason)}</div>",
+                        unsafe_allow_html=True,
+                    )
                 if primary_statement:
                     st.markdown(f"<div class='team-summary-primary'>{escape(primary_statement)}</div>", unsafe_allow_html=True)
                 if secondary_context:
@@ -1416,6 +1818,11 @@ def page_team() -> None:
                     if st.button(format_bridge_button_label(), key=f"team_bridge_to_today_{selected_employee_id}"):
                         if selected_employee_id and str(selected_employee_id).strip():
                             st.session_state["cn_selected_emp"] = selected_employee_id
+                            st.session_state[_TEAM_TO_TODAY_FOCUS_KEY] = {
+                                "employee_id": selected_employee_id,
+                                "signal_id": handoff_signal_id if selected_employee_id == handoff_employee_id else "",
+                                "signal_key": handoff_signal_key if selected_employee_id == handoff_employee_id else "",
+                            }
                             st.session_state["goto_page"] = "today"
                             st.rerun()
                 with bridge_col_2:
@@ -1424,37 +1831,35 @@ def page_team() -> None:
                 st.markdown("<div class='team-section-divider'></div>", unsafe_allow_html=True)
 
             with st.container():
+                st.markdown("<div class='team-section-anchor team-section-anchor--situation'></div>", unsafe_allow_html=True)
+                st.markdown("#### Current situation")
+                for line in current_situation_lines:
+                    is_handoff_match = bool(
+                        has_today_handoff
+                        and handoff_reason
+                        and employee_id == handoff_employee_id
+                        and (
+                            handoff_reason.lower() in str(line or "").lower()
+                            or str(line or "").lower() in handoff_reason.lower()
+                        )
+                    )
+                    line_class = "team-summary-context team-summary-context-highlight" if is_handoff_match else "team-summary-context"
+                    st.markdown(f"<div class='{line_class}'>{escape(line)}</div>", unsafe_allow_html=True)
+
+                if why_happening_lines:
+                    st.markdown("#### What we're seeing")
+                    for line in why_happening_lines:
+                        st.markdown(f"<div class='team-summary-context'>{escape(line)}</div>", unsafe_allow_html=True)
+
+            with st.container():
                 st.markdown("<div class='team-section-anchor team-section-anchor--trend'></div>", unsafe_allow_html=True)
                 st.markdown(f"#### {section_titles['trend']}")
                 st.markdown("<div class='team-section-intent'>recent direction</div>", unsafe_allow_html=True)
-            window_start: datetime | None = None
-            if time_window_days > 0:
-                window_start = datetime.utcnow() - timedelta(days=time_window_days)
-
-            employee_history = []
-            for row in employee_snapshot_history:
-                row_dt = _parse_dt(str(row.get("snapshot_date") or "").strip())
-                if window_start is not None and row_dt is not None and row_dt < window_start:
-                    continue
-                employee_history.append(row)
 
             if employee_history:
-                with profile.stage("build_selected_trend_chart"):
-                    chart_rows: list[dict] = []
-                    for row in employee_history:
-                        dt_value = _parse_dt(str(row.get("snapshot_date") or "").strip())
-                        if dt_value is None:
-                            continue
-                        uph = _safe_float(row.get("performance_uph"))
-                        if uph is None:
-                            continue
-                        chart_rows.append({"Date": dt_value.date().isoformat(), "UPH": uph})
                 profile.set("chart_rows", len(chart_rows))
 
                 if chart_rows:
-                    interpretation = _trend_interpretation_sentence(chart_rows, target_uph)
-                    interpretation_clean = str(interpretation or "").strip()
-
                     st.caption(format_trend_intro(time_window_days))
 
                     # Single analytical chart for selected-employee trend in the selected window.
@@ -1465,8 +1870,8 @@ def page_team() -> None:
                     else:
                         st.line_chart(history_df.set_index("Date")["UPH"], use_container_width=True)
 
-                    if interpretation_clean:
-                        st.caption(interpretation_clean)
+                    if selected_window_trend_text:
+                        st.caption(selected_window_trend_text)
                 else:
                     st.markdown(f"<div class='team-trend-primary'>{format_trend_no_points()}</div>", unsafe_allow_html=True)
                     st.caption(format_trend_intro(time_window_days))
@@ -1474,10 +1879,35 @@ def page_team() -> None:
                 st.markdown(f"<div class='team-trend-primary'>{format_trend_no_history()}</div>", unsafe_allow_html=True)
                 st.caption(format_trend_intro(time_window_days))
 
+            if note_history:
+                with st.container():
+                    st.markdown("<div class='team-section-anchor team-section-anchor--notes'></div>", unsafe_allow_html=True)
+                    st.markdown(f"#### {section_titles['notes']}")
+                    st.markdown("<div class='team-section-intent'>follow-up history</div>", unsafe_allow_html=True)
+                    # TODO(team-contract): Notes history section - prior notes for selected employee.
+                    visible_count = 8
+                    for index, note_row in enumerate(note_history[:visible_count], start=1):
+                        _render_note_history_entry(note_row, index=index)
+
+                    remaining_count = len(note_history) - visible_count
+                    if remaining_count > 0:
+                        with st.expander(format_show_older_notes_label(remaining_count), expanded=False):
+                            for index, note_row in enumerate(note_history[visible_count:], start=visible_count + 1):
+                                _render_note_history_entry(note_row, index=index)
+
             with st.container():
-                st.markdown("<div class='team-section-anchor team-section-anchor--timeline'></div>", unsafe_allow_html=True)
-                st.markdown(f"#### {section_titles['timeline']}")
-                st.markdown("<div class='team-section-intent'>recent activity</div>", unsafe_allow_html=True)
+                st.markdown("<div class='team-section-anchor team-section-anchor--exceptions'></div>", unsafe_allow_html=True)
+                st.markdown(f"#### {section_titles['exceptions']}")
+                st.markdown("<div class='team-section-intent'>current context</div>", unsafe_allow_html=True)
+                if not exception_history:
+                    st.caption(format_empty_state("no_exceptions"))
+                else:
+                    st.caption(f"{len(exception_history)} recent exception item(s)")
+                    with st.expander("Show exception details", expanded=False):
+                        for index, exception_row in enumerate(exception_history, start=1):
+                            _render_exception_history_entry(exception_row, index=index)
+
+            with st.expander("Recent activity (optional)", expanded=False):
                 if not unified_timeline:
                     st.caption(format_empty_state("no_timeline"))
                 else:
@@ -1520,42 +1950,6 @@ def page_team() -> None:
                         for ev in _earlier_events:
                             _render_timeline_event(ev)
 
-            note_history = _normalize_notes_history(notes, preview_chars=180)
-            if note_history:
-                with st.container():
-                    st.markdown("<div class='team-section-anchor team-section-anchor--notes'></div>", unsafe_allow_html=True)
-                    st.markdown(f"#### {section_titles['notes']}")
-                    st.markdown("<div class='team-section-intent'>follow-up history</div>", unsafe_allow_html=True)
-                    # TODO(team-contract): Notes history section - prior notes for selected employee.
-                    visible_count = 8
-                    for index, note_row in enumerate(note_history[:visible_count], start=1):
-                        _render_note_history_entry(note_row, index=index)
-
-                    remaining_count = len(note_history) - visible_count
-                    if remaining_count > 0:
-                        with st.expander(format_show_older_notes_label(remaining_count), expanded=False):
-                            for index, note_row in enumerate(note_history[visible_count:], start=visible_count + 1):
-                                _render_note_history_entry(note_row, index=index)
-
-            with st.container():
-                st.markdown("<div class='team-section-anchor team-section-anchor--exceptions'></div>", unsafe_allow_html=True)
-                st.markdown(f"#### {section_titles['exceptions']}")
-                st.markdown("<div class='team-section-intent'>current context</div>", unsafe_allow_html=True)
-                # TODO(team-contract): Exception history section - read-only context for selected employee.
-                exception_history = _normalize_exception_history(exceptions, preview_chars=140)
-                if not exception_history:
-                    st.caption(format_empty_state("no_exceptions"))
-                else:
-                    visible_count = 6
-                    for index, exception_row in enumerate(exception_history[:visible_count], start=1):
-                        _render_exception_history_entry(exception_row, index=index)
-
-                    remaining_count = len(exception_history) - visible_count
-                    if remaining_count > 0:
-                        with st.expander(format_show_older_exceptions_label(remaining_count), expanded=False):
-                            for index, exception_row in enumerate(exception_history[visible_count:], start=visible_count + 1):
-                                _render_exception_history_entry(exception_row, index=index)
-
             if comparison_text:
                 with st.container():
                     st.markdown("<div class='team-section-anchor team-section-anchor--comparison'></div>", unsafe_allow_html=True)
@@ -1565,5 +1959,9 @@ def page_team() -> None:
                         st.markdown(f"<div class='team-comparison-primary'>{escape(comparison_primary)}</div>", unsafe_allow_html=True)
                     if comparison_support:
                         st.markdown(f"<div class='team-comparison-support'>{escape(comparison_support)}</div>", unsafe_allow_html=True)
+
+        if has_today_handoff:
+            # One-time Team focus state from Today; consume after first render.
+            st.session_state.pop(_TODAY_TO_TEAM_HANDOFF_KEY, None)
 
     # TODO(team-contract): Optional comparison context section - only if it remains lightweight and non-prescriptive.

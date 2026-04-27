@@ -86,19 +86,36 @@ def _goal_status_rows() -> list[dict]:
     ]
 
 
-def _install_streamlit_stubs(monkeypatch, session_state, *, radio_calls=None, captions=None, infos=None):
+def _install_streamlit_stubs(
+    monkeypatch,
+    session_state,
+    *,
+    radio_calls=None,
+    captions=None,
+    infos=None,
+    markdowns=None,
+    button_click_keys=None,
+):
     radio_calls = radio_calls if radio_calls is not None else []
     captions = captions if captions is not None else []
     infos = infos if infos is not None else []
+    markdowns = markdowns if markdowns is not None else []
+    click_keys = set(button_click_keys or [])
 
     monkeypatch.setattr(team.st, "session_state", session_state)
     monkeypatch.setattr(team.st, "columns", lambda spec, **kwargs: [_Ctx() for _ in range(len(spec) if isinstance(spec, list) else int(spec))])
-    monkeypatch.setattr(team.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(team.st, "markdown", lambda text, *args, **kwargs: markdowns.append(str(text)))
     monkeypatch.setattr(team.st, "write", lambda *args, **kwargs: None)
     monkeypatch.setattr(team.st, "line_chart", lambda *args, **kwargs: None)
     monkeypatch.setattr(team.st, "expander", lambda *args, **kwargs: _Ctx())
     monkeypatch.setattr(team.st, "caption", lambda text, *args, **kwargs: captions.append(str(text)))
     monkeypatch.setattr(team.st, "info", lambda text, *args, **kwargs: infos.append(str(text)))
+    monkeypatch.setattr(team.st, "rerun", lambda: None)
+
+    def _button(_label, key=None, **kwargs):
+        return bool(key in click_keys)
+
+    monkeypatch.setattr(team.st, "button", _button)
 
     def _text_input(_label, key=None, value="", **kwargs):
         if key and key not in session_state:
@@ -122,7 +139,7 @@ def _install_streamlit_stubs(monkeypatch, session_state, *, radio_calls=None, ca
     monkeypatch.setattr(team.st, "selectbox", _selectbox)
     monkeypatch.setattr(team.st, "radio", _radio)
 
-    return radio_calls, captions, infos
+    return radio_calls, captions, infos, markdowns
 
 
 def _install_team_page_dependencies(
@@ -176,7 +193,7 @@ def test_load_team_roster_snapshot_uses_non_rebuilding_snapshot_fetch(monkeypatc
 
 def test_page_team_initializes_default_filters_and_selects_first_employee_when_unset(monkeypatch):
     session_state = _SessionState({"tenant_id": "tenant-1", "user_email": "user@example.com"})
-    radio_calls, _captions, _infos = _install_streamlit_stubs(monkeypatch, session_state)
+    radio_calls, _captions, _infos, _markdowns = _install_streamlit_stubs(monkeypatch, session_state)
     _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows())
 
     team.page_team()
@@ -216,7 +233,7 @@ def test_page_team_roster_filters_reduce_visible_options(monkeypatch):
             "team_time_window_days": 30,
         }
     )
-    radio_calls, _captions, _infos = _install_streamlit_stubs(monkeypatch, session_state)
+    radio_calls, _captions, _infos, _markdowns = _install_streamlit_stubs(monkeypatch, session_state)
     _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows())
 
     team.page_team()
@@ -233,7 +250,7 @@ def test_page_team_empty_filter_result_falls_back_to_full_roster(monkeypatch):
             "team_employee_search": "missing-name",
         }
     )
-    radio_calls, captions, _infos = _install_streamlit_stubs(monkeypatch, session_state)
+    radio_calls, captions, _infos, _markdowns = _install_streamlit_stubs(monkeypatch, session_state)
     _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows())
 
     team.page_team()
@@ -340,12 +357,12 @@ def test_normalize_recent_activity_timeline_filters_noise_and_dedupes_by_type_an
 
     assert len(timeline) == 4
     assert [item["event_type"] for item in timeline] == [
-        "Issue recorded",
-        "Issue resolved",
+        "Performance concern identified",
+        "Reviewed and logged",
         "Follow-up scheduled",
         "Note added",
     ]
-    assert all(item["event_type"] in {"Issue recorded", "Note added", "Follow-up scheduled", "Issue resolved"} for item in timeline)
+    assert all(item["event_type"] in {"Performance concern identified", "Note added", "Follow-up scheduled", "Reviewed and logged"} for item in timeline)
     assert len({(item["event_type"], item["event_at"].isoformat()) for item in timeline}) == len(timeline)
 
 
@@ -374,3 +391,134 @@ def test_normalize_recent_activity_timeline_limits_to_most_recent_five_events():
     assert len(timeline) == 5
     assert timeline[0]["event_at"].isoformat().startswith("2026-04-20T13:00:00")
     assert timeline[-1]["event_at"].isoformat().startswith("2026-04-20T09:00:00")
+
+
+def test_compute_window_trend_metrics_uses_slope_for_label_when_directions_match():
+    chart_rows = [
+        {"Date": "2026-04-20", "UPH": 100.0},
+        {"Date": "2026-04-21", "UPH": 102.0},
+        {"Date": "2026-04-22", "UPH": 104.0},
+    ]
+
+    metrics = team._compute_window_trend_metrics(chart_rows)
+
+    assert metrics["slope_direction"] == "positive"
+    assert metrics["change_direction"] == "positive"
+    assert metrics["label"] == "Improving"
+
+
+def test_compute_window_trend_metrics_hides_label_on_direction_mismatch():
+    chart_rows = [
+        {"Date": "2026-04-20", "UPH": 100.0},
+        {"Date": "2026-04-21", "UPH": 0.0},
+        {"Date": "2026-04-22", "UPH": 100.0},
+        {"Date": "2026-04-23", "UPH": 99.0},
+    ]
+
+    metrics = team._compute_window_trend_metrics(chart_rows)
+    summary = team._format_window_trend_summary(metrics, 14)
+
+    assert metrics["slope_direction"] == "positive"
+    assert metrics["change_direction"] == "negative"
+    assert metrics["label"] is None
+    assert summary == "-1.0% over the last 14 days"
+
+
+def test_window_trend_summary_uses_percent_only_when_label_suppressed():
+    summary = team._format_window_trend_summary(
+        {
+            "change_pct": -3.5,
+            "label": None,
+        },
+        14,
+    )
+
+    assert summary == "-3.5% over the last 14 days"
+
+
+def test_follow_up_status_includes_last_check_from_recent_follow_up_outcome():
+    lines = team._build_follow_up_status_lines(
+        row={"follow_up_due_at": "2026-05-04T09:00:00"},
+        notes=[
+            {"created_at": "2026-04-27T09:00:00", "note": "Older note text."},
+        ],
+        action_rows=[
+            {
+                "event_at": "2026-04-27T10:00:00",
+                "event_type": "follow_through_logged",
+                "outcome": "Performance still below target",
+            },
+        ],
+    )
+
+    assert any(line.startswith("Last check: Performance still below target") for line in lines)
+
+
+def test_follow_up_status_uses_note_for_last_check_when_no_follow_up_outcome():
+    lines = team._build_follow_up_status_lines(
+        row={"follow_up_due": ""},
+        notes=[
+            {"created_at": "2026-04-27T10:00:00", "note": "No significant change"},
+        ],
+        action_rows=[
+            {
+                "event_at": "2026-04-27T11:00:00",
+                "event_type": "created",
+                "outcome": "",
+            },
+        ],
+    )
+
+    assert any(line == "Last check: No significant change" for line in lines)
+
+
+def test_team_handoff_auto_selects_employee_and_shows_banner_once(monkeypatch):
+    session_state = _SessionState(
+        {
+            "tenant_id": "tenant-1",
+            "user_email": "user@example.com",
+            "_today_to_team_handoff": {
+                "employee_id": "E2",
+                "reason": "Declining performance over 14 days",
+                "signal_id": "sig-1",
+                "signal_key": "key-1",
+                "follow_up_status": "Follow-up due May 4",
+            },
+        }
+    )
+    _radio_calls, _captions, _infos, markdowns = _install_streamlit_stubs(monkeypatch, session_state)
+    _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows())
+
+    team.page_team()
+
+    assert session_state["team_selected_emp_id"] == "E2"
+    assert any("Opened from Today:" in line for line in markdowns)
+    assert "_today_to_team_handoff" not in session_state
+
+    markdowns_second: list[str] = []
+    _install_streamlit_stubs(monkeypatch, session_state, markdowns=markdowns_second)
+    _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows())
+    team.page_team()
+    assert not any("Opened from Today:" in line for line in markdowns_second)
+
+
+def test_team_return_button_sets_today_focus_payload(monkeypatch):
+    session_state = _SessionState(
+        {
+            "tenant_id": "tenant-1",
+            "user_email": "user@example.com",
+            "team_selected_emp_id": "E2",
+        }
+    )
+    _install_streamlit_stubs(
+        monkeypatch,
+        session_state,
+        button_click_keys={"team_bridge_to_today_E2"},
+    )
+    _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows())
+
+    team.page_team()
+
+    assert session_state["goto_page"] == "today"
+    assert session_state["cn_selected_emp"] == "E2"
+    assert session_state["_team_to_today_focus"]["employee_id"] == "E2"
