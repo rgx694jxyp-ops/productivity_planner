@@ -833,3 +833,34 @@ def test_today_wording_helpers_use_signal_first_copy():
     assert today_module._today_signal_surface_heading(1) == "## Today: 1 signal surfaced"
     assert today_module._today_queue_intro_label() == "Signals surfaced now"
     assert today_module._today_loading_placeholder() == "Loading today's signals..."
+
+
+def test_phase1_ends_with_rerun_not_bare_return():
+    """Phase 1 must call st.rerun() after setting phase2_ready so the action-ready
+    queue is always rendered on the next pass — not only after a user interaction."""
+    import inspect
+    import re
+
+    source = inspect.getsource(today_module)
+
+    # Find the line that sets phase2_ready_key = True, then confirm the very
+    # next non-comment, non-blank line is st.rerun() (not a bare return).
+    lines = source.splitlines()
+    for i, line in enumerate(lines):
+        if re.search(r'session_state\[phase2_ready_key\]\s*=\s*True', line):
+            # Scan forward for the next meaningful statement
+            for j in range(i + 1, min(i + 8, len(lines))):
+                stripped = lines[j].strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                assert re.search(r'st\.rerun\(\)', stripped), (
+                    f"Line after phase2_ready_key=True (line {j+1}) is '{stripped}' "
+                    "but must be st.rerun(). A bare return leaves users on scan-only "
+                    "cards with no action controls."
+                )
+                return  # found and confirmed
+
+    raise AssertionError(
+        "Could not find 'session_state[phase2_ready_key] = True' in today.py source. "
+        "The Phase 1 → Phase 2 rerun guard may have moved."
+    )

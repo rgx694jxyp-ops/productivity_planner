@@ -4914,9 +4914,9 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     },
                 )
                 st.session_state[phase2_ready_key] = True
-                # Phase 1 intentionally renders only the initial top cards.
-                # Exit this pass so phase 2 does not render in the same run.
-                return
+                # Phase 1 has rendered the initial scan-only cards.
+                # Rerun immediately so Phase 2 renders the action-ready queue.
+                st.rerun()
 
             phase2_started_at = time.perf_counter()
             _log_today_milestone(
