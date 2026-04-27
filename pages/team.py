@@ -94,6 +94,23 @@ def _safe_float(value: object) -> float | None:
         return None
 
 
+def _format_display_dt(when_text: str) -> str:
+    """Convert ISO datetime string to human-readable: 'Apr 27 at 9:00 AM'."""
+    clean = str(when_text or "").strip()
+    if not clean:
+        return clean
+    dt = _parse_dt(clean)
+    if dt is None:
+        return clean[:16]
+    month_day = f"{dt.strftime('%b')} {dt.day}"
+    if dt.hour == 0 and dt.minute == 0:
+        return month_day
+    hour = dt.hour % 12 or 12
+    minute = f"{dt.minute:02d}"
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{month_day} at {hour}:{minute} {ampm}"
+
+
 def _parse_dt(value: str) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -481,7 +498,8 @@ def _normalize_notes_history(notes: list[dict], preview_chars: int = 180) -> lis
 
 def _render_note_history_entry(note_row: dict, *, index: int) -> None:
     author_text = str(note_row.get("author") or "").strip()
-    metadata_text = format_note_entry(str(note_row.get("when_text") or ""), author=author_text)
+    display_when = _format_display_dt(str(note_row.get("when_text") or ""))
+    metadata_text = format_note_entry(display_when, author=author_text)
     preview_text = format_note_preview_text(str(note_row.get("preview") or ""))
 
     st.markdown(
@@ -508,7 +526,8 @@ def _render_exception_history_entry(exception_row: dict, *, index: int) -> None:
     context_line = str(exception_row.get("context_line") or "").strip()
     exception_type = str(exception_row.get("exception_type") or "").strip()
     when_text = str(exception_row.get("when_text") or "").strip()
-    context_text = context_line if context_line and context_line != exception_type else when_text
+    display_when = _format_display_dt(when_text)
+    context_text = context_line if context_line and context_line != exception_type else display_when
     preview_text = format_exception_preview_text(str(exception_row.get("preview") or ""))
 
     st.markdown(
@@ -900,6 +919,18 @@ def _render_team_page_styles() -> None:
             letter-spacing: 0.02em;
             text-transform: lowercase;
         }
+        .team-timeline-group {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--dpd-text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.07em;
+            margin: 0.625rem 0 0.25rem 0.625rem;
+            opacity: 0.75;
+        }
+        .team-timeline-group:first-child {
+            margin-top: 0.125rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1142,27 +1173,21 @@ def page_team() -> None:
             with st.container():
                 st.markdown("<div class='team-section-anchor team-section-anchor--summary'></div>", unsafe_allow_html=True)
                 st.markdown(f"### {employee_name}")
+                st.caption(format_selected_employee_subheader(department, status_label))
                 if primary_summary_line:
                     st.markdown(f"<div class='team-summary-primary'>{primary_summary_line}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='team-summary-secondary'>{secondary_summary_line}</div>", unsafe_allow_html=True)
-                metadata_line = " | ".join(
-                    [
-                        format_chip_current_vs_target(current_vs_target_text),
-                        format_chip_trend(selected_window_trend_text),
-                        format_chip_notes(note_count),
-                        format_chip_follow_up(follow_up_state_text),
-                    ]
-                )
-                selected_support = _compact_support_line(
-                    format_selected_employee_subheader(department, status_label),
-                    metadata_line,
-                )
-                if selected_support:
-                    st.caption(selected_support)
-
-                # Bridge to Today: subtle control to pass employee context and navigate.
-                bridge_col_1, bridge_col_2 = st.columns([0.5, 3.0], gap="small")
-                with bridge_col_1:
+                _summary_chips: list[str] = [
+                    format_chip_current_vs_target(current_vs_target_text),
+                    format_chip_trend(selected_window_trend_text),
+                ]
+                _row_confidence = str(selected_row.get("confidence_label") or "").strip()
+                _row_completeness = str(selected_row.get("data_completeness_status") or "").strip()
+                if _row_confidence:
+                    _summary_chips.append(format_confidence_meta(_row_confidence))
+                elif _row_completeness:
+                    _summary_chips.append(format_data_completeness_meta(_row_completeness))
+                _summary_chips.append(format_chip_follow_up(follow_up_state_text))
+                st.caption(" | ".join(_summary_chips))
                     if st.button(format_bridge_button_label(), key=f"team_bridge_to_today_{selected_employee_id}"):
                         if selected_employee_id and str(selected_employee_id).strip():
                             st.session_state["cn_selected_emp"] = selected_employee_id
@@ -1202,22 +1227,10 @@ def page_team() -> None:
                 profile.set("chart_rows", len(chart_rows))
 
                 if chart_rows:
-                    trend_primary_text = selected_window_trend_text
-                    trend_support_parts: list[str] = []
-                    trend_intro_text = format_trend_intro(time_window_days)
-
                     interpretation = _trend_interpretation_sentence(chart_rows, target_uph)
                     interpretation_clean = str(interpretation or "").strip()
-                    primary_clean = str(trend_primary_text or "").strip()
-                    if interpretation_clean and interpretation_clean.lower() != primary_clean.lower():
-                        trend_support_parts.append(interpretation_clean)
-                    if trend_intro_text:
-                        trend_support_parts.append(trend_intro_text)
 
-                    if primary_clean:
-                        st.markdown(f"<div class='team-trend-primary'>{primary_clean}</div>", unsafe_allow_html=True)
-                    if trend_support_parts:
-                        st.caption(" | ".join(trend_support_parts), help=None)
+                    st.caption(format_trend_intro(time_window_days))
 
                     # Single analytical chart for selected-employee trend in the selected window.
                     history_df = pd.DataFrame(chart_rows).drop_duplicates(subset=["Date"], keep="last").sort_values("Date")
@@ -1226,6 +1239,9 @@ def page_team() -> None:
                         st.line_chart(history_df.set_index("Date")[["UPH", "Target"]], use_container_width=True)
                     else:
                         st.line_chart(history_df.set_index("Date")["UPH"], use_container_width=True)
+
+                    if interpretation_clean:
+                        st.caption(interpretation_clean)
                 else:
                     st.markdown(f"<div class='team-trend-primary'>{format_trend_no_points()}</div>", unsafe_allow_html=True)
                     st.caption(format_trend_intro(time_window_days))
@@ -1240,25 +1256,44 @@ def page_team() -> None:
                 if not unified_timeline:
                     st.caption(format_empty_state("no_timeline"))
                 else:
-                    for event in unified_timeline:
-                        when_text = _timeline_when_text(event.get("event_at"), fallback=str(event.get("event_at_raw") or ""))
-                        event_type = str(event.get("event_type") or "Update added")
-                        description = str(event.get("description") or "")
-                        detail_html = ""
-                        if description:
-                            detail_html = f"<div class='team-timeline-detail'>{escape(description)}</div>"
+                    _today_date = datetime.utcnow().date()
+
+                    def _is_today_event(ev: dict) -> bool:
+                        ev_at = ev.get("event_at")
+                        return isinstance(ev_at, datetime) and ev_at.date() == _today_date
+
+                    def _render_timeline_event(ev: dict) -> None:
+                        when_iso = _timeline_when_text(ev.get("event_at"), fallback=str(ev.get("event_at_raw") or ""))
+                        display_when = _format_display_dt(when_iso)
+                        ev_type = str(ev.get("event_type") or "Update added")
+                        ev_desc = str(ev.get("description") or "")
+                        detail_html = f"<div class='team-timeline-detail'>{escape(ev_desc)}</div>" if ev_desc else ""
                         st.markdown(
                             "\n".join(
                                 [
                                     "<div class='team-timeline-entry'>",
-                                    f"<div class='team-timeline-event'>{escape(event_type)}</div>",
-                                    f"<div class='team-timeline-meta'>{escape(when_text)}</div>",
+                                    f"<div class='team-timeline-event'>{escape(ev_type)}</div>",
+                                    f"<div class='team-timeline-meta'>{escape(display_when)}</div>",
                                     detail_html,
                                     "</div>",
                                 ]
                             ),
                             unsafe_allow_html=True,
                         )
+
+                    _today_events = [ev for ev in unified_timeline if _is_today_event(ev)]
+                    _earlier_events = [ev for ev in unified_timeline if not _is_today_event(ev)]
+
+                    if _today_events:
+                        st.markdown("<div class='team-timeline-group'>Today</div>", unsafe_allow_html=True)
+                        for ev in _today_events:
+                            _render_timeline_event(ev)
+
+                    if _earlier_events:
+                        if _today_events:
+                            st.markdown("<div class='team-timeline-group'>Earlier</div>", unsafe_allow_html=True)
+                        for ev in _earlier_events:
+                            _render_timeline_event(ev)
 
             with st.container():
                 st.markdown("<div class='team-section-anchor team-section-anchor--notes'></div>", unsafe_allow_html=True)
