@@ -4,6 +4,7 @@ from services.team_page_language_service import (
     format_chip_notes,
     format_chip_trend,
     format_comparison_text,
+    clean_note_text_for_display,
     format_empty_state,
     format_note_entry,
     format_note_expand_label,
@@ -126,6 +127,18 @@ def test_note_wording_is_clean_and_factual():
     assert format_note_entry("2026-04-20 10:30") == "2026-04-20 10:30"
     assert format_note_preview_text("  Shift started late due to dock delay.  ") == "Shift started late due to dock delay."
     assert format_note_expand_label(2, when_text="2026-04-20 10:30") == "Show full note from 2026-04-20"
+
+
+def test_clean_note_text_for_display_drops_system_debug_strings():
+    assert clean_note_text_for_display("reason=Today queue completion follow_up_required=yes") == ""
+    assert clean_note_text_for_display("signal_key=uph_below_target scope=team") == ""
+    assert clean_note_text_for_display("tenant_id=abc123") == ""
+
+
+def test_clean_note_text_for_display_removes_metadata_and_keeps_user_text():
+    text = "Equipment issue during shift. Contact me at coach@example.com employee_id: EMP-2241"
+    cleaned = clean_note_text_for_display(text)
+    assert cleaned == "Equipment issue during shift"
 
 
 def test_limited_data_wording_is_cautious_not_overconfident():

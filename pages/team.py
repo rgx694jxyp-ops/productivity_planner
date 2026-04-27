@@ -38,6 +38,7 @@ from services.team_page_language_service import (
     format_follow_up_summary_pending_no_date,
     format_follow_up_summary_recent,
     format_follow_up_unavailable,
+    clean_note_text_for_display,
     format_note_entry,
     format_note_expand_label,
     format_page_hero_caption,
@@ -101,17 +102,76 @@ def _safe_float(value: object) -> float | None:
 def _narrative_weight(event_type: str) -> int:
     """Return narrative sort weight (signal → action → follow-up → completion)."""
     base = str(event_type or "").strip()
-    if base.startswith("Issue logged"):
+    if base == "Issue recorded":
         return 0
-    if base == "Status updated":
+    if base == "Note added":
         return 1
-    if base.startswith("Follow-up scheduled") or base.startswith("Escalation"):
+    if base == "Follow-up scheduled":
         return 2
-    if base.startswith("Added note") or base in {"Recognition shared", "Priority lowered"}:
+    if base == "Issue resolved":
         return 3
-    if base.startswith("Issue marked"):
-        return 5
     return 4
+
+
+_ALLOWED_TIMELINE_EVENT_TYPES = {
+    "Issue recorded",
+    "Note added",
+    "Follow-up scheduled",
+    "Issue resolved",
+}
+
+
+def _canonical_timeline_event_type(*, raw_event_type: str, status: str, title: str, source: str) -> str:
+    raw = str(raw_event_type or "").strip().lower()
+    status_raw = str(status or "").strip().lower()
+    title_clean = str(title or "").strip()
+    source_clean = str(source or "").strip().lower()
+
+    if raw in {"resolved"} or status_raw in {"done", "resolved", "completed"} or title_clean.startswith("Issue marked"):
+        return "Issue resolved"
+    if raw in {"follow_up_logged", "follow_through_logged"} or title_clean.startswith("Follow-up scheduled"):
+        return "Follow-up scheduled"
+    if raw in {"exception_opened"} or title_clean.startswith("Issue logged"):
+        return "Issue recorded"
+    if raw in {"coached", "recognized"} or source_clean == "note" or title_clean.startswith("Added note"):
+        return "Note added"
+    return ""
+
+
+def _is_internal_timeline_text(text: str) -> bool:
+    clean = " ".join(str(text or "").strip().split())
+    if not clean:
+        return False
+    lower = clean.lower()
+    if lower in {"bad"}:
+        return True
+    if clean.startswith("{") or clean.startswith("["):
+        return True
+    return any(
+        marker in lower
+        for marker in (
+            "reason=",
+            "signal_key=",
+            "scope=",
+            "signal_status=",
+            "follow_up_required=",
+            "tenant_id=",
+            "employee_id=",
+            "action_id=",
+            "internal",
+            "debug",
+        )
+    )
+
+
+def _clean_timeline_description(text: str) -> str:
+    clean = clean_note_text_for_display(text)
+    if not clean:
+        return ""
+    clean = " ".join(clean.split())
+    if _is_internal_timeline_text(clean):
+        return ""
+    return clean
 
 
 def _format_display_dt(when_text: str) -> str:
@@ -419,73 +479,113 @@ def _normalize_recent_activity_timeline(
     notes: list[dict],
     action_rows: list[dict],
     exception_rows: list[dict],
-    limit: int = 40,
+    limit: int = 5,
 ) -> list[dict]:
     events: list[dict] = []
 
     for row in notes or []:
         event_at_raw = str(row.get("created_at") or row.get("date") or "").strip()
         event_at = _parse_dt(event_at_raw)
+        if event_at is None:
+            continue
+        note_text = str(row.get("note") or row.get("notes") or "").strip()
+        clean_note = _clean_timeline_description(note_text)
+        if not clean_note:
+            continue
         entry = format_timeline_event_display({
             "event_type": "coached",
-            "notes": str(row.get("note") or row.get("notes") or "").strip(),
+            "notes": note_text,
         })
+        canonical_type = _canonical_timeline_event_type(
+            raw_event_type="coached",
+            status="",
+            title=entry["title"],
+            source="note",
+        )
+        if canonical_type not in _ALLOWED_TIMELINE_EVENT_TYPES:
+            continue
         events.append(
             {
                 "event_at": event_at,
                 "event_at_raw": event_at_raw,
-                "event_type": entry["title"],
-                "description": entry["description"],
+                "event_type": canonical_type,
+                "description": clean_note,
                 "source": "note",
-                "dedupe_key": f"note|{event_at_raw}|{entry['description'].lower()}",
+                "dedupe_key": f"{canonical_type}|{event_at.isoformat()}",
             }
         )
 
     for row in action_rows or []:
         event_at_raw = str(row.get("event_at") or "").strip()
         event_at = _parse_dt(event_at_raw)
-        action_id = str(row.get("action_id") or "").strip()
+        if event_at is None:
+            continue
         raw_event_type = str(row.get("event_type") or "").strip().lower()
         raw_status = str(row.get("status") or "").strip().lower()
         entry = format_timeline_event_display({
             "event_type": raw_event_type,
             "status": raw_status,
-            "action_id": action_id,
+            "action_id": str(row.get("action_id") or "").strip(),
             "notes": str(row.get("notes") or "").strip(),
             "outcome": str(row.get("outcome") or "").strip(),
             "next_follow_up_at": str(row.get("next_follow_up_at") or "").strip(),
         })
+        canonical_type = _canonical_timeline_event_type(
+            raw_event_type=raw_event_type,
+            status=raw_status,
+            title=entry["title"],
+            source="action_event",
+        )
+        if canonical_type not in _ALLOWED_TIMELINE_EVENT_TYPES:
+            continue
+        description = _clean_timeline_description(str(entry.get("description") or ""))
+        if canonical_type == "Note added" and not description:
+            continue
         events.append(
             {
                 "event_at": event_at,
                 "event_at_raw": event_at_raw,
-                "event_type": entry["title"],
-                "description": entry["description"],
+                "event_type": canonical_type,
+                "description": description,
                 "source": "action_event",
-                "dedupe_key": f"action|{action_id}|{raw_event_type}|{event_at_raw}|{entry['description'].lower()}",
+                "dedupe_key": f"{canonical_type}|{event_at.isoformat()}",
             }
         )
 
     for row in exception_rows or []:
         event_at_raw = str(row.get("created_at") or row.get("exception_date") or "").strip()
         event_at = _parse_dt(event_at_raw)
+        if event_at is None:
+            continue
         resolved_at = str(row.get("resolved_at") or "").strip()
         status = str(row.get("status") or "").strip().lower()
         is_resolved = bool(resolved_at or status == "resolved")
+        raw_event_type = "resolved" if is_resolved else "exception_opened"
         entry = format_timeline_event_display({
-            "event_type": "resolved" if is_resolved else "exception_opened",
+            "event_type": raw_event_type,
             "status": status,
             "notes": str(row.get("summary") or row.get("notes") or "").strip(),
         })
-        exception_id = str(row.get("id") or "").strip()
+        canonical_type = _canonical_timeline_event_type(
+            raw_event_type=raw_event_type,
+            status=status,
+            title=entry["title"],
+            source="exception",
+        )
+        if canonical_type not in _ALLOWED_TIMELINE_EVENT_TYPES:
+            continue
+        source_text = str(row.get("summary") or row.get("notes") or "").strip()
+        description = _clean_timeline_description(str(entry.get("description") or ""))
+        if source_text and not description:
+            continue
         events.append(
             {
                 "event_at": event_at,
                 "event_at_raw": event_at_raw,
-                "event_type": entry["title"],
-                "description": entry["description"],
+                "event_type": canonical_type,
+                "description": description,
                 "source": "exception",
-                "dedupe_key": f"exception|{exception_id}|{entry['title'].lower()}|{event_at_raw}|{entry['description'].lower()}",
+                "dedupe_key": f"{canonical_type}|{event_at.isoformat()}",
             }
         )
 
@@ -500,9 +600,8 @@ def _normalize_recent_activity_timeline(
 
     deduped.sort(
         key=lambda event: (
-            -(event["event_at"].date().toordinal() if isinstance(event.get("event_at"), datetime) else 0),
-            _narrative_weight(str(event.get("event_type") or "").strip()),
             -(float(event["event_at"].timestamp()) if isinstance(event.get("event_at"), datetime) else 0.0),
+            _narrative_weight(str(event.get("event_type") or "").strip()),
         ),
     )
     return deduped[:limit]
@@ -523,7 +622,8 @@ def _note_author_text(note: dict) -> str:
 
 
 def _note_text(note: dict) -> str:
-    return " ".join(str(note.get("note") or note.get("notes") or "").split()).strip()
+    raw_text = str(note.get("note") or note.get("notes") or "")
+    return clean_note_text_for_display(raw_text)
 
 
 def _normalize_notes_history(notes: list[dict], preview_chars: int = 180) -> list[dict]:
@@ -560,9 +660,8 @@ def _normalize_notes_history(notes: list[dict], preview_chars: int = 180) -> lis
 
 
 def _render_note_history_entry(note_row: dict, *, index: int) -> None:
-    author_text = str(note_row.get("author") or "").strip()
     display_when = _format_display_dt(str(note_row.get("when_text") or ""))
-    metadata_text = format_note_entry(display_when, author=author_text)
+    metadata_text = format_note_entry(display_when)
     preview_text = format_note_preview_text(str(note_row.get("preview") or ""))
 
     st.markdown(
@@ -811,63 +910,74 @@ def _render_team_page_styles() -> None:
             margin: 0;
             padding: 0;
         }
+        .team-detail-view-anchor {
+            height: 0;
+            margin: 0;
+            padding: 0;
+        }
+        div[data-testid="stVerticalBlock"]:has(.team-detail-view-anchor) {
+            padding-top: 0.15rem;
+        }
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor) {
-            margin-top: 1.125rem;
-            padding: 0.75rem 0.82rem;
-            border: 1px solid #E8EEF7;
-            border-radius: 0.62rem;
-            background: #FCFDFF;
+            margin-top: 1.35rem;
+            padding: 0;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            box-shadow: none;
         }
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--summary) {
-            margin-top: 0.25rem;
-            padding-top: 0.75rem;
-            padding-bottom: 0.75rem;
-            background: #FBFDFF;
-            border-color: #E5ECF6;
+            margin-top: 0.1rem;
+            padding-top: 0.15rem;
+            padding-bottom: 1.05rem;
+            margin-bottom: 0.5rem;
+            background: transparent;
         }
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--comparison) {
-            background: #FEFFFF;
-            border-color: #EBF1F8;
-            padding-top: 0.625rem;
-            padding-bottom: 0.75rem;
+            padding-top: 0.2rem;
+            padding-bottom: 0.3rem;
         }
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor) h4 {
-            font-size: 0.97rem;
-            font-weight: 600;
-            letter-spacing: 0.01em;
-            margin: 0 0 0.25rem 0;
+            font-size: 0.84rem;
+            font-weight: 550;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            color: var(--dpd-text-muted);
+            margin: 0 0 0.35rem 0;
         }
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--summary) h3 {
-            font-size: 1.18rem;
+            font-size: 1.22rem;
             font-weight: 700;
             letter-spacing: -0.01em;
-            margin: 0 0 0.25rem 0;
+            margin: 0 0 0.3rem 0;
         }
         .team-section-divider {
-            margin: 0.5rem 0 0.25rem 0;
-            border-top: 1px solid #EDF2F8;
+            margin: 1rem 0 0.2rem 0;
+            border-top: 1px solid #F1F4F9;
             height: 0;
         }
         .team-summary-context {
-            font-size: 0.88rem;
+            font-size: 0.95rem;
             font-weight: 400;
             color: var(--dpd-text-muted);
-            line-height: 1.42;
-            margin: 0 0 0.25rem 0;
+            line-height: 1.55;
+            margin: 0 0 0.38rem 0;
         }
         .team-summary-primary {
-            font-size: 1.04rem;
-            font-weight: 600;
+            font-size: 1.62rem;
+            font-weight: 680;
             color: var(--dpd-navy-900);
-            line-height: 1.38;
-            margin: 0.125rem 0 0.25rem 0;
+            line-height: 1.24;
+            margin: 0.25rem 0 0.6rem 0;
+            max-width: 54rem;
         }
         .team-summary-secondary {
-            font-size: 0.91rem;
+            font-size: 1.0rem;
             font-weight: 400;
-            line-height: 1.42;
-            margin: 0 0 0.125rem 0;
+            line-height: 1.55;
+            margin: 0 0 0.55rem 0;
             color: var(--dpd-text);
+            max-width: 56rem;
         }
         .team-trend-primary {
             font-size: 0.96rem;
@@ -877,95 +987,103 @@ def _render_team_page_styles() -> None:
             margin: 0.125rem 0 0.25rem 0;
         }
         .team-timeline-entry {
-            padding: 0.5rem 0 0.5rem 0.625rem;
-            border-left: 2px solid rgba(99, 134, 192, 0.14);
-            border-bottom: 1px solid #EEF2FA;
+            padding: 0.25rem 0 0.45rem 0;
+            border-left: 0;
+            border-bottom: 0;
         }
         .team-timeline-entry:last-child {
             border-bottom: 0;
-            padding-bottom: 0.25rem;
+            padding-bottom: 0.1rem;
         }
         .team-timeline-event {
-            font-size: 0.92rem;
-            font-weight: 500;
-            color: var(--dpd-navy-900);
+            font-size: 0.87rem;
+            font-weight: 540;
+            color: var(--dpd-text);
             margin: 0 0 0.125rem 0;
-            line-height: 1.35;
+            line-height: 1.3;
         }
         .team-timeline-meta {
-            font-size: 0.78rem;
+            font-size: 0.74rem;
             color: var(--dpd-text-muted);
             margin: 0;
             line-height: 1.28;
+            opacity: 0.9;
         }
         .team-timeline-detail {
-            font-size: 0.86rem;
+            font-size: 0.82rem;
             color: var(--dpd-text);
-            margin: 0.25rem 0 0 0;
+            margin: 0.2rem 0 0 0;
             line-height: 1.42;
+            opacity: 0.9;
         }
         .team-notes-entry {
-            padding: 0.5rem 0 0.5rem 0.625rem;
-            border-left: 2px solid rgba(99, 134, 192, 0.14);
-            border-bottom: 1px solid #EEF2FA;
+            padding: 0.22rem 0 0.45rem 0;
+            border-left: 0;
+            border-bottom: 0;
         }
         .team-notes-entry:last-child {
             border-bottom: 0;
-            padding-bottom: 0.25rem;
+            padding-bottom: 0.12rem;
         }
         .team-notes-body {
-            font-size: 0.91rem;
+            font-size: 0.85rem;
             font-weight: 400;
             color: var(--dpd-text);
             margin: 0 0 0.125rem 0;
-            line-height: 1.42;
+            line-height: 1.38;
+            opacity: 0.94;
         }
         .team-notes-meta {
-            font-size: 0.78rem;
+            font-size: 0.74rem;
             color: var(--dpd-text-muted);
             margin: 0;
             line-height: 1.28;
+            opacity: 0.86;
         }
         .team-exceptions-entry {
-            padding: 0.5rem 0 0.5rem 0.625rem;
-            border-left: 2px solid rgba(99, 134, 192, 0.14);
-            border-bottom: 1px solid #EEF2FA;
+            padding: 0.22rem 0 0.45rem 0;
+            border-left: 0;
+            border-bottom: 0;
         }
         .team-exceptions-entry:last-child {
             border-bottom: 0;
-            padding-bottom: 0.25rem;
+            padding-bottom: 0.1rem;
         }
         .team-exceptions-primary {
-            font-size: 0.91rem;
-            font-weight: 500;
-            color: var(--dpd-navy-900);
+            font-size: 0.85rem;
+            font-weight: 540;
+            color: var(--dpd-text);
             margin: 0 0 0.125rem 0;
             line-height: 1.35;
         }
         .team-exceptions-meta {
-            font-size: 0.78rem;
+            font-size: 0.74rem;
             color: var(--dpd-text-muted);
             margin: 0;
             line-height: 1.28;
+            opacity: 0.86;
         }
         .team-exceptions-support {
-            font-size: 0.86rem;
+            font-size: 0.81rem;
             color: var(--dpd-text);
-            margin: 0.25rem 0 0 0;
+            margin: 0.2rem 0 0 0;
             line-height: 1.42;
+            opacity: 0.9;
         }
         .team-comparison-primary {
-            font-size: 0.89rem;
+            font-size: 0.83rem;
             font-weight: 500;
-            color: var(--dpd-navy-900);
+            color: var(--dpd-text);
             margin: 0.125rem 0;
             line-height: 1.35;
+            opacity: 0.9;
         }
         .team-comparison-support {
-            font-size: 0.79rem;
+            font-size: 0.73rem;
             color: var(--dpd-text-muted);
             margin: 0;
             line-height: 1.28;
+            opacity: 0.86;
         }
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--timeline) div[data-testid="stExpander"] summary,
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--notes) div[data-testid="stExpander"] summary,
@@ -983,20 +1101,20 @@ def _render_team_page_styles() -> None:
             font-size: 0.74rem;
             font-weight: 400;
             color: var(--dpd-text-muted);
-            opacity: 0.82;
+            opacity: 0.7;
             margin: 0 0 0.375rem 0;
             line-height: 1.2;
-            letter-spacing: 0.02em;
+            letter-spacing: 0.04em;
             text-transform: lowercase;
         }
         .team-timeline-group {
-            font-size: 0.72rem;
+            font-size: 0.68rem;
             font-weight: 600;
             color: var(--dpd-text-muted);
             text-transform: uppercase;
-            letter-spacing: 0.07em;
-            margin: 0.625rem 0 0.25rem 0.625rem;
-            opacity: 0.75;
+            letter-spacing: 0.09em;
+            margin: 0.56rem 0 0.2rem 0;
+            opacity: 0.64;
         }
         .team-timeline-group:first-child {
             margin-top: 0.125rem;
@@ -1212,7 +1330,7 @@ def page_team() -> None:
             notes=notes,
             action_rows=timeline_rows,
             exception_rows=exceptions,
-            limit=40,
+            limit=5,
         )
         current_vs_target_text = _current_vs_target_text(avg_uph, target_uph)
         selected_window_trend_text = _selected_window_trend_text(selected_row, time_window_days)
@@ -1270,6 +1388,7 @@ def page_team() -> None:
         )
 
         with shell_right:
+            st.markdown("<div class='team-detail-view-anchor'></div>", unsafe_allow_html=True)
             with st.container():
                 st.markdown("<div class='team-section-anchor team-section-anchor--summary'></div>", unsafe_allow_html=True)
                 st.markdown(f"### {employee_name}")
@@ -1401,15 +1520,13 @@ def page_team() -> None:
                         for ev in _earlier_events:
                             _render_timeline_event(ev)
 
-            with st.container():
-                st.markdown("<div class='team-section-anchor team-section-anchor--notes'></div>", unsafe_allow_html=True)
-                st.markdown(f"#### {section_titles['notes']}")
-                st.markdown("<div class='team-section-intent'>follow-up history</div>", unsafe_allow_html=True)
-                # TODO(team-contract): Notes history section - prior notes for selected employee.
-                note_history = _normalize_notes_history(notes, preview_chars=180)
-                if not note_history:
-                    st.caption(format_empty_state("no_notes"))
-                else:
+            note_history = _normalize_notes_history(notes, preview_chars=180)
+            if note_history:
+                with st.container():
+                    st.markdown("<div class='team-section-anchor team-section-anchor--notes'></div>", unsafe_allow_html=True)
+                    st.markdown(f"#### {section_titles['notes']}")
+                    st.markdown("<div class='team-section-intent'>follow-up history</div>", unsafe_allow_html=True)
+                    # TODO(team-contract): Notes history section - prior notes for selected employee.
                     visible_count = 8
                     for index, note_row in enumerate(note_history[:visible_count], start=1):
                         _render_note_history_entry(note_row, index=index)

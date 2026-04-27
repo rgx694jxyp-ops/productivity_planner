@@ -315,17 +315,20 @@ def test_page_team_normal_render_uses_snapshot_without_recompute(monkeypatch):
     assert snapshot_calls[0]["rebuild_if_missing"] is False
 
 
-def test_normalize_recent_activity_timeline_merges_sources_and_dedupes():
+def test_normalize_recent_activity_timeline_filters_noise_and_dedupes_by_type_and_timestamp():
     notes = [
         {"created_at": "2026-04-19T10:00:00", "note": "Observed change in pace."},
         {"created_at": "2026-04-19T10:00:00", "note": "Observed change in pace."},
+        {"created_at": "2026-04-19T09:00:00", "note": "reason=Today queue completion follow_up_required=yes"},
     ]
     action_rows = [
-        {"action_id": "A1", "event_at": "2026-04-20T09:00:00", "event_type": "coached", "notes": "Reviewed line balancing."},
-        {"action_id": "A1", "event_at": "2026-04-20T09:00:00", "event_type": "coached", "notes": "Reviewed line balancing."},
+        {"action_id": "A2", "event_at": "2026-04-20T11:00:00", "event_type": "follow_up_logged", "next_follow_up_at": "2026-04-22"},
+        {"action_id": "A3", "event_at": "2026-04-20T12:00:00", "event_type": "resolved", "status": "completed"},
+        {"action_id": "A4", "event_at": "2026-04-20T10:00:00", "event_type": "some_internal_code", "notes": "debug payload"},
     ]
     exception_rows = [
-        {"id": "X1", "created_at": "2026-04-18T08:30:00", "category": "scanner_issue", "summary": "Scanner lag on lane 2."}
+        {"id": "X1", "created_at": "2026-04-18T08:30:00", "category": "scanner_issue", "summary": "bad"},
+        {"id": "X2", "created_at": "2026-04-20T13:00:00", "category": "scanner_issue", "summary": ""},
     ]
 
     timeline = team._normalize_recent_activity_timeline(
@@ -335,6 +338,39 @@ def test_normalize_recent_activity_timeline_merges_sources_and_dedupes():
         limit=10,
     )
 
-    assert len(timeline) == 3
-    assert [item["source"] for item in timeline] == ["action_event", "note", "exception"]
-    assert [item["event_type"] for item in timeline] == ["Coaching note added", "Coaching note added", "Exception opened"]
+    assert len(timeline) == 4
+    assert [item["event_type"] for item in timeline] == [
+        "Issue recorded",
+        "Issue resolved",
+        "Follow-up scheduled",
+        "Note added",
+    ]
+    assert all(item["event_type"] in {"Issue recorded", "Note added", "Follow-up scheduled", "Issue resolved"} for item in timeline)
+    assert len({(item["event_type"], item["event_at"].isoformat()) for item in timeline}) == len(timeline)
+
+
+def test_normalize_recent_activity_timeline_limits_to_most_recent_five_events():
+    notes = [
+        {"created_at": "2026-04-20T08:00:00", "note": "Note one."},
+        {"created_at": "2026-04-20T07:00:00", "note": "Note two."},
+    ]
+    action_rows = [
+        {"action_id": "A1", "event_at": "2026-04-20T12:00:00", "event_type": "resolved", "status": "completed"},
+        {"action_id": "A2", "event_at": "2026-04-20T11:00:00", "event_type": "follow_up_logged", "next_follow_up_at": "2026-04-22"},
+        {"action_id": "A3", "event_at": "2026-04-20T10:00:00", "event_type": "resolved", "status": "completed"},
+        {"action_id": "A4", "event_at": "2026-04-20T09:00:00", "event_type": "follow_up_logged", "next_follow_up_at": "2026-04-23"},
+    ]
+    exception_rows = [
+        {"id": "X1", "created_at": "2026-04-20T13:00:00", "status": "open", "summary": "Scanner lag"},
+    ]
+
+    timeline = team._normalize_recent_activity_timeline(
+        notes=notes,
+        action_rows=action_rows,
+        exception_rows=exception_rows,
+        limit=5,
+    )
+
+    assert len(timeline) == 5
+    assert timeline[0]["event_at"].isoformat().startswith("2026-04-20T13:00:00")
+    assert timeline[-1]["event_at"].isoformat().startswith("2026-04-20T09:00:00")

@@ -750,6 +750,58 @@ def format_note_preview_text(preview_text: str) -> str:
     return str(preview_text or "").strip()
 
 
+def clean_note_text_for_display(raw_text: str) -> str:
+    """Return only user-readable note text.
+
+    Drops system/debug payloads (reason=, key=value patterns), removes emails
+    and internal identifiers, and returns an empty string when no clean text
+    remains.
+    """
+    text = " ".join(str(raw_text or "").split()).strip()
+    if not text:
+        return ""
+
+    lower_text = text.lower()
+    if "reason=" in lower_text:
+        return ""
+
+    # Drop system/debug key=value style payloads.
+    if re.search(r"\b[a-z_][a-z0-9_\-]{1,}\s*=\s*[^\s]+", lower_text):
+        return ""
+
+    if _is_internal_debug_text(text):
+        return ""
+
+    # Remove contact-email phrases and standalone email addresses.
+    text = re.sub(
+        r"\b(?:contact|reach)\s+(?:me|us|out)?\s*(?:at|via)\s+[\w.%+\-]+@[\w.\-]+\.[A-Za-z]{2,}\b",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b[\w.%+\-]+@[\w.\-]+\.[A-Za-z]{2,}\b", "", text)
+
+    # Remove UUID-like internal IDs.
+    text = re.sub(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b",
+        "",
+        text,
+    )
+
+    # Remove labeled internal identifiers.
+    text = re.sub(
+        r"\b(?:employee_?id|emp_?id|action_?id|tenant_?id|session_?id|signal_?id|internal_?id|id)\s*[:#-]?\s*[A-Za-z0-9_\-]{4,}\b",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"\b(?:contact|reach)\s+(?:me|us|out)?\s*(?:at|via)\b\s*$", "", text, flags=re.IGNORECASE)
+    text = text.strip(" -:;,.")
+    return text.strip()
+
+
 def format_note_expand_label(index: int, *, when_text: str = "") -> str:
     """Format note expander label with semantic reference."""
     when_clean = str(when_text or "").strip()
