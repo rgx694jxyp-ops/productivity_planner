@@ -55,10 +55,6 @@ from services.team_page_language_service import (
     format_show_older_exceptions_label,
     format_show_older_notes_label,
     format_status_filter_option,
-    format_timeline_description_fallback,
-    format_timeline_entry,
-    format_timeline_event_display,
-    format_timeline_when,
     format_trend_intro,
     format_trend_interpretation_above_target_and_improving,
     format_trend_interpretation_above_target_declining,
@@ -71,11 +67,9 @@ from services.team_page_language_service import (
     format_trend_interpretation_no_days,
     format_trend_interpretation_recent_dip,
     format_trend_interpretation_stable,
-    format_trend_label,
     format_trend_no_history,
     format_trend_no_points,
     format_what_changed_line,
-    get_team_filter_labels,
     get_team_section_titles,
     format_bridge_button_label,
     format_chip_current_vs_target,
@@ -83,7 +77,6 @@ from services.team_page_language_service import (
     format_chip_notes,
     format_chip_trend,
     format_note_preview_text,
-    format_timeline_row_heading,
     format_exception_preview_text,
     format_primary_statement,
     format_secondary_context_subline,
@@ -97,27 +90,6 @@ def _safe_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
 
-
-def _narrative_weight(event_type: str) -> int:
-    """Return narrative sort weight (signal → action → follow-up → completion)."""
-    base = str(event_type or "").strip()
-    if base == "Performance concern identified":
-        return 0
-    if base == "Note added":
-        return 1
-    if base == "Follow-up scheduled":
-        return 2
-    if base == "Reviewed and logged":
-        return 3
-    return 4
-
-
-_ALLOWED_TIMELINE_EVENT_TYPES = {
-    "Performance concern identified",
-    "Note added",
-    "Follow-up scheduled",
-    "Reviewed and logged",
-}
 
 _TODAY_TO_TEAM_HANDOFF_KEY = "_today_to_team_handoff"
 _TEAM_TO_TODAY_FOCUS_KEY = "_team_to_today_focus"
@@ -141,59 +113,6 @@ def _clean_plain_handoff_reason(text: str) -> str:
     if any(token in lower for token in blocked):
         return ""
     return clean[:160]
-
-
-def _canonical_timeline_event_type(*, raw_event_type: str, status: str, title: str, source: str) -> str:
-    raw = str(raw_event_type or "").strip().lower()
-    status_raw = str(status or "").strip().lower()
-    title_clean = str(title or "").strip()
-    source_clean = str(source or "").strip().lower()
-
-    if raw in {"resolved"} or status_raw in {"done", "resolved", "completed"} or title_clean.startswith("Issue marked"):
-        return "Reviewed and logged"
-    if raw in {"follow_up_logged", "follow_through_logged"} or title_clean.startswith("Follow-up scheduled"):
-        return "Follow-up scheduled"
-    if raw in {"exception_opened"} or title_clean.startswith("Issue logged"):
-        return "Performance concern identified"
-    if raw in {"coached", "recognized"} or source_clean == "note" or title_clean.startswith("Added note"):
-        return "Note added"
-    return ""
-
-
-def _is_internal_timeline_text(text: str) -> bool:
-    clean = " ".join(str(text or "").strip().split())
-    if not clean:
-        return False
-    lower = clean.lower()
-    if lower in {"bad"}:
-        return True
-    if clean.startswith("{") or clean.startswith("["):
-        return True
-    return any(
-        marker in lower
-        for marker in (
-            "reason=",
-            "signal_key=",
-            "scope=",
-            "signal_status=",
-            "follow_up_required=",
-            "tenant_id=",
-            "employee_id=",
-            "action_id=",
-            "internal",
-            "debug",
-        )
-    )
-
-
-def _clean_timeline_description(text: str) -> str:
-    clean = clean_note_text_for_display(text)
-    if not clean:
-        return ""
-    clean = " ".join(clean.split())
-    if _is_internal_timeline_text(clean):
-        return ""
-    return clean
 
 
 def _format_display_dt(when_text: str) -> str:
@@ -345,17 +264,8 @@ def _roster_meta_text(row: dict) -> str:
 
 def _roster_row_label(summary: dict) -> str:
     name = str(summary.get("name") or "Unknown")
-    department = str(summary.get("department") or "Unknown")
     trend_label = str(summary.get("trend_label") or "Holding steady")
-    reason = _compact_text(summary.get("reason") or "No clear recent shift", max_len=56)
-    meta = str(summary.get("meta") or "")
-    top_line = name
-    bottom_parts = [department, trend_label]
-    if meta:
-        bottom_parts.append(meta)
-    elif reason:
-        bottom_parts.append(reason)
-    return f"{top_line}\n{' · '.join([part for part in bottom_parts if part])}"
+    return " · ".join([part for part in (name, trend_label) if part])
 
 
 def _current_vs_target_text(avg_uph: float | None, target_uph: float | None) -> str:
@@ -386,6 +296,43 @@ def _trend_label_from_direction(direction: str) -> str:
     if direction == "positive":
         return "Improving"
     return "Holding steady"
+
+
+def _trend_label_from_metrics(metrics: dict[str, object]) -> str:
+    """Return one of the three deterministic labels from computed trend metrics."""
+    explicit_label = str(metrics.get("label") or "").strip()
+    if explicit_label in {"Declining", "Holding steady", "Improving"}:
+        return explicit_label
+    slope_direction = str(metrics.get("slope_direction") or "flat").strip().lower()
+    return _trend_label_from_direction(slope_direction)
+
+
+def _status_bucket_from_trend_label(trend_label: str) -> str:
+    """Map display trend labels back to Team filter buckets."""
+    if trend_label == "Declining":
+        return "needs attention"
+    if trend_label == "Improving":
+        return "improved recently"
+    return "stable"
+
+
+def _chart_rows_from_snapshot_history(
+    snapshot_rows: list[dict],
+    *,
+    window_start: datetime | None,
+) -> list[dict]:
+    chart_rows: list[dict] = []
+    for row in snapshot_rows:
+        dt_value = _parse_dt(str(row.get("snapshot_date") or "").strip())
+        if dt_value is None:
+            continue
+        if window_start is not None and dt_value < window_start:
+            continue
+        uph = _safe_float(row.get("performance_uph"))
+        if uph is None:
+            continue
+        chart_rows.append({"Date": dt_value.date().isoformat(), "UPH": uph})
+    return chart_rows
 
 
 def _compute_window_trend_metrics(chart_rows: list[dict]) -> dict[str, object]:
@@ -745,143 +692,6 @@ def _trend_interpretation_sentence(chart_rows: list[dict], target_uph: float | N
     if change_pct <= -3.0:
         return format_trend_interpretation_declining(change_pct=change_pct)
     return format_trend_interpretation_stable()
-
-
-def _timeline_when_text(dt: datetime | None, fallback: str = "") -> str:
-    return format_timeline_when(dt, fallback=fallback)
-
-
-def _normalize_recent_activity_timeline(
-    *,
-    notes: list[dict],
-    action_rows: list[dict],
-    exception_rows: list[dict],
-    limit: int = 5,
-) -> list[dict]:
-    events: list[dict] = []
-
-    for row in notes or []:
-        event_at_raw = str(row.get("created_at") or row.get("date") or "").strip()
-        event_at = _parse_dt(event_at_raw)
-        if event_at is None:
-            continue
-        note_text = str(row.get("note") or row.get("notes") or "").strip()
-        clean_note = _clean_timeline_description(note_text)
-        if not clean_note:
-            continue
-        entry = format_timeline_event_display({
-            "event_type": "coached",
-            "notes": note_text,
-        })
-        canonical_type = _canonical_timeline_event_type(
-            raw_event_type="coached",
-            status="",
-            title=entry["title"],
-            source="note",
-        )
-        if canonical_type not in _ALLOWED_TIMELINE_EVENT_TYPES:
-            continue
-        events.append(
-            {
-                "event_at": event_at,
-                "event_at_raw": event_at_raw,
-                "event_type": canonical_type,
-                "description": clean_note,
-                "source": "note",
-                "dedupe_key": f"{canonical_type}|{event_at.isoformat()}",
-            }
-        )
-
-    for row in action_rows or []:
-        event_at_raw = str(row.get("event_at") or "").strip()
-        event_at = _parse_dt(event_at_raw)
-        if event_at is None:
-            continue
-        raw_event_type = str(row.get("event_type") or "").strip().lower()
-        raw_status = str(row.get("status") or "").strip().lower()
-        entry = format_timeline_event_display({
-            "event_type": raw_event_type,
-            "status": raw_status,
-            "action_id": str(row.get("action_id") or "").strip(),
-            "notes": str(row.get("notes") or "").strip(),
-            "outcome": str(row.get("outcome") or "").strip(),
-            "next_follow_up_at": str(row.get("next_follow_up_at") or "").strip(),
-        })
-        canonical_type = _canonical_timeline_event_type(
-            raw_event_type=raw_event_type,
-            status=raw_status,
-            title=entry["title"],
-            source="action_event",
-        )
-        if canonical_type not in _ALLOWED_TIMELINE_EVENT_TYPES:
-            continue
-        description = _clean_timeline_description(str(entry.get("description") or ""))
-        if canonical_type == "Note added" and not description:
-            continue
-        events.append(
-            {
-                "event_at": event_at,
-                "event_at_raw": event_at_raw,
-                "event_type": canonical_type,
-                "description": description,
-                "source": "action_event",
-                "dedupe_key": f"{canonical_type}|{event_at.isoformat()}",
-            }
-        )
-
-    for row in exception_rows or []:
-        event_at_raw = str(row.get("created_at") or row.get("exception_date") or "").strip()
-        event_at = _parse_dt(event_at_raw)
-        if event_at is None:
-            continue
-        resolved_at = str(row.get("resolved_at") or "").strip()
-        status = str(row.get("status") or "").strip().lower()
-        is_resolved = bool(resolved_at or status == "resolved")
-        raw_event_type = "resolved" if is_resolved else "exception_opened"
-        entry = format_timeline_event_display({
-            "event_type": raw_event_type,
-            "status": status,
-            "notes": str(row.get("summary") or row.get("notes") or "").strip(),
-        })
-        canonical_type = _canonical_timeline_event_type(
-            raw_event_type=raw_event_type,
-            status=status,
-            title=entry["title"],
-            source="exception",
-        )
-        if canonical_type not in _ALLOWED_TIMELINE_EVENT_TYPES:
-            continue
-        source_text = str(row.get("summary") or row.get("notes") or "").strip()
-        description = _clean_timeline_description(str(entry.get("description") or ""))
-        if source_text and not description:
-            continue
-        events.append(
-            {
-                "event_at": event_at,
-                "event_at_raw": event_at_raw,
-                "event_type": canonical_type,
-                "description": description,
-                "source": "exception",
-                "dedupe_key": f"{canonical_type}|{event_at.isoformat()}",
-            }
-        )
-
-    deduped: list[dict] = []
-    seen_keys: set[str] = set()
-    for event in events:
-        key = str(event.get("dedupe_key") or "")
-        if not key or key in seen_keys:
-            continue
-        seen_keys.add(key)
-        deduped.append(event)
-
-    deduped.sort(
-        key=lambda event: (
-            -(float(event["event_at"].timestamp()) if isinstance(event.get("event_at"), datetime) else 0.0),
-            _narrative_weight(str(event.get("event_type") or "").strip()),
-        ),
-    )
-    return deduped[:limit]
 
 
 def _note_datetime(note: dict) -> datetime | None:
@@ -1313,36 +1123,6 @@ def _render_team_page_styles() -> None:
             line-height: 1.38;
             margin: 0.125rem 0 0.25rem 0;
         }
-        .team-timeline-entry {
-            padding: 0.25rem 0 0.45rem 0;
-            border-left: 0;
-            border-bottom: 0;
-        }
-        .team-timeline-entry:last-child {
-            border-bottom: 0;
-            padding-bottom: 0.1rem;
-        }
-        .team-timeline-event {
-            font-size: 0.87rem;
-            font-weight: 540;
-            color: var(--dpd-text);
-            margin: 0 0 0.125rem 0;
-            line-height: 1.3;
-        }
-        .team-timeline-meta {
-            font-size: 0.74rem;
-            color: var(--dpd-text-muted);
-            margin: 0;
-            line-height: 1.28;
-            opacity: 0.9;
-        }
-        .team-timeline-detail {
-            font-size: 0.82rem;
-            color: var(--dpd-text);
-            margin: 0.2rem 0 0 0;
-            line-height: 1.42;
-            opacity: 0.9;
-        }
         .team-notes-entry {
             padding: 0.22rem 0 0.45rem 0;
             border-left: 0;
@@ -1412,14 +1192,12 @@ def _render_team_page_styles() -> None:
             line-height: 1.28;
             opacity: 0.86;
         }
-        div[data-testid="stVerticalBlock"]:has(.team-section-anchor--timeline) div[data-testid="stExpander"] summary,
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--notes) div[data-testid="stExpander"] summary,
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--exceptions) div[data-testid="stExpander"] summary {
             font-size: 0.81rem;
             opacity: 0.8;
             padding-left: 0.625rem;
         }
-        div[data-testid="stVerticalBlock"]:has(.team-section-anchor--timeline) div[data-testid="stExpander"],
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--notes) div[data-testid="stExpander"],
         div[data-testid="stVerticalBlock"]:has(.team-section-anchor--exceptions) div[data-testid="stExpander"] {
             margin-top: 0.25rem;
@@ -1433,18 +1211,6 @@ def _render_team_page_styles() -> None:
             line-height: 1.2;
             letter-spacing: 0.04em;
             text-transform: lowercase;
-        }
-        .team-timeline-group {
-            font-size: 0.68rem;
-            font-weight: 600;
-            color: var(--dpd-text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.09em;
-            margin: 0.56rem 0 0.2rem 0;
-            opacity: 0.64;
-        }
-        .team-timeline-group:first-child {
-            margin-top: 0.125rem;
         }
         </style>
         """,
@@ -1470,8 +1236,6 @@ def page_team() -> None:
     tenant_id = str(st.session_state.get("tenant_id") or "").strip()
     user_email = str(st.session_state.get("user_email") or "").strip()
     section_titles = get_team_section_titles()
-    filter_labels = get_team_filter_labels()
-
     _render_team_page_styles()
     st.markdown(f"## {section_titles['page_title']}")
     st.caption(format_page_hero_caption())
@@ -1495,80 +1259,47 @@ def page_team() -> None:
             st.info(format_empty_state("no_team_records"))
             return
 
-        # Lightweight Team filters (durable session keys, compact row).
-        st.session_state.setdefault("team_employee_search", "")
-        st.session_state.setdefault("team_department_filter", "all")
-        st.session_state.setdefault("team_status_filter", "all")
         st.session_state.setdefault("team_time_window_days", 14)
-
-        all_departments = sorted(
-            {
-                str(row.get("Department") or "").strip() or "Unknown"
-                for row in goal_status
-            },
-            key=lambda value: value.lower(),
-        )
-        department_options = ["all", *all_departments]
-        if st.session_state["team_department_filter"] not in department_options:
-            st.session_state["team_department_filter"] = "all"
-
-        status_options = ["all", "needs attention", "stable", "improved recently"]
-        if st.session_state["team_status_filter"] not in status_options:
-            st.session_state["team_status_filter"] = "all"
-
         if int(st.session_state["team_time_window_days"]) not in {7, 14, 30}:
             st.session_state["team_time_window_days"] = 14
 
-    filter_col_1, filter_col_2, filter_col_3, filter_col_4 = st.columns([2.2, 1.2, 1.2, 1.0])
-    with filter_col_1:
-        st.text_input(
-            filter_labels["employee_label"],
-            key="team_employee_search",
-            placeholder=filter_labels["employee_placeholder"],
-        )
-    with filter_col_2:
-        st.selectbox(filter_labels["department_label"], options=department_options, key="team_department_filter")
-    with filter_col_3:
-        st.selectbox(
-            filter_labels["status_label"],
-            options=status_options,
-            key="team_status_filter",
-            format_func=format_status_filter_option,
-        )
-    with filter_col_4:
-        st.radio(filter_labels["window_label"], options=[7, 14, 30], key="team_time_window_days", horizontal=True)
-
-        employee_search = str(st.session_state.get("team_employee_search") or "").strip().lower()
-        department_filter = str(st.session_state.get("team_department_filter") or "all").strip().lower()
-        status_filter = str(st.session_state.get("team_status_filter") or "all").strip().lower()
         time_window_days = int(st.session_state.get("team_time_window_days") or 14)
+        window_start: datetime | None = None
+        if time_window_days > 0:
+            window_start = datetime.utcnow() - timedelta(days=time_window_days)
 
-        with profile.stage("filter_roster"):
-            filtered_employees: list[dict] = []
+        employee_chart_rows_by_id: dict[str, list[dict]] = {}
+        employee_trend_metrics_by_id: dict[str, dict[str, object]] = {}
+        employee_trend_label_by_id: dict[str, str] = {}
+        with profile.stage("compute_roster_trends"):
             for row in goal_status:
-                display_name = _employee_display_name(row)
-                department_value = str(row.get("Department") or "").strip() or "Unknown"
-                status_value = _team_status_bucket(row)
-                if employee_search and employee_search not in display_name.lower():
+                employee_id = _employee_id(row)
+                if not employee_id:
                     continue
-                if department_filter != "all" and department_value.lower() != department_filter:
-                    continue
-                if status_filter != "all" and status_value != status_filter:
-                    continue
-                filtered_employees.append(row)
-        profile.observe_rows("filtered_roster_rows", filtered_employees)
+                snapshot_history = list(
+                    get_employee_snapshot_history(
+                        tenant_id=tenant_id,
+                        employee_id=employee_id,
+                        days=max(30, time_window_days),
+                    )
+                    or []
+                )
+                chart_rows = _chart_rows_from_snapshot_history(snapshot_history, window_start=window_start)
+                trend_metrics = _compute_window_trend_metrics(chart_rows)
+                trend_label = _trend_label_from_metrics(trend_metrics)
+                employee_chart_rows_by_id[employee_id] = chart_rows
+                employee_trend_metrics_by_id[employee_id] = trend_metrics
+                employee_trend_label_by_id[employee_id] = trend_label
 
-        employees_sorted = sorted(filtered_employees, key=lambda row: str(row.get("Employee Name") or row.get("Employee") or "").lower())
+        employees_sorted = sorted(
+            goal_status,
+            key=lambda row: str(row.get("Employee Name") or row.get("Employee") or "").lower(),
+        )
         if not employees_sorted:
-            st.caption(format_empty_state("no_filter_match"))
-            employees_sorted = sorted(goal_status, key=lambda row: str(row.get("Employee Name") or row.get("Employee") or "").lower())
-            if not employees_sorted:
-                st.info(format_empty_state("no_team_records"))
-                return
+            st.info(format_empty_state("no_team_records"))
+            return
 
-    shell_left, shell_right = st.columns([1.0, 2.4], gap="medium")
-
-    # TODO(team-contract): Employee roster section - pick one employee and defer deep detail until selected.
+    # Single-focus selector options.
     roster_summaries: list[dict] = []
     row_by_employee_id: dict[str, dict] = {}
     for row in employees_sorted:
@@ -1579,9 +1310,7 @@ def page_team() -> None:
             "employee_id": employee_id,
             "name": str(row.get("Employee Name") or row.get("Employee") or "Unknown").strip() or "Unknown",
             "department": str(row.get("Department") or "").strip() or "Unknown",
-            "trend_label": format_trend_label(_team_status_bucket(row)),
-            "reason": _roster_reason_text(row),
-            "meta": _roster_meta_text(row),
+            "trend_label": str(employee_trend_label_by_id.get(employee_id) or "Holding steady"),
         }
         roster_summaries.append(summary)
         row_by_employee_id[employee_id] = row
@@ -1618,350 +1347,251 @@ def page_team() -> None:
     if str(st.session_state.get("team_selected_emp_id") or "").strip() not in employee_ids:
         st.session_state["team_selected_emp_id"] = selected_employee_id
 
-    with shell_left:
-        st.markdown("<div class='team-roster-anchor'></div>", unsafe_allow_html=True)
-        st.markdown(f"### {section_titles['roster']}")
-        roster_support = _compact_support_line(
-            format_roster_helper_text(),
-            format_roster_count(len(employee_ids)),
-        )
-        if roster_support:
-            st.caption(roster_support)
-        st.radio(
-            "",
-            options=employee_ids,
-            key="team_selected_emp_id",
-            format_func=lambda employee_id: _roster_row_label(summary_by_id.get(employee_id) or {}),
-            label_visibility="collapsed",
-        )
+    st.selectbox(
+        "Employee",
+        options=employee_ids,
+        key="team_selected_emp_id",
+        format_func=lambda employee_id: _roster_row_label(summary_by_id.get(employee_id) or {}),
+    )
 
-        employee_id = str(st.session_state.get("team_selected_emp_id") or "").strip()
-        selected_row = row_by_employee_id.get(employee_id)
-        if selected_row is None:
-            employee_id = employee_ids[0]
-            st.session_state["team_selected_emp_id"] = employee_id
-            selected_row = row_by_employee_id[employee_id]
+    employee_id = str(st.session_state.get("team_selected_emp_id") or "").strip()
+    selected_row = row_by_employee_id.get(employee_id)
+    if selected_row is None:
+        employee_id = employee_ids[0]
+        st.session_state["team_selected_emp_id"] = employee_id
+        selected_row = row_by_employee_id[employee_id]
 
-        employee_name = str(selected_row.get("Employee Name") or selected_row.get("Employee") or "Unknown").strip() or "Unknown"
-        department = str(selected_row.get("Department") or "").strip() or "Unknown"
+    employee_name = str(selected_row.get("Employee Name") or selected_row.get("Employee") or "Unknown").strip() or "Unknown"
+    department = str(selected_row.get("Department") or "").strip() or "Unknown"
 
-        avg_uph = _safe_float(selected_row.get("Average UPH"))
-        target_uph = _safe_float(selected_row.get("Target UPH"))
-        status_bucket = _team_status_bucket(selected_row)
-        status_label = ""
+    avg_uph = _safe_float(selected_row.get("Average UPH"))
+    target_uph = _safe_float(selected_row.get("Target UPH"))
+    status_bucket = _team_status_bucket(selected_row)
+    status_label = ""
 
-        with profile.stage("load_selected_employee_detail"):
-            notes = list(_cached_coaching_notes_for(employee_id) or [])
-            timeline_rows = list(get_employee_action_timeline(employee_id, tenant_id=tenant_id) or [])[:60]
-            exceptions = list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=employee_id, limit=25)
-        profile.set("selected_employee_id", employee_id)
-        profile.set("notes_rows", len(notes))
-        profile.set("timeline_rows", len(timeline_rows))
-        profile.set("exception_rows", len(exceptions or []))
-        profile.query(rows=len(notes) + len(timeline_rows) + len(exceptions or []), count=3)
+    with profile.stage("load_selected_employee_detail"):
+        notes = list(_cached_coaching_notes_for(employee_id) or [])
+        timeline_rows = list(get_employee_action_timeline(employee_id, tenant_id=tenant_id) or [])[:60]
+        exceptions = list_recent_operational_exceptions(tenant_id=tenant_id, employee_id=employee_id, limit=25)
+    profile.set("selected_employee_id", employee_id)
+    profile.set("notes_rows", len(notes))
+    profile.set("timeline_rows", len(timeline_rows))
+    profile.set("exception_rows", len(exceptions or []))
+    profile.query(rows=len(notes) + len(timeline_rows) + len(exceptions or []), count=3)
 
-        unified_timeline = _normalize_recent_activity_timeline(
-            notes=notes,
-            action_rows=timeline_rows,
-            exception_rows=exceptions,
-            limit=5,
-        )
-        current_vs_target_text = _current_vs_target_text(avg_uph, target_uph)
-        comparison_text = _department_comparison_context(
-            goal_status_rows=goal_status,
-            selected_row=selected_row,
-            department=department,
-        )
-        comparison_brief = format_comparison_context_brief(comparison_text)
+    current_vs_target_text = _current_vs_target_text(avg_uph, target_uph)
+    comparison_text = _department_comparison_context(
+        goal_status_rows=goal_status,
+        selected_row=selected_row,
+        department=department,
+    )
+    comparison_brief = format_comparison_context_brief(comparison_text)
 
-        with profile.stage("load_selected_employee_snapshot_history"):
-            employee_snapshot_history = list(
-                get_employee_snapshot_history(
-                    tenant_id=tenant_id,
-                    employee_id=employee_id,
-                    days=max(30, time_window_days),
-                )
-                or []
+    chart_rows = list(employee_chart_rows_by_id.get(employee_id) or [])
+    trend_metrics = dict(employee_trend_metrics_by_id.get(employee_id) or _compute_window_trend_metrics(chart_rows))
+    profile.set("selected_history_rows", len(chart_rows))
+    profile.query(rows=len(chart_rows), count=1)
+    change_pct = _safe_float(trend_metrics.get("change_pct"))
+    status_label = _trend_label_from_metrics(trend_metrics)
+    selected_window_trend_text = _format_window_trend_summary(trend_metrics, time_window_days)
+    what_changed_text = _what_changed_line(
+        selected_row,
+        change_pct=change_pct,
+        status_bucket=status_bucket,
+        time_window_days=time_window_days,
+        avg_uph=avg_uph,
+        target_uph=target_uph,
+    )
+
+    primary_statement = format_primary_statement(
+        status_bucket=status_bucket,
+        change_pct=change_pct,
+        avg_uph=avg_uph,
+        target_uph=target_uph,
+        time_window_days=time_window_days,
+    )
+    follow_up_subline = _follow_up_subline(selected_row)
+    secondary_context = format_secondary_context_subline(
+        comparison_brief=comparison_brief,
+        follow_up_text=follow_up_subline,
+    )
+    sustained_context = format_sustained_context_line(
+        status_bucket=status_bucket,
+        change_pct=change_pct,
+        time_window_days=time_window_days,
+    )
+    note_history = _normalize_notes_history(notes, preview_chars=180)
+    exception_history = _normalize_exception_history(exceptions, preview_chars=140)
+    follow_up_status_lines = _build_follow_up_status_lines(
+        row=selected_row,
+        notes=notes,
+        action_rows=timeline_rows,
+    )
+    if handoff_follow_up_status and all(
+        handoff_follow_up_status.lower() not in str(line or "").lower()
+        for line in follow_up_status_lines
+    ):
+        follow_up_status_lines.append(handoff_follow_up_status)
+    current_situation_lines = _build_current_situation_lines(
+        trend_metrics=trend_metrics,
+        days=time_window_days,
+        target_uph=target_uph,
+        chart_rows=chart_rows,
+    )
+    why_happening_lines = _build_why_happening_lines(
+        chart_rows=chart_rows,
+        target_uph=target_uph,
+        exception_history=exception_history,
+        note_history=note_history,
+    )
+
+    st.markdown("<div class='team-detail-view-anchor'></div>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown("<div class='team-section-anchor team-section-anchor--summary'></div>", unsafe_allow_html=True)
+        st.markdown(f"### {employee_name}")
+        st.caption(format_selected_employee_subheader(department, status_label))
+        if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
+            st.markdown(
+                f"<div class='team-focus-banner'>Opened from Today: {escape(handoff_reason)}</div>",
+                unsafe_allow_html=True,
             )
-        profile.set("selected_history_rows", len(employee_snapshot_history))
-        profile.query(rows=len(employee_snapshot_history), count=1)
+        if primary_statement:
+            st.markdown(f"<div class='team-summary-primary'>{escape(primary_statement)}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='team-summary-context'>Main state: {escape(selected_window_trend_text)}</div>",
+            unsafe_allow_html=True,
+        )
+        attention_line = (
+            "Needs attention this week"
+            if status_bucket == "needs attention"
+            else "Monitor this week"
+        )
+        st.markdown(
+            f"<div class='team-summary-context'>Attention level: {escape(attention_line)}</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("#### Follow-up status")
+        for line in follow_up_status_lines:
+            st.markdown(f"<div class='team-summary-context'>{escape(line)}</div>", unsafe_allow_html=True)
+        if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
+            st.markdown(
+                f"<div class='team-summary-context team-summary-context-highlight'>{escape(handoff_reason)}</div>",
+                unsafe_allow_html=True,
+            )
+        if secondary_context:
+            st.markdown(f"<div class='team-summary-secondary'>{escape(secondary_context)}</div>", unsafe_allow_html=True)
+        if what_changed_text:
+            st.markdown(f"<div class='team-summary-context'>{escape(what_changed_text)}</div>", unsafe_allow_html=True)
+        if sustained_context:
+            st.markdown(f"<div class='team-summary-context'>{escape(sustained_context)}</div>", unsafe_allow_html=True)
+        _row_confidence = str(selected_row.get("confidence_label") or "").strip()
+        _row_completeness = str(selected_row.get("data_completeness_status") or "").strip()
+        _summary_chips: list[str] = [format_chip_current_vs_target(current_vs_target_text)]
+        if _row_confidence:
+            _summary_chips.append(format_confidence_meta(_row_confidence))
+        elif _row_completeness:
+            _summary_chips.append(format_data_completeness_meta(_row_completeness))
+        st.caption(" | ".join(_summary_chips))
 
-        window_start: datetime | None = None
-        if time_window_days > 0:
-            window_start = datetime.utcnow() - timedelta(days=time_window_days)
+        # Bridge to Today: subtle control to pass employee context and navigate.
+        if st.button(format_bridge_button_label(), key=f"team_bridge_to_today_{selected_employee_id}"):
+            if selected_employee_id and str(selected_employee_id).strip():
+                st.session_state["cn_selected_emp"] = selected_employee_id
+                st.session_state[_TEAM_TO_TODAY_FOCUS_KEY] = {
+                    "employee_id": selected_employee_id,
+                    "signal_id": handoff_signal_id if selected_employee_id == handoff_employee_id else "",
+                    "signal_key": handoff_signal_key if selected_employee_id == handoff_employee_id else "",
+                }
+                st.session_state["goto_page"] = "today"
+                st.rerun()
+        st.caption(format_bridge_helper())
 
-        employee_history: list[dict] = []
-        for row in employee_snapshot_history:
-            row_dt = _parse_dt(str(row.get("snapshot_date") or "").strip())
-            if window_start is not None and row_dt is not None and row_dt < window_start:
-                continue
-            employee_history.append(row)
+        st.markdown("<div class='team-section-divider'></div>", unsafe_allow_html=True)
 
-        chart_rows: list[dict] = []
-        if employee_history:
-            for row in employee_history:
-                dt_value = _parse_dt(str(row.get("snapshot_date") or "").strip())
-                if dt_value is None:
-                    continue
-                uph = _safe_float(row.get("performance_uph"))
-                if uph is None:
-                    continue
-                chart_rows.append({"Date": dt_value.date().isoformat(), "UPH": uph})
-
-        trend_metrics = _compute_window_trend_metrics(chart_rows)
-        change_pct = _safe_float(trend_metrics.get("change_pct"))
-        status_label = str(trend_metrics.get("label") or "").strip()
-        selected_window_trend_text = _format_window_trend_summary(trend_metrics, time_window_days)
-        what_changed_text = _what_changed_line(
-            selected_row,
-            change_pct=change_pct,
-            status_bucket=status_bucket,
-            time_window_days=time_window_days,
-            avg_uph=avg_uph,
-            target_uph=target_uph,
-        )
-
-        primary_statement = format_primary_statement(
-            status_bucket=status_bucket,
-            change_pct=change_pct,
-            avg_uph=avg_uph,
-            target_uph=target_uph,
-            time_window_days=time_window_days,
-        )
-        follow_up_subline = _follow_up_subline(selected_row)
-        secondary_context = format_secondary_context_subline(
-            comparison_brief=comparison_brief,
-            follow_up_text=follow_up_subline,
-        )
-        sustained_context = format_sustained_context_line(
-            status_bucket=status_bucket,
-            change_pct=change_pct,
-            time_window_days=time_window_days,
-        )
-        note_history = _normalize_notes_history(notes, preview_chars=180)
-        exception_history = _normalize_exception_history(exceptions, preview_chars=140)
-        follow_up_status_lines = _build_follow_up_status_lines(
-            row=selected_row,
-            notes=notes,
-            action_rows=timeline_rows,
-        )
-        if handoff_follow_up_status and all(
-            handoff_follow_up_status.lower() not in str(line or "").lower()
-            for line in follow_up_status_lines
-        ):
-            follow_up_status_lines.append(handoff_follow_up_status)
-        current_situation_lines = _build_current_situation_lines(
-            trend_metrics=trend_metrics,
-            days=time_window_days,
-            target_uph=target_uph,
-            chart_rows=chart_rows,
-        )
-        why_happening_lines = _build_why_happening_lines(
-            chart_rows=chart_rows,
-            target_uph=target_uph,
-            exception_history=exception_history,
-            note_history=note_history,
-        )
-
-        with shell_right:
-            st.markdown("<div class='team-detail-view-anchor'></div>", unsafe_allow_html=True)
-            with st.container():
-                st.markdown("<div class='team-section-anchor team-section-anchor--summary'></div>", unsafe_allow_html=True)
-                st.markdown(f"### {employee_name}")
-                st.caption(format_selected_employee_subheader(department, status_label))
-                if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
-                    st.markdown(
-                        f"<div class='team-focus-banner'>Opened from Today: {escape(handoff_reason)}</div>",
-                        unsafe_allow_html=True,
-                    )
-                st.markdown(
-                    f"<div class='team-summary-context'>Main state: {escape(selected_window_trend_text)}</div>",
-                    unsafe_allow_html=True,
+    with st.container():
+        st.markdown("<div class='team-section-anchor team-section-anchor--situation'></div>", unsafe_allow_html=True)
+        st.markdown("#### Current situation")
+        for line in current_situation_lines:
+            is_handoff_match = bool(
+                has_today_handoff
+                and handoff_reason
+                and employee_id == handoff_employee_id
+                and (
+                    handoff_reason.lower() in str(line or "").lower()
+                    or str(line or "").lower() in handoff_reason.lower()
                 )
-                attention_line = (
-                    "Needs attention this week"
-                    if status_bucket == "needs attention"
-                    else "Monitor this week"
-                )
-                st.markdown(
-                    f"<div class='team-summary-context'>Attention level: {escape(attention_line)}</div>",
-                    unsafe_allow_html=True,
-                )
-                st.markdown("#### Follow-up status")
-                for line in follow_up_status_lines:
-                    st.markdown(f"<div class='team-summary-context'>{escape(line)}</div>", unsafe_allow_html=True)
-                if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
-                    st.markdown(
-                        f"<div class='team-summary-context team-summary-context-highlight'>{escape(handoff_reason)}</div>",
-                        unsafe_allow_html=True,
-                    )
-                if primary_statement:
-                    st.markdown(f"<div class='team-summary-primary'>{escape(primary_statement)}</div>", unsafe_allow_html=True)
-                if secondary_context:
-                    st.markdown(f"<div class='team-summary-secondary'>{escape(secondary_context)}</div>", unsafe_allow_html=True)
-                if what_changed_text:
-                    st.markdown(f"<div class='team-summary-context'>{escape(what_changed_text)}</div>", unsafe_allow_html=True)
-                if sustained_context:
-                    st.markdown(f"<div class='team-summary-context'>{escape(sustained_context)}</div>", unsafe_allow_html=True)
-                _row_confidence = str(selected_row.get("confidence_label") or "").strip()
-                _row_completeness = str(selected_row.get("data_completeness_status") or "").strip()
-                _summary_chips: list[str] = [format_chip_current_vs_target(current_vs_target_text)]
-                if _row_confidence:
-                    _summary_chips.append(format_confidence_meta(_row_confidence))
-                elif _row_completeness:
-                    _summary_chips.append(format_data_completeness_meta(_row_completeness))
-                st.caption(" | ".join(_summary_chips))
+            )
+            line_class = "team-summary-context team-summary-context-highlight" if is_handoff_match else "team-summary-context"
+            st.markdown(f"<div class='{line_class}'>{escape(line)}</div>", unsafe_allow_html=True)
 
-                # Bridge to Today: subtle control to pass employee context and navigate.
-                bridge_col_1, bridge_col_2 = st.columns([0.5, 3.0], gap="small")
-                with bridge_col_1:
-                    if st.button(format_bridge_button_label(), key=f"team_bridge_to_today_{selected_employee_id}"):
-                        if selected_employee_id and str(selected_employee_id).strip():
-                            st.session_state["cn_selected_emp"] = selected_employee_id
-                            st.session_state[_TEAM_TO_TODAY_FOCUS_KEY] = {
-                                "employee_id": selected_employee_id,
-                                "signal_id": handoff_signal_id if selected_employee_id == handoff_employee_id else "",
-                                "signal_key": handoff_signal_key if selected_employee_id == handoff_employee_id else "",
-                            }
-                            st.session_state["goto_page"] = "today"
-                            st.rerun()
-                with bridge_col_2:
-                    st.caption(format_bridge_helper())
+        if why_happening_lines:
+            st.markdown("#### What we're seeing")
+            for line in why_happening_lines:
+                st.markdown(f"<div class='team-summary-context'>{escape(line)}</div>", unsafe_allow_html=True)
 
-                st.markdown("<div class='team-section-divider'></div>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown("<div class='team-section-anchor team-section-anchor--trend'></div>", unsafe_allow_html=True)
+        st.markdown(f"#### {section_titles['trend']}")
+        st.markdown("<div class='team-section-intent'>recent direction</div>", unsafe_allow_html=True)
 
-            with st.container():
-                st.markdown("<div class='team-section-anchor team-section-anchor--situation'></div>", unsafe_allow_html=True)
-                st.markdown("#### Current situation")
-                for line in current_situation_lines:
-                    is_handoff_match = bool(
-                        has_today_handoff
-                        and handoff_reason
-                        and employee_id == handoff_employee_id
-                        and (
-                            handoff_reason.lower() in str(line or "").lower()
-                            or str(line or "").lower() in handoff_reason.lower()
-                        )
-                    )
-                    line_class = "team-summary-context team-summary-context-highlight" if is_handoff_match else "team-summary-context"
-                    st.markdown(f"<div class='{line_class}'>{escape(line)}</div>", unsafe_allow_html=True)
+    if chart_rows:
+        profile.set("chart_rows", len(chart_rows))
+        st.caption(format_trend_intro(time_window_days))
 
-                if why_happening_lines:
-                    st.markdown("#### What we're seeing")
-                    for line in why_happening_lines:
-                        st.markdown(f"<div class='team-summary-context'>{escape(line)}</div>", unsafe_allow_html=True)
+        # Single analytical chart for selected-employee trend in the selected window.
+        history_df = pd.DataFrame(chart_rows).drop_duplicates(subset=["Date"], keep="last").sort_values("Date")
+        if target_uph is not None and target_uph > 0:
+            history_df["Target"] = float(target_uph)
+            st.line_chart(history_df.set_index("Date")[["UPH", "Target"]], use_container_width=True)
+        else:
+            st.line_chart(history_df.set_index("Date")["UPH"], use_container_width=True)
 
-            with st.container():
-                st.markdown("<div class='team-section-anchor team-section-anchor--trend'></div>", unsafe_allow_html=True)
-                st.markdown(f"#### {section_titles['trend']}")
-                st.markdown("<div class='team-section-intent'>recent direction</div>", unsafe_allow_html=True)
+        if selected_window_trend_text:
+            st.caption(selected_window_trend_text)
+    else:
+        st.markdown(f"<div class='team-trend-primary'>{format_trend_no_history()}</div>", unsafe_allow_html=True)
+        st.caption(format_trend_intro(time_window_days))
 
-            if employee_history:
-                profile.set("chart_rows", len(chart_rows))
+    if note_history:
+        with st.container():
+            st.markdown("<div class='team-section-anchor team-section-anchor--notes'></div>", unsafe_allow_html=True)
+            st.markdown(f"#### {section_titles['notes']}")
+            st.markdown("<div class='team-section-intent'>follow-up history</div>", unsafe_allow_html=True)
+            # TODO(team-contract): Notes history section - prior notes for selected employee.
+            visible_count = 8
+            for index, note_row in enumerate(note_history[:visible_count], start=1):
+                _render_note_history_entry(note_row, index=index)
 
-                if chart_rows:
-                    st.caption(format_trend_intro(time_window_days))
-
-                    # Single analytical chart for selected-employee trend in the selected window.
-                    history_df = pd.DataFrame(chart_rows).drop_duplicates(subset=["Date"], keep="last").sort_values("Date")
-                    if target_uph is not None and target_uph > 0:
-                        history_df["Target"] = float(target_uph)
-                        st.line_chart(history_df.set_index("Date")[["UPH", "Target"]], use_container_width=True)
-                    else:
-                        st.line_chart(history_df.set_index("Date")["UPH"], use_container_width=True)
-
-                    if selected_window_trend_text:
-                        st.caption(selected_window_trend_text)
-                else:
-                    st.markdown(f"<div class='team-trend-primary'>{format_trend_no_points()}</div>", unsafe_allow_html=True)
-                    st.caption(format_trend_intro(time_window_days))
-            else:
-                st.markdown(f"<div class='team-trend-primary'>{format_trend_no_history()}</div>", unsafe_allow_html=True)
-                st.caption(format_trend_intro(time_window_days))
-
-            if note_history:
-                with st.container():
-                    st.markdown("<div class='team-section-anchor team-section-anchor--notes'></div>", unsafe_allow_html=True)
-                    st.markdown(f"#### {section_titles['notes']}")
-                    st.markdown("<div class='team-section-intent'>follow-up history</div>", unsafe_allow_html=True)
-                    # TODO(team-contract): Notes history section - prior notes for selected employee.
-                    visible_count = 8
-                    for index, note_row in enumerate(note_history[:visible_count], start=1):
+            remaining_count = len(note_history) - visible_count
+            if remaining_count > 0:
+                with st.expander(format_show_older_notes_label(remaining_count), expanded=False):
+                    for index, note_row in enumerate(note_history[visible_count:], start=visible_count + 1):
                         _render_note_history_entry(note_row, index=index)
 
-                    remaining_count = len(note_history) - visible_count
-                    if remaining_count > 0:
-                        with st.expander(format_show_older_notes_label(remaining_count), expanded=False):
-                            for index, note_row in enumerate(note_history[visible_count:], start=visible_count + 1):
-                                _render_note_history_entry(note_row, index=index)
+    with st.container():
+        st.markdown("<div class='team-section-anchor team-section-anchor--exceptions'></div>", unsafe_allow_html=True)
+        st.markdown(f"#### {section_titles['exceptions']}")
+        st.markdown("<div class='team-section-intent'>current context</div>", unsafe_allow_html=True)
+        if not exception_history:
+            st.caption(format_empty_state("no_exceptions"))
+        else:
+            st.caption(f"{len(exception_history)} recent exception item(s)")
+            with st.expander("Show exception details", expanded=False):
+                for index, exception_row in enumerate(exception_history, start=1):
+                    _render_exception_history_entry(exception_row, index=index)
 
-            with st.container():
-                st.markdown("<div class='team-section-anchor team-section-anchor--exceptions'></div>", unsafe_allow_html=True)
-                st.markdown(f"#### {section_titles['exceptions']}")
-                st.markdown("<div class='team-section-intent'>current context</div>", unsafe_allow_html=True)
-                if not exception_history:
-                    st.caption(format_empty_state("no_exceptions"))
-                else:
-                    st.caption(f"{len(exception_history)} recent exception item(s)")
-                    with st.expander("Show exception details", expanded=False):
-                        for index, exception_row in enumerate(exception_history, start=1):
-                            _render_exception_history_entry(exception_row, index=index)
+    if comparison_text:
+        with st.container():
+            st.markdown("<div class='team-section-anchor team-section-anchor--comparison'></div>", unsafe_allow_html=True)
+            st.markdown(f"#### {format_comparison_section_title()}")
+            comparison_primary, comparison_support = _split_primary_support_text(comparison_text)
+            if comparison_primary:
+                st.markdown(f"<div class='team-comparison-primary'>{escape(comparison_primary)}</div>", unsafe_allow_html=True)
+            if comparison_support:
+                st.markdown(f"<div class='team-comparison-support'>{escape(comparison_support)}</div>", unsafe_allow_html=True)
 
-            with st.expander("Recent activity (optional)", expanded=False):
-                if not unified_timeline:
-                    st.caption(format_empty_state("no_timeline"))
-                else:
-                    _today_date = datetime.utcnow().date()
-
-                    def _is_today_event(ev: dict) -> bool:
-                        ev_at = ev.get("event_at")
-                        return isinstance(ev_at, datetime) and ev_at.date() == _today_date
-
-                    def _render_timeline_event(ev: dict) -> None:
-                        when_iso = _timeline_when_text(ev.get("event_at"), fallback=str(ev.get("event_at_raw") or ""))
-                        display_when = _format_display_dt(when_iso)
-                        ev_type = str(ev.get("event_type") or "Update added")
-                        ev_desc = str(ev.get("description") or "")
-                        detail_html = f"<div class='team-timeline-detail'>{escape(ev_desc)}</div>" if ev_desc else ""
-                        st.markdown(
-                            "\n".join(
-                                [
-                                    "<div class='team-timeline-entry'>",
-                                    f"<div class='team-timeline-event'>{escape(ev_type)}</div>",
-                                    f"<div class='team-timeline-meta'>{escape(display_when)}</div>",
-                                    detail_html,
-                                    "</div>",
-                                ]
-                            ),
-                            unsafe_allow_html=True,
-                        )
-
-                    _today_events = [ev for ev in unified_timeline if _is_today_event(ev)]
-                    _earlier_events = [ev for ev in unified_timeline if not _is_today_event(ev)]
-
-                    if _today_events:
-                        st.markdown("<div class='team-timeline-group'>Today</div>", unsafe_allow_html=True)
-                        for ev in _today_events:
-                            _render_timeline_event(ev)
-
-                    if _earlier_events:
-                        if _today_events:
-                            st.markdown("<div class='team-timeline-group'>Earlier</div>", unsafe_allow_html=True)
-                        for ev in _earlier_events:
-                            _render_timeline_event(ev)
-
-            if comparison_text:
-                with st.container():
-                    st.markdown("<div class='team-section-anchor team-section-anchor--comparison'></div>", unsafe_allow_html=True)
-                    st.markdown(f"#### {format_comparison_section_title()}")
-                    comparison_primary, comparison_support = _split_primary_support_text(comparison_text)
-                    if comparison_primary:
-                        st.markdown(f"<div class='team-comparison-primary'>{escape(comparison_primary)}</div>", unsafe_allow_html=True)
-                    if comparison_support:
-                        st.markdown(f"<div class='team-comparison-support'>{escape(comparison_support)}</div>", unsafe_allow_html=True)
-
-        if has_today_handoff:
-            # One-time Team focus state from Today; consume after first render.
-            st.session_state.pop(_TODAY_TO_TEAM_HANDOFF_KEY, None)
+    if has_today_handoff:
+        # One-time Team focus state from Today; consume after first render.
+        st.session_state.pop(_TODAY_TO_TEAM_HANDOFF_KEY, None)
 
     # TODO(team-contract): Optional comparison context section - only if it remains lightweight and non-prescriptive.

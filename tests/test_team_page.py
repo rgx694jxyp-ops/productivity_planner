@@ -124,13 +124,26 @@ def _install_streamlit_stubs(
 
     def _selectbox(_label, options, key=None, **kwargs):
         options = list(options)
+        format_func = kwargs.get("format_func")
+        formatted_options = [
+            str(format_func(option)) if callable(format_func) else str(option)
+            for option in options
+        ]
+        radio_calls.append({"label": _label, "key": key, "options": options})
+        radio_calls[-1]["formatted_options"] = formatted_options
         if key and session_state.get(key) not in options:
             session_state[key] = options[0]
         return session_state.get(key)
 
     def _radio(label, options, key=None, **kwargs):
         options = list(options)
+        format_func = kwargs.get("format_func")
+        formatted_options = [
+            str(format_func(option)) if callable(format_func) else str(option)
+            for option in options
+        ]
         radio_calls.append({"label": label, "key": key, "options": options})
+        radio_calls[-1]["formatted_options"] = formatted_options
         if key and session_state.get(key) not in options:
             session_state[key] = options[0]
         return session_state.get(key)
@@ -168,6 +181,13 @@ def _roster_options_for(radio_calls):
     return []
 
 
+def _roster_formatted_labels_for(radio_calls):
+    for call in radio_calls:
+        if call.get("key") == "team_selected_emp_id":
+            return call.get("formatted_options") or []
+    return []
+
+
 def test_load_team_roster_snapshot_uses_non_rebuilding_snapshot_fetch(monkeypatch):
     session_state = _SessionState()
     monkeypatch.setattr(team.st, "session_state", session_state)
@@ -198,9 +218,6 @@ def test_page_team_initializes_default_filters_and_selects_first_employee_when_u
 
     team.page_team()
 
-    assert session_state["team_employee_search"] == ""
-    assert session_state["team_department_filter"] == "all"
-    assert session_state["team_status_filter"] == "all"
     assert session_state["team_time_window_days"] == 14
     assert session_state["team_selected_emp_id"] == "E1"
     assert _roster_options_for(radio_calls) == ["E1", "E2", "E3"]
@@ -222,32 +239,46 @@ def test_page_team_keeps_existing_selection_when_valid(monkeypatch):
     assert session_state["team_selected_emp_id"] == "E2"
 
 
-def test_page_team_roster_filters_reduce_visible_options(monkeypatch):
+def test_page_team_selector_shows_all_employees_and_includes_trend_label(monkeypatch):
     session_state = _SessionState(
         {
             "tenant_id": "tenant-1",
             "user_email": "user@example.com",
-            "team_employee_search": "sam",
-            "team_department_filter": "Shipping",
-            "team_status_filter": "improved recently",
+            "team_selected_emp_id": "E3",
             "team_time_window_days": 30,
         }
     )
     radio_calls, _captions, _infos, _markdowns = _install_streamlit_stubs(monkeypatch, session_state)
-    _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows())
+
+    def _history(tenant_id="", employee_id="", days=30):
+        if str(employee_id) == "E3":
+            return [
+                {"snapshot_date": "2026-04-17T00:00:00", "performance_uph": 90},
+                {"snapshot_date": "2026-04-18T00:00:00", "performance_uph": 95},
+                {"snapshot_date": "2026-04-19T00:00:00", "performance_uph": 100},
+            ]
+        return [
+            {"snapshot_date": "2026-04-17T00:00:00", "performance_uph": 100},
+            {"snapshot_date": "2026-04-18T00:00:00", "performance_uph": 100},
+            {"snapshot_date": "2026-04-19T00:00:00", "performance_uph": 100},
+        ]
+
+    _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows(), history=_history)
 
     team.page_team()
 
-    assert _roster_options_for(radio_calls) == ["E3"]
+    assert _roster_options_for(radio_calls) == ["E1", "E2", "E3"]
+    labels = _roster_formatted_labels_for(radio_calls)
+    assert any(label.startswith("Sam") and "Improving" in label for label in labels)
     assert session_state["team_selected_emp_id"] == "E3"
 
 
-def test_page_team_empty_filter_result_falls_back_to_full_roster(monkeypatch):
+def test_page_team_invalid_selected_employee_falls_back_to_first_option(monkeypatch):
     session_state = _SessionState(
         {
             "tenant_id": "tenant-1",
             "user_email": "user@example.com",
-            "team_employee_search": "missing-name",
+            "team_selected_emp_id": "E999",
         }
     )
     radio_calls, captions, _infos, _markdowns = _install_streamlit_stubs(monkeypatch, session_state)
@@ -256,7 +287,8 @@ def test_page_team_empty_filter_result_falls_back_to_full_roster(monkeypatch):
     team.page_team()
 
     assert _roster_options_for(radio_calls) == ["E1", "E2", "E3"]
-    assert any("No employees match these filters" in caption for caption in captions)
+    assert session_state["team_selected_emp_id"] == "E1"
+    assert not any("No employees match these filters" in caption for caption in captions)
 
 
 def test_page_team_scopes_selected_employee_detail_loads_and_notes_use_employee_id(monkeypatch):
@@ -302,7 +334,63 @@ def test_page_team_scopes_selected_employee_detail_loads_and_notes_use_employee_
     assert calls["notes"] == ["E2"]
     assert calls["timeline"] == [("E2", "tenant-1")]
     assert calls["exceptions"] == [("tenant-1", "E2", 25)]
-    assert calls["history"] == [("tenant-1", "E2", 30)]
+    assert sorted(calls["history"]) == sorted(
+        [
+            ("tenant-1", "E1", 30),
+            ("tenant-1", "E2", 30),
+            ("tenant-1", "E3", 30),
+        ]
+    )
+
+
+def test_page_team_roster_trend_matches_detail_trend_for_same_employee(monkeypatch):
+    session_state = _SessionState(
+        {
+            "tenant_id": "tenant-1",
+            "user_email": "user@example.com",
+            "team_selected_emp_id": "E2",
+        }
+    )
+    radio_calls, captions, _infos, _markdowns = _install_streamlit_stubs(monkeypatch, session_state)
+
+    history_by_employee = {
+        "E1": [
+            {"snapshot_date": "2026-04-17T00:00:00", "performance_uph": 99},
+            {"snapshot_date": "2026-04-18T00:00:00", "performance_uph": 99},
+            {"snapshot_date": "2026-04-19T00:00:00", "performance_uph": 99},
+        ],
+        "E2": [
+            {"snapshot_date": "2026-04-17T00:00:00", "performance_uph": 110},
+            {"snapshot_date": "2026-04-18T00:00:00", "performance_uph": 100},
+            {"snapshot_date": "2026-04-19T00:00:00", "performance_uph": 90},
+        ],
+        "E3": [
+            {"snapshot_date": "2026-04-17T00:00:00", "performance_uph": 90},
+            {"snapshot_date": "2026-04-18T00:00:00", "performance_uph": 95},
+            {"snapshot_date": "2026-04-19T00:00:00", "performance_uph": 100},
+        ],
+    }
+
+    def _history(tenant_id="", employee_id="", days=30):
+        return list(history_by_employee.get(str(employee_id), []))
+
+    _install_team_page_dependencies(
+        monkeypatch,
+        roster_rows=_goal_status_rows(),
+        history=_history,
+    )
+
+    team.page_team()
+
+    roster_labels = _roster_formatted_labels_for(radio_calls)
+    e2_roster_label = ""
+    for label in roster_labels:
+        if label.startswith("Jamie"):
+            e2_roster_label = label
+            break
+
+    assert "Declining" in e2_roster_label
+    assert any("Declining" in caption for caption in captions)
 
 
 def test_page_team_normal_render_uses_snapshot_without_recompute(monkeypatch):
@@ -330,67 +418,6 @@ def test_page_team_normal_render_uses_snapshot_without_recompute(monkeypatch):
     assert snapshot_calls[0]["tenant_id"] == "tenant-1"
     assert snapshot_calls[0]["days"] == 30
     assert snapshot_calls[0]["rebuild_if_missing"] is False
-
-
-def test_normalize_recent_activity_timeline_filters_noise_and_dedupes_by_type_and_timestamp():
-    notes = [
-        {"created_at": "2026-04-19T10:00:00", "note": "Observed change in pace."},
-        {"created_at": "2026-04-19T10:00:00", "note": "Observed change in pace."},
-        {"created_at": "2026-04-19T09:00:00", "note": "reason=Today queue completion follow_up_required=yes"},
-    ]
-    action_rows = [
-        {"action_id": "A2", "event_at": "2026-04-20T11:00:00", "event_type": "follow_up_logged", "next_follow_up_at": "2026-04-22"},
-        {"action_id": "A3", "event_at": "2026-04-20T12:00:00", "event_type": "resolved", "status": "completed"},
-        {"action_id": "A4", "event_at": "2026-04-20T10:00:00", "event_type": "some_internal_code", "notes": "debug payload"},
-    ]
-    exception_rows = [
-        {"id": "X1", "created_at": "2026-04-18T08:30:00", "category": "scanner_issue", "summary": "bad"},
-        {"id": "X2", "created_at": "2026-04-20T13:00:00", "category": "scanner_issue", "summary": ""},
-    ]
-
-    timeline = team._normalize_recent_activity_timeline(
-        notes=notes,
-        action_rows=action_rows,
-        exception_rows=exception_rows,
-        limit=10,
-    )
-
-    assert len(timeline) == 4
-    assert [item["event_type"] for item in timeline] == [
-        "Performance concern identified",
-        "Reviewed and logged",
-        "Follow-up scheduled",
-        "Note added",
-    ]
-    assert all(item["event_type"] in {"Performance concern identified", "Note added", "Follow-up scheduled", "Reviewed and logged"} for item in timeline)
-    assert len({(item["event_type"], item["event_at"].isoformat()) for item in timeline}) == len(timeline)
-
-
-def test_normalize_recent_activity_timeline_limits_to_most_recent_five_events():
-    notes = [
-        {"created_at": "2026-04-20T08:00:00", "note": "Note one."},
-        {"created_at": "2026-04-20T07:00:00", "note": "Note two."},
-    ]
-    action_rows = [
-        {"action_id": "A1", "event_at": "2026-04-20T12:00:00", "event_type": "resolved", "status": "completed"},
-        {"action_id": "A2", "event_at": "2026-04-20T11:00:00", "event_type": "follow_up_logged", "next_follow_up_at": "2026-04-22"},
-        {"action_id": "A3", "event_at": "2026-04-20T10:00:00", "event_type": "resolved", "status": "completed"},
-        {"action_id": "A4", "event_at": "2026-04-20T09:00:00", "event_type": "follow_up_logged", "next_follow_up_at": "2026-04-23"},
-    ]
-    exception_rows = [
-        {"id": "X1", "created_at": "2026-04-20T13:00:00", "status": "open", "summary": "Scanner lag"},
-    ]
-
-    timeline = team._normalize_recent_activity_timeline(
-        notes=notes,
-        action_rows=action_rows,
-        exception_rows=exception_rows,
-        limit=5,
-    )
-
-    assert len(timeline) == 5
-    assert timeline[0]["event_at"].isoformat().startswith("2026-04-20T13:00:00")
-    assert timeline[-1]["event_at"].isoformat().startswith("2026-04-20T09:00:00")
 
 
 def test_compute_window_trend_metrics_uses_slope_for_label_when_directions_match():
