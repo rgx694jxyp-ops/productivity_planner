@@ -1141,6 +1141,19 @@ def _apply_today_styles() -> None:
             font-style: italic;
             line-height: 1.35;
         }
+        .today-action-instruction {
+            font-size: 0.84rem;
+            color: #7a90a8;
+            margin-top: 0.25rem;
+            margin-bottom: 0.75rem;
+        }
+        .today-card-handle-cue {
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #1e4f82;
+            margin-bottom: 4px;
+            letter-spacing: 0.02em;
+        }
         .today-priority-card-gap {
             height: 6px;
         }
@@ -3730,6 +3743,7 @@ def _render_attention_card(
     compact: bool = False,
     emphasize: bool = False,
     focused: bool = False,
+    is_lead: bool = False,
     show_action: bool = True,
     signal_status_map: dict[str, dict[str, str]] | None = None,
 ) -> None:
@@ -3800,11 +3814,14 @@ def _render_attention_card(
                 )
 
         if signal_status_map is not None and not compact:
-            _render_guided_completion_controls(
-                card=card,
-                key_prefix=f"{key_prefix}_complete",
-                status_map=signal_status_map,
-            )
+            if is_lead:
+                st.markdown('<div class="today-card-handle-cue">↓ Start here</div>', unsafe_allow_html=True)
+            with st.expander("Handle this", expanded=False):
+                _render_guided_completion_controls(
+                    card=card,
+                    key_prefix=f"{key_prefix}_complete",
+                    status_map=signal_status_map,
+                )
 
     if emphasize:
         pass
@@ -3952,6 +3969,7 @@ def _render_unified_attention_queue(
         st.markdown('<div class="today-action-frame-heading">Handle these first</div>', unsafe_allow_html=True)
         st.markdown('<div class="today-action-frame-sub">These are the strongest signals from today\'s available data.</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="today-action-instruction">Open a card, add a note, and mark it complete when handled.</div>', unsafe_allow_html=True)
         st.session_state.pop(_TODAY_FOCUS_NEXT_CARD_KEY, None)
 
         # Honor cn_selected_emp when navigating from Team: focus the matching employee's card on arrival.
@@ -3973,6 +3991,7 @@ def _render_unified_attention_queue(
                     key_prefix=f"today_attention_primary_{idx}",
                     emphasize=False,
                     focused=is_focused,
+                    is_lead=(idx == 0),
                     signal_status_map=signal_status_map,
                 )
             # Mark handoff as rendered after the first matching card is rendered.
