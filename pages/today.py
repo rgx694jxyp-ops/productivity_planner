@@ -115,6 +115,7 @@ _TODAY_AUTO_REFRESH_MIN_SECONDS = 60
 _TODAY_PENDING_COMPLETION_IDS_KEY = "_today_pending_completion_ids"
 _TODAY_PENDING_COMPLETION_META_KEY = "_today_pending_completion_meta"
 _TODAY_PENDING_COMPLETION_SIGNAL_KEYS_KEY = "_today_pending_completion_signal_keys"
+_TODAY_DEFERRED_WIDGET_RESET_SIGNAL_IDS_KEY = "_today_deferred_widget_reset_signal_ids"
 
 # Cold-load run-id & milestone instrumentation keys
 _TODAY_RUN_ID_DATE_KEY_PREFIX = "_today_run_id_for_date_"
@@ -3212,6 +3213,46 @@ def _set_pending_completion_signal_keys(values: set[str]) -> None:
     )
 
 
+def _defer_today_completion_widget_reset(*, card: TodayQueueCardViewModel) -> None:
+    signal_id = _today_card_signal_id(card)
+    if not signal_id:
+        return
+
+    pending_signal_ids = {
+        str(value or "").strip()
+        for value in list(st.session_state.get(_TODAY_DEFERRED_WIDGET_RESET_SIGNAL_IDS_KEY) or [])
+        if str(value or "").strip()
+    }
+    pending_signal_ids.add(signal_id)
+    st.session_state[_TODAY_DEFERRED_WIDGET_RESET_SIGNAL_IDS_KEY] = sorted(pending_signal_ids)
+
+
+def _apply_deferred_today_widget_resets() -> int:
+    signal_ids = [
+        str(value or "").strip()
+        for value in list(st.session_state.get(_TODAY_DEFERRED_WIDGET_RESET_SIGNAL_IDS_KEY) or [])
+        if str(value or "").strip()
+    ]
+    if not signal_ids:
+        return 0
+
+    removed = 0
+    for signal_id in signal_ids:
+        token = _today_signal_scope_token(signal_id)
+        widget_prefix = f"today_complete_{token}_"
+        more_actions_key = f"today_more_actions_open_{token}"
+        more_actions_data_key = f"today_more_actions_data_{token}"
+
+        for key in list(st.session_state.keys()):
+            key_text = str(key or "")
+            if key_text.startswith(widget_prefix) or key_text == more_actions_key or key_text == more_actions_data_key:
+                st.session_state.pop(key, None)
+                removed += 1
+
+    st.session_state.pop(_TODAY_DEFERRED_WIDGET_RESET_SIGNAL_IDS_KEY, None)
+    return int(removed)
+
+
 def _optimistically_complete_today_card(
     *,
     card: TodayQueueCardViewModel,
@@ -3229,12 +3270,7 @@ def _optimistically_complete_today_card(
     st.session_state[_TODAY_COMPLETED_ITEMS_SESSION_KEY] = completed_items
     st.session_state[_TODAY_LAST_COMPLETED_LABEL_KEY] = str(card.line_1 or card.employee_id or "Item")
     st.session_state[_TODAY_FOCUS_NEXT_CARD_KEY] = True
-    st.session_state[note_key] = ""
-    st.session_state[follow_up_key] = "Select one"
-    st.session_state[add_exception_key] = False
-    st.session_state[exception_note_key] = ""
-    st.session_state[more_actions_open_key] = False
-    st.session_state.pop(_today_more_actions_data_cache_key(card), None)
+    _defer_today_completion_widget_reset(card=card)
 
     # Keep queue projection in memory aligned so next visible card promotes without waiting for a reload.
     removed_queue_items: list[dict[str, Any]] = []
@@ -4632,6 +4668,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
         ) as profile:
             with profile.stage("init_ui"):
                 _apply_today_styles()
+                profile.set("deferred_widget_resets", int(_apply_deferred_today_widget_resets()))
                 _drain_today_async_completion_results()
 
             with profile.stage("auto_refresh"):

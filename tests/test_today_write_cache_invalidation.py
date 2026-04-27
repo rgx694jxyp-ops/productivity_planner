@@ -115,6 +115,59 @@ def test_duplicate_click_same_signal_is_prevented(monkeypatch):
     assert len(list(today_module.st.session_state.get("_today_pending_completion_ids") or [])) == 1
 
 
+def test_optimistic_completion_defers_widget_reset_until_next_run(monkeypatch):
+    card = _card_for("sig-deferred-reset", "E7")
+    note_key = today_module._today_completion_widget_key(signal_id="sig-deferred-reset", field="note")
+    follow_up_key = today_module._today_completion_widget_key(signal_id="sig-deferred-reset", field="follow_up_needed")
+    add_exception_key = today_module._today_completion_widget_key(signal_id="sig-deferred-reset", field="add_exception")
+    exception_note_key = today_module._today_completion_widget_key(signal_id="sig-deferred-reset", field="exception_note")
+    more_actions_open_key = today_module._today_more_actions_open_key(card)
+    cached_more_actions_key = today_module._today_more_actions_data_cache_key(card)
+    card_session_key = today_module._today_card_session_key(card)
+
+    monkeypatch.setattr(
+        "pages.today.st.session_state",
+        {
+            "tenant_id": "tenant-a",
+            "user_email": "lead@example.com",
+            "_today_completed_items": [],
+            note_key: "note stays until next run",
+            follow_up_key: "Yes",
+            add_exception_key: True,
+            exception_note_key: "exception context",
+            more_actions_open_key: True,
+            cached_more_actions_key: {"employee_id": "E7"},
+        },
+    )
+
+    today_module._optimistically_complete_today_card(
+        card=card,
+        note_key=note_key,
+        follow_up_key=follow_up_key,
+        add_exception_key=add_exception_key,
+        exception_note_key=exception_note_key,
+        more_actions_open_key=more_actions_open_key,
+    )
+
+    assert str(today_module.st.session_state.get(note_key) or "") == "note stays until next run"
+    assert str(today_module.st.session_state.get(follow_up_key) or "") == "Yes"
+    assert bool(today_module.st.session_state.get(add_exception_key)) is True
+    assert str(today_module.st.session_state.get(exception_note_key) or "") == "exception context"
+    assert bool(today_module.st.session_state.get(more_actions_open_key)) is True
+    assert card_session_key in list(today_module.st.session_state.get("_today_completed_items") or [])
+
+    removed = today_module._apply_deferred_today_widget_resets()
+
+    assert removed >= 5
+    assert note_key not in today_module.st.session_state
+    assert follow_up_key not in today_module.st.session_state
+    assert add_exception_key not in today_module.st.session_state
+    assert exception_note_key not in today_module.st.session_state
+    assert more_actions_open_key not in today_module.st.session_state
+    assert cached_more_actions_key not in today_module.st.session_state
+    assert today_module._TODAY_DEFERRED_WIDGET_RESET_SIGNAL_IDS_KEY not in today_module.st.session_state
+
+
 def test_two_rapid_completions_enqueue_independently(monkeypatch):
     async_calls = {"count": 0}
 
