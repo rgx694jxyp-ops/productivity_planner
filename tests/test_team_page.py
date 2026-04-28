@@ -465,51 +465,94 @@ def test_window_trend_summary_uses_percent_only_when_label_suppressed():
     assert summary == "-3.5% over the last 14 days"
 
 
-def test_follow_up_status_reports_schedule_last_review_and_last_check_result():
-    lines = team._build_follow_up_status_lines(
-        row={"follow_up_due_at": "2026-05-04T09:00:00"},
-        notes=[
-            {"created_at": "2026-04-27T09:00:00", "note": "Older note text."},
-        ],
-        action_rows=[
-            {
-                "event_at": "2026-04-27T10:00:00",
-                "event_type": "follow_through_logged",
-                "outcome": "Performance still below target",
+def test_get_follow_up_status_overdue_overrides_other_states():
+    status = team.get_follow_up_status(
+        {
+            "row": {
+                "follow_up_due_at": "2026-04-01T09:00:00",
+                "follow_up_due": "pending",
+                "next_follow_up_at": "2026-05-04T09:00:00",
             },
-        ],
+            "notes": [],
+            "action_rows": [],
+        }
     )
 
-    assert lines[0].startswith("Follow-up scheduled for")
-    assert any(line == "Last reviewed Apr 27" for line in lines)
-    assert any(line == "Last check result: Performance still below target" for line in lines)
+    assert status["primary"] == "Follow-up overdue"
 
 
-def test_follow_up_status_uses_not_recorded_when_no_recent_review():
-    lines = team._build_follow_up_status_lines(
-        row={"follow_up_due": ""},
-        notes=[],
-        action_rows=[],
+def test_get_follow_up_status_due_today_overrides_scheduled():
+    status = team.get_follow_up_status(
+        {
+            "row": {
+                "follow_up_due_at": datetime.utcnow().date().isoformat(),
+                "next_follow_up_at": "2026-05-04T09:00:00",
+            },
+            "notes": [],
+            "action_rows": [],
+        }
     )
 
-    assert lines[0] == "No follow-up scheduled"
-    assert lines[1] == "Last reviewed not recorded"
+    assert status["primary"] == "Follow-up due today"
 
 
-def test_follow_up_status_reports_due_today_and_overdue_states():
-    due_today_lines = team._build_follow_up_status_lines(
-        row={"follow_up_due_at": datetime.utcnow().date().isoformat()},
-        notes=[],
-        action_rows=[],
-    )
-    overdue_lines = team._build_follow_up_status_lines(
-        row={"follow_up_due_at": "2026-04-01T09:00:00"},
-        notes=[],
-        action_rows=[],
+def test_get_follow_up_status_scheduled_displays_formatted_date():
+    status = team.get_follow_up_status(
+        {
+            "row": {"follow_up_due_at": "2026-05-04T09:00:00"},
+            "notes": [],
+            "action_rows": [],
+        }
     )
 
-    assert due_today_lines[0] == "Follow-up due today"
-    assert overdue_lines[0] == "Follow-up overdue"
+    assert status["primary"] == "Follow-up scheduled for May 4 at 9:00 AM"
+
+
+def test_get_follow_up_status_no_follow_up_case():
+    status = team.get_follow_up_status(
+        {
+            "row": {"follow_up_due": ""},
+            "notes": [],
+            "action_rows": [],
+        }
+    )
+
+    assert status["primary"] == "No follow-up scheduled"
+    assert status["secondary"] is None
+
+
+def test_get_follow_up_status_only_one_secondary_line_appears():
+    status = team.get_follow_up_status(
+        {
+            "row": {"last_follow_up_at": "2026-04-01T09:00:00"},
+            "notes": [{"created_at": "2026-04-27T09:00:00", "note": "Reviewed"}],
+            "action_rows": [{"event_at": "2026-04-27T10:00:00", "notes": "Another entry"}],
+        }
+    )
+
+    assert status["secondary"] in {"Reviewed recently", "Last checked Apr 27"}
+    assert isinstance(status["secondary"], str)
+    assert "|" not in str(status["secondary"])
+    assert " and " not in str(status["secondary"]).lower()
+
+
+def test_get_follow_up_status_has_no_duplicate_or_conflicting_text():
+    status = team.get_follow_up_status(
+        {
+            "row": {"follow_up_due_at": "2026-05-04T09:00:00", "last_follow_up_at": "2026-05-04T09:00:00"},
+            "notes": [],
+            "action_rows": [],
+        }
+    )
+
+    primary = str(status.get("primary") or "")
+    secondary = str(status.get("secondary") or "")
+    assert primary.startswith("Follow-up scheduled for")
+    assert "Follow-up overdue" not in secondary
+    assert "Follow-up due today" not in secondary
+    # no more than two lines total by contract (primary + optional single secondary)
+    assert isinstance(status.get("primary"), str)
+    assert status.get("secondary") is None or isinstance(status.get("secondary"), str)
 
 
 def test_team_handoff_auto_selects_employee_and_shows_banner_once(monkeypatch):
@@ -532,14 +575,14 @@ def test_team_handoff_auto_selects_employee_and_shows_banner_once(monkeypatch):
     team.page_team()
 
     assert session_state["team_selected_emp_id"] == "E2"
-    assert any("Opened from Today:" in line for line in markdowns)
+    assert any("From Today:" in line for line in markdowns)
     assert "_today_to_team_handoff" not in session_state
 
     markdowns_second: list[str] = []
     _install_streamlit_stubs(monkeypatch, session_state, markdowns=markdowns_second)
     _install_team_page_dependencies(monkeypatch, roster_rows=_goal_status_rows())
     team.page_team()
-    assert not any("Opened from Today:" in line for line in markdowns_second)
+    assert not any("From Today:" in line for line in markdowns_second)
 
 
 def test_team_return_button_sets_today_focus_payload(monkeypatch):
@@ -562,3 +605,69 @@ def test_team_return_button_sets_today_focus_payload(monkeypatch):
     assert session_state["goto_page"] == "today"
     assert session_state["cn_selected_emp"] == "E2"
     assert session_state["_team_to_today_focus"]["employee_id"] == "E2"
+
+
+def test_get_trend_status_declining_pairs_severity_by_target_position():
+    below_target = team.get_trend_status(
+        {
+            "trend_metrics": {"label": "Declining", "slope_direction": "negative"},
+            "avg_uph": 82.0,
+            "target_uph": 100.0,
+        }
+    )
+    near_or_above_target = team.get_trend_status(
+        {
+            "trend_metrics": {"label": "Declining", "slope_direction": "negative"},
+            "avg_uph": 100.0,
+            "target_uph": 100.0,
+        }
+    )
+
+    assert below_target["label"] == "Declining"
+    assert below_target["direction"] == "negative"
+    assert below_target["severity"] == "Needs attention this week"
+    assert near_or_above_target["label"] == "Declining"
+    assert near_or_above_target["severity"] == "Monitor"
+
+
+def test_get_trend_status_improving_never_maps_to_needs_attention():
+    below_target = team.get_trend_status(
+        {
+            "trend_metrics": {"label": "Improving", "slope_direction": "positive"},
+            "avg_uph": 92.0,
+            "target_uph": 100.0,
+        }
+    )
+    above_target = team.get_trend_status(
+        {
+            "trend_metrics": {"label": "Improving", "slope_direction": "positive"},
+            "avg_uph": 108.0,
+            "target_uph": 100.0,
+        }
+    )
+
+    assert below_target["severity"] == "Monitor"
+    assert above_target["severity"] == "No immediate action"
+    assert below_target["severity"] != "Needs attention this week"
+    assert above_target["severity"] != "Needs attention this week"
+
+
+def test_get_trend_status_label_and_severity_mapping_never_mismatch():
+    scenarios = [
+        ({"label": "Declining", "slope_direction": "negative"}, 84.0, 100.0, "Needs attention this week"),
+        ({"label": "Declining", "slope_direction": "negative"}, 100.0, 100.0, "Monitor"),
+        ({"label": "Holding steady", "slope_direction": "flat"}, 96.0, 100.0, "Monitor"),
+        ({"label": "Holding steady", "slope_direction": "flat"}, 101.0, 100.0, "No immediate action"),
+        ({"label": "Improving", "slope_direction": "positive"}, 95.0, 100.0, "Monitor"),
+        ({"label": "Improving", "slope_direction": "positive"}, 106.0, 100.0, "No immediate action"),
+    ]
+
+    for trend_metrics, avg_uph, target_uph, expected_severity in scenarios:
+        trend_status = team.get_trend_status(
+            {
+                "trend_metrics": trend_metrics,
+                "avg_uph": avg_uph,
+                "target_uph": target_uph,
+            }
+        )
+        assert trend_status["severity"] == expected_severity

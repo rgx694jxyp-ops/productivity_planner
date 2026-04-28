@@ -76,6 +76,7 @@ class TodayQueueRenderPlan:
     secondary_caption: str
     secondary_expanded: bool
     suppressed_debug_rows: list[dict[str, str]]
+    auto_resolved_count: int = 0
 
 
 def compute_data_age_days(*, as_of_date: str, today_value: date) -> int:
@@ -307,6 +308,7 @@ def build_today_queue_render_plan(
         secondary_caption=("Follow-through and watchlist" if decision_policy is not None else "Other early signals") if secondary_cards_to_render else "",
         secondary_expanded=bool(show_secondary_open),
         suppressed_debug_rows=suppressed_debug_rows,
+        auto_resolved_count=int(queue_vm.auto_resolved_count or 0),
     )
 
 

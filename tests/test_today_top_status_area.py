@@ -6,8 +6,8 @@ from services.today_snapshot_signal_service import SignalMode
 
 
 def test_top_status_area_renders_compact_demo_and_early_signal_context(monkeypatch):
-    markdown_calls: list[str] = []
-    monkeypatch.setattr("pages.today.st.markdown", lambda text, **kwargs: markdown_calls.append(str(text)))
+    caption_calls: list[str] = []
+    monkeypatch.setattr("pages.today.st.caption", lambda text, **kwargs: caption_calls.append(str(text)))
 
     meaning = TodaySurfaceMeaning(
         state_flags={"stale_days": 2},
@@ -21,12 +21,10 @@ def test_top_status_area_renders_compact_demo_and_early_signal_context(monkeypat
 
     _render_top_status_area(meaning=meaning)
 
-    rendered = "\n".join(markdown_calls)
-    assert "Today status" in rendered
-    assert "Demo mode" in rendered
-    assert "Data 2 days old" in rendered
+    rendered = "\n".join(caption_calls)
+    assert "Updated 2 days ago" in rendered
     assert "Early signal mode" in rendered
-    assert "limited history, directional evidence only" in rendered
+    assert "Demo mode" in rendered
     assert "sample/demo.csv" in rendered
 
 
@@ -61,7 +59,7 @@ def test_queue_orientation_emphasizes_attention_now_and_keeps_total_as_secondary
     )
 
     rendered = "\n".join(markdown_calls)
-    assert "A few signals need attention now" in rendered
+    assert "A few signals surfaced now" in rendered
     assert "1 declining trend" in rendered
     assert "1 repeat issue" in rendered
     assert "1 with limited data confidence" in rendered

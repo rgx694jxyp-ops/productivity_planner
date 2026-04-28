@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pages.today as today_module
 
@@ -47,7 +47,7 @@ def test_signal_status_write_invalidates_today_caches(monkeypatch):
     log_events: list[dict] = []
 
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
-    monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("pages.today.st.button", lambda label, **_kwargs: str(label) == "Mark as complete")
     monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Completed review details")
     monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No follow-up needed")
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
@@ -72,7 +72,7 @@ def test_signal_status_write_invalidates_today_caches(monkeypatch):
 
 def test_mark_complete_captures_note_and_follow_up_in_pending_meta(monkeypatch):
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
-    monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("pages.today.st.button", lambda label, **_kwargs: str(label) == "Mark as complete")
     monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Checked root cause and logged update")
     monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Follow up tomorrow")
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
@@ -137,7 +137,6 @@ def test_start_completion_write_calls_persistence_once(monkeypatch):
 def test_successful_drain_clears_pending_and_sets_marked_complete_feedback(monkeypatch):
     card = _card_for("sig-drain-success", "E6")
     card_session_key = today_module._today_card_session_key(card)
-    flashed: list[str] = []
 
     monkeypatch.setattr(
         "pages.today.st.session_state",
@@ -159,7 +158,6 @@ def test_successful_drain_clears_pending_and_sets_marked_complete_feedback(monke
             "_today_completed_items": [card_session_key],
         },
     )
-    monkeypatch.setattr("pages.today.set_flash_message", lambda message: flashed.append(str(message)))
     monkeypatch.setattr("pages.today._narrow_invalidate_today_completion_caches", lambda **_kwargs: None)
     monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
 
@@ -171,7 +169,89 @@ def test_successful_drain_clears_pending_and_sets_marked_complete_feedback(monke
 
     assert list(today_module.st.session_state.get("_today_pending_completion_ids") or []) == []
     assert list(today_module.st.session_state.get("_today_pending_completion_signal_keys") or []) == []
-    assert flashed == ["Marked complete."]
+    assert str(today_module.st.session_state.get("_today_completion_feedback_message") or "") == "Marked complete. Next item moved up."
+
+
+def test_successful_drain_sets_follow_up_scheduled_feedback(monkeypatch):
+    card = _card_for("sig-drain-follow-up", "E16")
+    card_session_key = today_module._today_card_session_key(card)
+
+    monkeypatch.setattr(
+        "pages.today.st.session_state",
+        {
+            "tenant_id": "tenant-a",
+            "user_email": "lead@example.com",
+            "_today_pending_completion_ids": ["c-follow-up"],
+            "_today_pending_completion_signal_keys": ["sig-drain-follow-up"],
+            "_today_pending_completion_meta": {
+                "c-follow-up": {
+                    "signal_id": "sig-drain-follow-up",
+                    "clicked_at": float(1.0),
+                    "queue_update_ms": 1,
+                    "click_to_ui_update_ms": 1,
+                    "card_session_key": card_session_key,
+                    "card": today_module.dataclasses.asdict(card),
+                    "follow_up_choice": "Follow up tomorrow",
+                }
+            },
+            "_today_completed_items": [card_session_key],
+        },
+    )
+    monkeypatch.setattr("pages.today._narrow_invalidate_today_completion_caches", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+
+    with today_module._TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS.clear()
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS["c-follow-up"] = {
+            "status": "success",
+            "backend_write_ms": 2,
+            "error": "",
+        }
+
+    today_module._drain_today_async_completion_results()
+
+    assert str(today_module.st.session_state.get("_today_completion_feedback_message") or "") == "Marked complete. Follow-up scheduled."
+
+
+def test_successful_drain_sets_no_follow_up_feedback(monkeypatch):
+    card = _card_for("sig-drain-no-follow-up", "E17")
+    card_session_key = today_module._today_card_session_key(card)
+
+    monkeypatch.setattr(
+        "pages.today.st.session_state",
+        {
+            "tenant_id": "tenant-a",
+            "user_email": "lead@example.com",
+            "_today_pending_completion_ids": ["c-no-follow-up"],
+            "_today_pending_completion_signal_keys": ["sig-drain-no-follow-up"],
+            "_today_pending_completion_meta": {
+                "c-no-follow-up": {
+                    "signal_id": "sig-drain-no-follow-up",
+                    "clicked_at": float(1.0),
+                    "queue_update_ms": 1,
+                    "click_to_ui_update_ms": 1,
+                    "card_session_key": card_session_key,
+                    "card": today_module.dataclasses.asdict(card),
+                    "follow_up_choice": "No follow-up needed",
+                }
+            },
+            "_today_completed_items": [card_session_key],
+        },
+    )
+    monkeypatch.setattr("pages.today._narrow_invalidate_today_completion_caches", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+
+    with today_module._TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS.clear()
+        today_module._TODAY_COMPLETION_ASYNC_RESULTS["c-no-follow-up"] = {
+            "status": "success",
+            "backend_write_ms": 2,
+            "error": "",
+        }
+
+    today_module._drain_today_async_completion_results()
+
+    assert str(today_module.st.session_state.get("_today_completion_feedback_message") or "") == "Marked complete."
 
 
 def test_more_actions_optional_data_is_cached_per_card(monkeypatch):
@@ -198,7 +278,7 @@ def test_duplicate_click_same_signal_is_prevented(monkeypatch):
     events: list[str] = []
 
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
-    monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("pages.today.st.button", lambda label, **_kwargs: str(label) == "Mark as complete")
     monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Completed review details")
     monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No follow-up needed")
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
@@ -218,6 +298,198 @@ def test_duplicate_click_same_signal_is_prevented(monkeypatch):
     assert async_calls["count"] == 1
     assert "today_mark_complete_duplicate_prevented" in events
     assert len(list(today_module.st.session_state.get("_today_pending_completion_ids") or [])) == 1
+
+
+def test_quick_action_reviewed_completes_with_no_follow_up(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
+
+    def _button(label, **_kwargs):
+        return str(label) == "Review done"
+
+    monkeypatch.setattr("pages.today.st.button", _button)
+    monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Select one")
+    monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.caption", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._start_today_completion_write_async", lambda **kwargs: captured_payload.update(kwargs))
+    monkeypatch.setattr("pages.today.st.rerun", lambda: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    card = _card_for("sig-quick-reviewed", "E10")
+    today_module._render_guided_completion_controls(card=card, key_prefix="quick-reviewed", status_map={})
+
+    payload = dict(captured_payload.get("payload") or {})
+    assert str(payload.get("note_text") or "") == "Reviewed — no follow-up needed"
+    assert str(payload.get("follow_up_choice") or "") == "No follow-up needed"
+    assert bool(payload.get("follow_up_required")) is False
+    assert payload.get("follow_up_at") is None
+
+
+def test_quick_action_follow_up_tomorrow_creates_tomorrow_follow_up(monkeypatch):
+    captured_payload: dict[str, object] = {}
+
+    monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
+
+    def _button(label, **_kwargs):
+        return str(label) == "Check tomorrow"
+
+    monkeypatch.setattr("pages.today.st.button", _button)
+    monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Select one")
+    monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.caption", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._start_today_completion_write_async", lambda **kwargs: captured_payload.update(kwargs))
+    monkeypatch.setattr("pages.today.st.rerun", lambda: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    card = _card_for("sig-quick-follow-tomorrow", "E11")
+    today_module._render_guided_completion_controls(card=card, key_prefix="quick-follow", status_map={})
+
+    payload = dict(captured_payload.get("payload") or {})
+    assert str(payload.get("note_text") or "") == "Reviewed — follow-up tomorrow"
+    assert str(payload.get("follow_up_choice") or "") == "Follow up tomorrow"
+    assert bool(payload.get("follow_up_required")) is True
+    follow_up_at = payload.get("follow_up_at")
+    assert isinstance(follow_up_at, datetime)
+    assert follow_up_at.date() == (date.today() + timedelta(days=1))
+
+
+def test_quick_actions_use_existing_completion_path(monkeypatch):
+    calls = {"start_async": 0, "save_direct": 0}
+
+    monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
+    monkeypatch.setattr("pages.today.st.button", lambda label, **_kwargs: str(label) == "Review done")
+    monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Select one")
+    monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.caption", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._start_today_completion_write_async", lambda **_kwargs: calls.__setitem__("start_async", calls["start_async"] + 1))
+    monkeypatch.setattr("pages.today._save_today_card_completion", lambda **_kwargs: calls.__setitem__("save_direct", calls["save_direct"] + 1))
+    monkeypatch.setattr("pages.today.st.rerun", lambda: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    card = _card_for("sig-quick-existing-path", "E12")
+    today_module._render_guided_completion_controls(card=card, key_prefix="quick-path", status_map={})
+
+    assert calls["start_async"] == 1
+    assert calls["save_direct"] == 0
+
+
+def test_quick_action_button_keys_use_stable_signal_ids(monkeypatch):
+    captured: list[tuple[str, str]] = []
+
+    monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
+
+    def _button(label, **kwargs):
+        captured.append((str(label), str(kwargs.get("key") or "")))
+        return False
+
+    monkeypatch.setattr("pages.today.st.button", _button)
+    monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Select one")
+    monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.caption", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    card = _card_for("sig-stable-ids", "E13")
+    today_module._render_guided_completion_controls(card=card, key_prefix="quick-ids", status_map={})
+
+    token = today_module._today_signal_scope_token(today_module._today_card_signal_id(card))
+    quick_keys = {key for label, key in captured if label in {"Review done", "Check tomorrow"}}
+    assert f"today_complete_{token}_quick_reviewed" in quick_keys
+    assert f"today_complete_{token}_quick_follow_tomorrow" in quick_keys
+
+
+def test_quick_actions_hidden_when_signal_pending(monkeypatch):
+    captured_labels: list[str] = []
+
+    monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
+
+    def _button(label, **_kwargs):
+        captured_labels.append(str(label))
+        return False
+
+    monkeypatch.setattr("pages.today.st.button", _button)
+    monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Select one")
+    monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.caption", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+
+    card = _card_for("sig-pending-hide-quick", "E14")
+    monkeypatch.setattr(
+        "pages.today.st.session_state",
+        {
+            "tenant_id": "tenant-a",
+            "user_email": "lead@example.com",
+            "_today_pending_completion_signal_keys": [today_module._today_card_signal_id(card)],
+        },
+    )
+
+    today_module._render_guided_completion_controls(card=card, key_prefix="quick-pending", status_map={})
+
+    assert "Review done" not in captured_labels
+    assert "Check tomorrow" not in captured_labels
+
+
+def test_quick_actions_rendered_above_full_note_flow(monkeypatch):
+    render_order: list[str] = []
+
+    monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
+
+    def _button(label, **_kwargs):
+        render_order.append(f"button:{str(label)}")
+        return False
+
+    monkeypatch.setattr("pages.today.st.button", _button)
+    monkeypatch.setattr("pages.today.st.text_area", lambda label, **_kwargs: render_order.append(f"text_area:{str(label)}") or "")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda label, *_args, **_kwargs: render_order.append(f"selectbox:{str(label)}") or "Select one")
+    monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.caption", lambda text, **_kwargs: render_order.append(f"caption:{str(text)}"))
+    monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    card = _card_for("sig-quick-placement", "E15")
+    today_module._render_guided_completion_controls(card=card, key_prefix="quick-placement", status_map={})
+
+    assert "caption:Quick actions" in render_order
+    assert "caption:Add note / choose follow-up" in render_order
+    assert "button:Review done" in render_order
+    assert "button:Check tomorrow" in render_order
+    assert "text_area:Short note (optional)" in render_order
+    assert "selectbox:Next step" in render_order
+    assert render_order.index("caption:Quick actions") < render_order.index("button:Review done")
+    assert render_order.index("caption:Quick actions") < render_order.index("text_area:Short note (optional)")
+    assert render_order.index("button:Check tomorrow") < render_order.index("text_area:Short note (optional)")
+    assert render_order.index("caption:Add note / choose follow-up") < render_order.index("text_area:Short note (optional)")
+
+
+def test_quick_action_language_avoids_system_debug_terms():
+    messages = [
+        "Review done",
+        "Check tomorrow",
+        "Quick actions",
+        "Add note / choose follow-up",
+        "Reviewed — no follow-up needed",
+        "Reviewed — follow-up tomorrow",
+    ]
+    banned = ["system", "debug", "auto", "resolved", "internal"]
+    for message in messages:
+        lowered = message.lower()
+        for term in banned:
+            assert term not in lowered
 
 
 def test_optimistic_completion_defers_widget_reset_until_next_run(monkeypatch):
@@ -277,7 +549,7 @@ def test_two_rapid_completions_enqueue_independently(monkeypatch):
     async_calls = {"count": 0}
 
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
-    monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("pages.today.st.button", lambda label, **_kwargs: str(label) == "Mark as complete")
     monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Completed review details")
     monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No follow-up needed")
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
@@ -1209,12 +1481,13 @@ def test_save_today_card_completion_records_no_follow_up_result(monkeypatch):
 def test_save_today_card_completion_records_follow_up_tomorrow_result(monkeypatch):
     card = _card_for("sig-follow-up-tomorrow", "E21")
     captured_calls: list[dict] = []
+    events: list[str] = []
     tomorrow_at = datetime.combine(date.today() + today_module.timedelta(days=1), today_module.dt_time(hour=9, minute=0))
 
     monkeypatch.setattr("pages.today.log_follow_through_event", lambda **kwargs: captured_calls.append(dict(kwargs)) or {"id": "ft-1"})
     monkeypatch.setattr("pages.today.set_signal_status", lambda **_kwargs: True)
     monkeypatch.setattr("pages.today.add_coaching_note", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda event, **_kwargs: events.append(str(event)))
     monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
 
     result = today_module._save_today_card_completion(
@@ -1231,3 +1504,4 @@ def test_save_today_card_completion_records_follow_up_tomorrow_result(monkeypatc
     assert captured_calls[0]["status"] == "pending"
     assert captured_calls[0]["due_date"] == tomorrow_at.date().isoformat()
     assert captured_calls[0]["outcome"].startswith("Follow-up scheduled for ")
+    assert "today_follow_up_created" in events

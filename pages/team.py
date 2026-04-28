@@ -315,6 +315,50 @@ def _status_bucket_from_trend_label(trend_label: str) -> str:
     return "stable"
 
 
+def get_trend_status(employee_metrics: dict[str, object]) -> dict[str, str]:
+    """Return canonical Team trend status used by all trend-related copy.
+
+    Returns:
+        {
+            "label": "Declining" | "Holding steady" | "Improving",
+            "severity": "Needs attention this week" | "Monitor" | "No immediate action",
+            "direction": "negative" | "flat" | "positive",
+        }
+    """
+    metrics = dict(employee_metrics.get("trend_metrics") or {})
+    label = _trend_label_from_metrics(metrics)
+
+    direction_map = {
+        "Declining": "negative",
+        "Holding steady": "flat",
+        "Improving": "positive",
+    }
+    raw_direction = str(metrics.get("slope_direction") or "").strip().lower()
+    direction = raw_direction if raw_direction in {"negative", "flat", "positive"} else direction_map.get(label, "flat")
+
+    avg_uph = _safe_float(employee_metrics.get("avg_uph"))
+    target_uph = _safe_float(employee_metrics.get("target_uph"))
+    below_target = bool(
+        avg_uph is not None
+        and target_uph is not None
+        and target_uph > 0
+        and avg_uph < target_uph
+    )
+
+    if label == "Declining":
+        severity = "Needs attention this week" if below_target else "Monitor"
+    elif label == "Holding steady":
+        severity = "Monitor" if below_target else "No immediate action"
+    else:
+        severity = "Monitor" if below_target else "No immediate action"
+
+    return {
+        "label": label,
+        "severity": severity,
+        "direction": direction,
+    }
+
+
 def _chart_rows_from_snapshot_history(
     snapshot_rows: list[dict],
     *,
@@ -421,43 +465,11 @@ def _format_month_day(dt: datetime, *, include_time: bool = False) -> str:
     return f"{month_day} at {hour}:{minute} {ampm}"
 
 
-def _build_follow_up_status_lines(*, row: dict, notes: list[dict], action_rows: list[dict]) -> list[str]:
-    def _clean_last_check_result(text: str) -> str:
-        clean = clean_note_text_for_display(text)
-        if not clean:
-            clean = " ".join(str(text or "").split()).strip()
-        lower = clean.lower()
-        blocked = (
-            "issue resolved",
-            "event_type",
-            "signal_key=",
-            "signal_id=",
-            "employee_id=",
-            "tenant_id=",
-            "debug",
-        )
-        if not clean or any(token in lower for token in blocked):
-            return ""
-        if lower.startswith("last check result:"):
-            return clean.split(":", 1)[1].strip()
-        if lower.startswith("reviewed and logged"):
-            return "Reviewed and logged"
-        return clean[:160]
-
-    def _latest_last_check_result() -> str:
-        best_dt: datetime | None = None
-        best_text = ""
-        for ev in action_rows or []:
-            event_dt = _parse_dt(str(ev.get("event_at") or "").strip())
-            candidate = _clean_last_check_result(str(ev.get("outcome") or ""))
-            if not candidate:
-                candidate = _clean_last_check_result(str(ev.get("notes") or ""))
-            if not candidate:
-                continue
-            if best_dt is None or (event_dt is not None and event_dt >= best_dt):
-                best_dt = event_dt
-                best_text = candidate
-        return best_text
+def get_follow_up_status(employee: dict[str, object]) -> dict[str, str | None]:
+    """Return a single, non-contradictory follow-up status for Team detail view."""
+    row = dict(employee.get("row") or {})
+    notes = list(employee.get("notes") or [])
+    action_rows = list(employee.get("action_rows") or [])
 
     due_raw = str(
         row.get("follow_up_due_at")
@@ -466,27 +478,24 @@ def _build_follow_up_status_lines(*, row: dict, notes: list[dict], action_rows: 
         or ""
     ).strip()
     due_dt = _parse_dt(due_raw)
+    today_dt = datetime.utcnow()
 
-    lines: list[str] = []
     if due_dt is not None:
-        today_dt = datetime.utcnow()
         day_delta = (due_dt.date() - today_dt.date()).days
         if day_delta < 0:
-            lines.append("Follow-up overdue")
+            primary = "Follow-up overdue"
         elif day_delta == 0:
-            lines.append("Follow-up due today")
+            primary = "Follow-up due today"
         else:
-            lines.append(f"Follow-up scheduled for {_format_month_day(due_dt, include_time=True)}")
+            primary = f"Follow-up scheduled for {_format_month_day(due_dt, include_time=True)}"
     else:
         due_flag = str(row.get("follow_up_due") or "").strip().lower()
         if due_flag in {"true", "yes", "1", "y", "pending", "due"}:
-            lines.append("Follow-up due today")
+            primary = "Follow-up due today"
         else:
-            lines.append("No follow-up scheduled")
+            primary = "No follow-up scheduled"
 
-    latest_review: datetime | None = None
     review_candidates: list[datetime] = []
-
     row_review_dt = _parse_dt(
         str(
             row.get("last_follow_up_at")
@@ -499,29 +508,29 @@ def _build_follow_up_status_lines(*, row: dict, notes: list[dict], action_rows: 
     if row_review_dt is not None:
         review_candidates.append(row_review_dt)
 
-    for note in notes or []:
+    for note in notes:
         note_dt = _parse_dt(str(note.get("created_at") or note.get("date") or "").strip())
         if note_dt is not None:
             review_candidates.append(note_dt)
 
-    for ev in action_rows or []:
+    for ev in action_rows:
         event_dt = _parse_dt(str(ev.get("event_at") or "").strip())
         if event_dt is not None:
             review_candidates.append(event_dt)
 
+    secondary: str | None = None
     if review_candidates:
         latest_review = max(review_candidates)
+        days_since_review = (today_dt.date() - latest_review.date()).days
+        if 0 <= days_since_review <= 7:
+            secondary = "Reviewed recently"
+        else:
+            secondary = f"Last checked {_format_month_day(latest_review)}"
 
-    if latest_review is not None:
-        lines.append(f"Last reviewed {_format_month_day(latest_review)}")
-    if latest_review is None:
-        lines.append("Last reviewed not recorded")
-
-    last_check_result = _latest_last_check_result()
-    if last_check_result:
-        lines.append(f"Last check result: {last_check_result}")
-
-    return lines
+    return {
+        "primary": primary,
+        "secondary": secondary,
+    }
 
 
 def _build_current_situation_lines(*, trend_metrics: dict[str, object], days: int, target_uph: float | None, chart_rows: list[dict]) -> list[str]:
@@ -1350,7 +1359,6 @@ def page_team() -> None:
     handoff_payload = handoff_payload_raw if isinstance(handoff_payload_raw, dict) else {}
     handoff_employee_id = str(handoff_payload.get("employee_id") or "").strip()
     handoff_reason = _clean_plain_handoff_reason(str(handoff_payload.get("reason") or ""))
-    handoff_follow_up_status = _clean_plain_handoff_reason(str(handoff_payload.get("follow_up_status") or ""))
     handoff_signal_id = str(handoff_payload.get("signal_id") or "").strip()
     handoff_signal_key = str(handoff_payload.get("signal_key") or "").strip()
     has_today_handoff = bool(handoff_employee_id and handoff_employee_id in employee_ids)
@@ -1390,7 +1398,7 @@ def page_team() -> None:
 
     avg_uph = _safe_float(selected_row.get("Average UPH"))
     target_uph = _safe_float(selected_row.get("Target UPH"))
-    status_bucket = _team_status_bucket(selected_row)
+    status_bucket = "stable"
     status_label = ""
 
     with profile.stage("load_selected_employee_detail"):
@@ -1416,7 +1424,16 @@ def page_team() -> None:
     profile.set("selected_history_rows", len(chart_rows))
     profile.query(rows=len(chart_rows), count=1)
     change_pct = _safe_float(trend_metrics.get("change_pct"))
-    status_label = _trend_label_from_metrics(trend_metrics)
+    trend_status = get_trend_status(
+        {
+            "trend_metrics": trend_metrics,
+            "avg_uph": avg_uph,
+            "target_uph": target_uph,
+        }
+    )
+    status_label = str(trend_status.get("label") or "Holding steady")
+    status_bucket = _status_bucket_from_trend_label(status_label)
+    attention_line = str(trend_status.get("severity") or "Monitor")
     selected_window_trend_text = _format_window_trend_summary(trend_metrics, time_window_days)
     what_changed_text = _what_changed_line(
         selected_row,
@@ -1446,16 +1463,13 @@ def page_team() -> None:
     )
     note_history = _normalize_notes_history(notes, preview_chars=180)
     exception_history = _normalize_exception_history(exceptions, preview_chars=140)
-    follow_up_status_lines = _build_follow_up_status_lines(
-        row=selected_row,
-        notes=notes,
-        action_rows=timeline_rows,
+    follow_up_status = get_follow_up_status(
+        {
+            "row": selected_row,
+            "notes": notes,
+            "action_rows": timeline_rows,
+        }
     )
-    if handoff_follow_up_status and all(
-        handoff_follow_up_status.lower() not in str(line or "").lower()
-        for line in follow_up_status_lines
-    ):
-        follow_up_status_lines.append(handoff_follow_up_status)
     current_situation_lines = _build_current_situation_lines(
         trend_metrics=trend_metrics,
         days=time_window_days,
@@ -1476,7 +1490,7 @@ def page_team() -> None:
         st.caption(" · ".join([part for part in (department, status_label) if part]))
         if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
             st.markdown(
-                f"<div class='team-focus-banner'>Opened from Today: {escape(handoff_reason)}</div>",
+                f"<div class='team-focus-banner'>From Today: {escape(handoff_reason)}</div>",
                 unsafe_allow_html=True,
             )
         if primary_statement:
@@ -1485,22 +1499,18 @@ def page_team() -> None:
             f"<div class='team-summary-context'>{escape(selected_window_trend_text)}</div>",
             unsafe_allow_html=True,
         )
-        attention_line = (
-            "Needs attention this week"
-            if status_bucket == "needs attention"
-            else "Monitor this week"
-        )
         st.markdown(
             f"<div class='team-summary-context'>Attention level: {escape(attention_line)}</div>",
             unsafe_allow_html=True,
         )
         st.markdown("#### Follow-up status")
-        if follow_up_status_lines:
-            st.markdown(f"<div class='team-followup-status'>{escape(str(follow_up_status_lines[0]))}</div>", unsafe_allow_html=True)
-        if len(follow_up_status_lines) > 1:
-            st.markdown(f"<div class='team-followup-meta'>{escape(str(follow_up_status_lines[1]))}</div>", unsafe_allow_html=True)
-        if len(follow_up_status_lines) > 2:
-            st.markdown(f"<div class='team-followup-meta'>{escape(str(follow_up_status_lines[2]))}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='team-followup-status'>{escape(str(follow_up_status.get('primary') or 'No follow-up scheduled'))}</div>",
+            unsafe_allow_html=True,
+        )
+        secondary_follow_up = str(follow_up_status.get("secondary") or "").strip()
+        if secondary_follow_up:
+            st.markdown(f"<div class='team-followup-meta'>{escape(secondary_follow_up)}</div>", unsafe_allow_html=True)
         if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
             st.markdown(
                 f"<div class='team-summary-context team-summary-context-highlight'>{escape(handoff_reason)}</div>",
@@ -1603,8 +1613,8 @@ def page_team() -> None:
         if not exception_history:
             st.caption(format_empty_state("no_exceptions"))
         else:
-            st.caption(f"{len(exception_history)} recent exception item(s)")
-            with st.expander("Show exception details", expanded=False):
+            st.caption(f"Recent exceptions: {len(exception_history)}")
+            with st.expander("Exception details", expanded=False):
                 for index, exception_row in enumerate(exception_history, start=1):
                     _render_exception_history_entry(exception_row, index=index)
 

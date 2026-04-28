@@ -55,6 +55,10 @@ def test_today_consumes_return_focus_state_once(monkeypatch):
     monkeypatch.setattr(today.st, "caption", lambda *args, **kwargs: None)
     monkeypatch.setattr(today.st, "columns", lambda n, **kwargs: [_Ctx() for _ in range(int(n))])
     monkeypatch.setattr(today.st, "expander", lambda *args, **kwargs: _Ctx())
+    monkeypatch.setattr(today, "_render_today_standup_view", lambda *args, **kwargs: None)
+    monkeypatch.setattr(today, "_render_today_copy_summary_block", lambda *args, **kwargs: None)
+    monkeypatch.setattr(today, "_render_today_team_risk_block", lambda *args, **kwargs: None)
+    monkeypatch.setattr(today, "build_today_team_risk_view_model", lambda **kwargs: None)
 
     focused_values: list[bool] = []
 

@@ -27,6 +27,7 @@ from services.signal_formatting_service import (
     get_signal_display_mode,
     is_display_signal_eligible,
 )
+from services.trend_classification_service import normalize_trend_state
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class TodayQueueViewModel:
     primary_cards: list[TodayQueueCardViewModel]
     secondary_cards: list[TodayQueueCardViewModel]
     suppressed: list[SuppressedSignalViewModel]
+    auto_resolved_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,25 @@ class TodayWeeklySummaryItemViewModel:
 @dataclass(frozen=True)
 class TodayWeeklySummaryViewModel:
     items: list[TodayWeeklySummaryItemViewModel]
+
+
+@dataclass(frozen=True)
+class TodaySummaryViewModel:
+    text: str
+    bullets: list[str]
+    focus_line: str
+
+
+@dataclass(frozen=True)
+class TodayLowDataFallbackViewModel:
+    mode_label: str
+    bullets: list[str]
+    explanation_line: str
+
+
+@dataclass(frozen=True)
+class TodayTeamRiskViewModel:
+    bullets: list[str]
 
 
 @dataclass(frozen=True)
@@ -404,6 +425,137 @@ def _build_data_health_block(import_summary: dict[str, Any] | None) -> TodayValu
         headline=headline,
         detail=detail,
     )
+
+
+def build_today_low_data_fallback_view_model(
+    *,
+    goal_status: list[dict[str, Any]],
+    import_summary: dict[str, Any] | None,
+) -> TodayLowDataFallbackViewModel | None:
+    summary = dict(import_summary or {})
+    days = _safe_int(summary.get("days")) or 0
+    valid_rows = _safe_int(summary.get("valid_rows"))
+    rows_processed = _safe_int(summary.get("rows_processed"))
+    row_count = valid_rows if valid_rows is not None and valid_rows > 0 else rows_processed or len(goal_status or [])
+
+    reliable_trend_rows = 0
+    performance_rows: list[tuple[float, dict[str, Any]]] = []
+    for row in list(goal_status or []):
+        employee_name = _row_text(row, "Employee", "Employee Name", "employee_name", "EmployeeID")
+        average_uph = _safe_float(row.get("Average UPH"))
+        if employee_name and average_uph is not None and average_uph > 0:
+            performance_rows.append((average_uph, row))
+
+        change_pct = _safe_float(row.get("change_pct"))
+        trend = str(row.get("trend") or "").strip().lower()
+        confidence_label = str(row.get("confidence_label") or "").strip().lower()
+        if change_pct is not None and trend not in {"", "insufficient_data"} and confidence_label != "low":
+            reliable_trend_rows += 1
+
+    low_history = 0 < days <= 2
+    low_rows = 0 < row_count < 12
+    no_reliable_trend = bool(goal_status) and reliable_trend_rows == 0
+    if not (low_history or low_rows or no_reliable_trend):
+        return None
+
+    if not performance_rows:
+        return TodayLowDataFallbackViewModel(
+            mode_label="Early signal mode",
+            bullets=["Recent activity is starting to populate"],
+            explanation_line="Early signal only - limited recent data",
+        )
+
+    performance_rows.sort(key=lambda pair: pair[0], reverse=True)
+    top_value, top_row = performance_rows[0]
+    low_value, low_row = min(performance_rows, key=lambda pair: pair[0])
+
+    top_employee = _row_text(top_row, "Employee", "Employee Name", "employee_name", "EmployeeID")
+    low_employee = _row_text(low_row, "Employee", "Employee Name", "employee_name", "EmployeeID")
+
+    bullets = [f"{top_employee} leading at {_format_uph_value(top_value)} UPH"]
+    if low_employee and low_employee != top_employee:
+        bullets.append(f"{low_employee} lowest at {_format_uph_value(low_value)} UPH")
+
+    gap_ratio = ((top_value - low_value) / top_value) if top_value > 0 else 0.0
+    if len(performance_rows) > 1 and gap_ratio >= 0.08:
+        bullets.append("Wide gap between top and lowest performance")
+
+    return TodayLowDataFallbackViewModel(
+        mode_label="Early signal mode",
+        bullets=bullets[:3],
+        explanation_line="Early signal only - limited recent data",
+    )
+
+
+def build_today_team_risk_view_model(
+    *,
+    goal_status: list[dict[str, Any]],
+    cards: list[Any],
+) -> TodayTeamRiskViewModel | None:
+    bullets: list[str] = []
+
+    department_rollup: dict[str, dict[str, float]] = {}
+    declining_counts: dict[str, int] = {}
+    for row in list(goal_status or []):
+        department = _row_text(row, "Department", "department", "process_name") or "Unassigned"
+        average_uph = _safe_float(row.get("Average UPH"))
+        target_uph = _safe_float(row.get("Target UPH"))
+        if average_uph is not None and target_uph is not None and target_uph > 0:
+            bucket = department_rollup.setdefault(department, {"actual": 0.0, "target": 0.0, "count": 0.0})
+            bucket["actual"] += average_uph
+            bucket["target"] += target_uph
+            bucket["count"] += 1.0
+
+        trend = str(row.get("trend") or "").strip().lower()
+        if trend in {"declining", "down"}:
+            declining_counts[department] = declining_counts.get(department, 0) + 1
+
+    if department_rollup:
+        below_target_departments: list[tuple[float, str]] = []
+        for department, values in department_rollup.items():
+            count = values.get("count") or 0.0
+            if count <= 0:
+                continue
+            avg_actual = float(values.get("actual") or 0.0) / count
+            avg_target = float(values.get("target") or 0.0) / count
+            gap = avg_target - avg_actual
+            if gap > 0:
+                below_target_departments.append((gap, department))
+        if below_target_departments:
+            _, department = max(below_target_departments, key=lambda pair: pair[0])
+            bullets.append(f"{department} is running below target today")
+
+    if declining_counts:
+        department, count = max(declining_counts.items(), key=lambda pair: pair[1])
+        if count > 0:
+            bullets.append(f"{count} {department} employee{'s' if count != 1 else ''} are declining")
+
+    overdue_count = 0
+    seen_keys: set[str] = set()
+    for card in list(cards or []):
+        signal_key = str(getattr(card, "signal_key", "") or "").strip()
+        dedupe_key = signal_key or str(getattr(card, "employee_id", "") or "").strip()
+        if dedupe_key and dedupe_key in seen_keys:
+            continue
+        if dedupe_key:
+            seen_keys.add(dedupe_key)
+        detail = str(getattr(card, "normalized_action_state_detail", "") or "").strip().lower()
+        line_2 = str(getattr(card, "line_2", "") or "").strip().lower()
+        line_3 = str(getattr(card, "line_3", "") or "").strip().lower()
+        if "overdue" in detail or "overdue" in line_2 or "overdue" in line_3:
+            overdue_count += 1
+    if overdue_count > 0:
+        bullets.append(f"{overdue_count} overdue follow-up{'s' if overdue_count != 1 else ''}")
+
+    cleaned_bullets: list[str] = []
+    for bullet in bullets:
+        clean = str(bullet or "").strip()
+        if clean and clean not in cleaned_bullets:
+            cleaned_bullets.append(clean)
+
+    if not cleaned_bullets:
+        return None
+    return TodayTeamRiskViewModel(bullets=cleaned_bullets[:3])
 
 
 def build_today_value_strip_view_model(
@@ -1043,6 +1195,299 @@ def build_why_surfaced_text(item: Any) -> str:
     return f"{prefix}Below target on recent shift"
 
 
+def _today_summary_employee_and_process(card: Any) -> tuple[str, str]:
+    line_1 = str(getattr(card, "line_1", "") or "").strip()
+    if " · " in line_1:
+        employee_name, process_name = line_1.split(" · ", 1)
+        return employee_name.strip(), process_name.strip()
+    return line_1, ""
+
+
+def _today_summary_delta_text(card: Any) -> str:
+    raw = str(getattr(card, "what_changed_line", "") or "").strip()
+    if not raw:
+        return ""
+    normalized = re.sub(r"^Performance\s+", "", raw, flags=re.IGNORECASE).strip()
+    normalized = re.sub(r"^down\s+", "↓ ", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"^up\s+", "↑ ", normalized, flags=re.IGNORECASE)
+    normalized = normalized.replace(" vs ", " vs ")
+    normalized = normalized.replace("average", "avg")
+    return normalized
+
+
+def _today_summary_follow_up_bucket(cards: list[Any]) -> tuple[int, int]:
+    due_today = 0
+    overdue = 0
+    seen_keys: set[str] = set()
+    for card in list(cards or []):
+        signal_key = str(getattr(card, "signal_key", "") or "").strip()
+        dedupe_key = signal_key or str(getattr(card, "employee_id", "") or "").strip()
+        if dedupe_key and dedupe_key in seen_keys:
+            continue
+        if dedupe_key:
+            seen_keys.add(dedupe_key)
+
+        detail = str(getattr(card, "normalized_action_state_detail", "") or "").strip().lower()
+        state = str(getattr(card, "normalized_action_state", "") or "").strip().lower()
+        line_2 = str(getattr(card, "line_2", "") or "").strip().lower()
+        line_3 = str(getattr(card, "line_3", "") or "").strip().lower()
+
+        is_overdue = "overdue" in detail or "overdue" in line_2 or "overdue" in line_3
+        is_due_today = "due today" in detail or "due today" in line_2 or "due today" in line_3
+        is_follow_up = "follow-up" in state or "follow-up" in line_2 or "follow-up" in line_3
+
+        if is_overdue:
+            overdue += 1
+            due_today += 1
+        elif is_due_today or is_follow_up:
+            due_today += 1
+
+    return due_today, overdue
+
+
+def _today_summary_is_follow_up_priority(card: Any) -> bool:
+    detail = str(getattr(card, "normalized_action_state_detail", "") or "").strip().lower()
+    state = str(getattr(card, "normalized_action_state", "") or "").strip().lower()
+    line_2 = str(getattr(card, "line_2", "") or "").strip().lower()
+    line_3 = str(getattr(card, "line_3", "") or "").strip().lower()
+    return any(
+        token in text
+        for text in (detail, state, line_2, line_3)
+        for token in ("overdue", "due today", "follow-up")
+    )
+
+
+def _today_summary_parse_performance_bullet(bullet: str) -> dict[str, Any] | None:
+    text = str(bullet or "").strip()
+    if not text or "follow-up" in text.lower():
+        return None
+
+    match = re.match(r"^(?P<employee>[^\s]+)\s+(?P<direction>[↑↓])\s+(?P<pct>\d+)%.*?(?:\((?P<process>[^()]+)\))?$", text)
+    if not match:
+        return None
+
+    pct = _safe_int(match.group("pct")) or 0
+    direction = str(match.group("direction") or "").strip()
+    process = str(match.group("process") or "").strip()
+    employee = str(match.group("employee") or "").strip()
+    return {
+        "employee": employee,
+        "process": process,
+        "direction": direction,
+        "pct": pct,
+        "text": text,
+    }
+
+
+def _today_summary_overdue_theme(bullets: list[str]) -> str:
+    for bullet in bullets:
+        text = str(bullet or "").strip().lower()
+        if "overdue" not in text:
+            continue
+        overdue_match = re.search(r"\((\d+) overdue\)", text)
+        overdue_count = _safe_int(overdue_match.group(1)) if overdue_match else 1
+        if overdue_count == 1:
+            return "1 overdue follow-up"
+        return f"{overdue_count} overdue follow-ups"
+    return ""
+
+
+def _today_summary_is_negative_bullet(bullet: str) -> bool:
+    return " ↓ " in f" {str(bullet or '').strip()} "
+
+
+def _today_summary_primary_performance_theme(performance_rows: list[dict[str, Any]]) -> str:
+    if not performance_rows:
+        return ""
+
+    first = performance_rows[0]
+    process = str(first.get("process") or "").strip()
+    direction = str(first.get("direction") or "").strip()
+    employee = str(first.get("employee") or "").strip()
+    first_pct = int(first.get("pct") or 0)
+    second_pct = int(performance_rows[1].get("pct") or 0) if len(performance_rows) > 1 else 0
+
+    if direction == "↓":
+        process_theme = f"{process} decline" if process else "Performance decline"
+    else:
+        process_theme = f"{process} lift" if process else "Performance lift"
+
+    employee_is_dominant = len(performance_rows) == 1 or first_pct >= second_pct + 5
+    if employee and employee_is_dominant:
+        return f"{process_theme} centered on {employee}"
+    return process_theme
+
+
+def _today_summary_focus_line(bullets: list[str]) -> str:
+    performance_rows = [
+        parsed
+        for bullet in bullets
+        for parsed in [_today_summary_parse_performance_bullet(bullet)]
+        if parsed is not None
+    ]
+
+    themes: list[str] = []
+    primary_performance_theme = _today_summary_primary_performance_theme(performance_rows)
+    if primary_performance_theme:
+        themes.append(primary_performance_theme)
+
+    overdue_theme = _today_summary_overdue_theme(bullets)
+    if overdue_theme:
+        themes.append(overdue_theme)
+
+    if not themes and performance_rows:
+        first = performance_rows[0]
+        employee = str(first.get("employee") or "").strip()
+        if employee:
+            themes.append(f"{employee} performance")
+
+    if not themes:
+        return "Top queue priorities"
+    return " + ".join(themes[:2])
+
+
+def _build_today_summary_content(items: list[Any]) -> tuple[list[str], str]:
+    ranked_cards = list(items or [])
+    if not ranked_cards:
+        return [], "No active signals"
+
+    due_today_count, overdue_count = _today_summary_follow_up_bucket(ranked_cards)
+    follow_up_bucket = ""
+    if due_today_count > 0:
+        follow_up_bucket = f"{due_today_count} follow-up{'s' if due_today_count != 1 else ''} due today"
+        if overdue_count > 0:
+            follow_up_bucket += f" ({overdue_count} overdue)"
+
+    bullets: list[str] = []
+    max_bullets = 4 if follow_up_bucket else 3
+    first_card = ranked_cards[0] if ranked_cards else None
+    lead_with_follow_up = bool(
+        follow_up_bucket
+        and first_card is not None
+        and _today_summary_is_follow_up_priority(first_card)
+        and not _today_summary_delta_text(first_card)
+    )
+    if lead_with_follow_up:
+        bullets.append(follow_up_bucket)
+
+    performance_limit = max_bullets
+    if follow_up_bucket and not lead_with_follow_up:
+        performance_limit -= 1
+
+    candidate_bullets: list[str] = []
+    for card in ranked_cards:
+        employee_name, process_name = _today_summary_employee_and_process(card)
+        delta_text = _today_summary_delta_text(card)
+        if not employee_name or not delta_text:
+            continue
+        bullet = f"{employee_name} {delta_text}"
+        if process_name:
+            bullet += f" ({process_name})"
+        if bullet not in candidate_bullets:
+            candidate_bullets.append(bullet)
+
+    negative_bullets = [bullet for bullet in candidate_bullets if _today_summary_is_negative_bullet(bullet)]
+    positive_bullets = [bullet for bullet in candidate_bullets if bullet not in negative_bullets]
+
+    for bullet in negative_bullets[:performance_limit]:
+        if bullet not in bullets:
+            bullets.append(bullet)
+
+    if len(bullets) < performance_limit:
+        for bullet in positive_bullets:
+            if len(bullets) >= performance_limit:
+                break
+            if bullet not in bullets:
+                bullets.append(bullet)
+
+    if follow_up_bucket and not lead_with_follow_up and follow_up_bucket not in bullets and len(bullets) < max_bullets:
+        bullets.append(follow_up_bucket)
+
+    bullets = bullets[:max_bullets]
+    focus_line = _today_summary_focus_line(bullets)
+    return bullets, focus_line
+
+
+def _today_standup_bullet_text(bullet: str) -> str:
+    parsed = _today_summary_parse_performance_bullet(bullet)
+    if parsed is None:
+        text = str(bullet or "").strip()
+        overdue_match = re.match(r"^(?P<due>\d+) follow-ups? due today \((?P<overdue>\d+) overdue\)$", text)
+        if overdue_match:
+            due_count = _safe_int(overdue_match.group("due")) or 0
+            overdue_count = _safe_int(overdue_match.group("overdue")) or 0
+            if due_count > 0 and due_count == overdue_count:
+                if overdue_count == 1:
+                    return "1 overdue follow-up"
+                return f"{overdue_count} overdue follow-ups"
+        return text
+
+    employee = str(parsed.get("employee") or "").strip()
+    direction = str(parsed.get("direction") or "").strip()
+    pct = int(parsed.get("pct") or 0)
+    process = str(parsed.get("process") or "").strip()
+    direction_word = "down" if direction == "↓" else "up"
+    if process:
+        return f"{employee} {direction_word} {pct}% in {process}"
+    return f"{employee} {direction_word} {pct}%"
+
+
+def _today_standup_focus_line(bullets: list[str]) -> str:
+    performance_rows = [
+        parsed
+        for bullet in bullets
+        for parsed in [_today_summary_parse_performance_bullet(bullet)]
+        if parsed is not None
+    ]
+
+    themes: list[str] = []
+    if performance_rows:
+        first = performance_rows[0]
+        employee = str(first.get("employee") or "").strip()
+        process = str(first.get("process") or "").strip()
+        first_pct = int(first.get("pct") or 0)
+        second_pct = int(performance_rows[1].get("pct") or 0) if len(performance_rows) > 1 else 0
+        employee_is_dominant = len(performance_rows) == 1 or first_pct >= second_pct + 5
+
+        if employee and process and employee_is_dominant:
+            themes.append(f"{employee} in {process}")
+        elif process:
+            themes.append(f"{process} performance")
+        elif employee:
+            themes.append(f"{employee} performance")
+
+    overdue_theme = _today_summary_overdue_theme(bullets)
+    if overdue_theme:
+        themes.append(overdue_theme)
+    elif any("follow-up" in str(bullet or "").lower() for bullet in bullets):
+        themes.append("follow-ups")
+
+    if not themes:
+        return "Top priorities"
+    return " + ".join(themes[:2])
+
+
+def build_today_summary(items: list[Any]) -> str:
+    bullets, focus_line = _build_today_summary_content(items)
+    if not bullets and focus_line == "No active signals":
+        return "Today Summary:\nFocus: No active signals"
+
+    bullet_lines = [f"- {bullet}" for bullet in bullets[:4]]
+    body_lines = ["Today Summary:", *bullet_lines, f"Focus: {focus_line}"]
+    return "\n".join(body_lines[:6])
+
+
+def build_today_standup_text(items: list[Any]) -> str:
+    bullets, focus_line = _build_today_summary_content(items)
+    if not bullets and focus_line == "No active signals":
+        return "Today:\n- No active signals\nFocus: No active signals"
+
+    spoken_bullets = [f"- {_today_standup_bullet_text(bullet)}" for bullet in bullets[:4]]
+    standup_focus = _today_standup_focus_line(bullets)
+    body_lines = ["Today:", *spoken_bullets, f"Focus: {standup_focus}"]
+    return "\n".join(body_lines[:6])
+
+
 def _why_surfaced_line(source: Any, signal: DisplaySignal) -> str:
     mode = get_signal_display_mode(signal)
     flags = dict(signal.flags or {})
@@ -1670,6 +2115,36 @@ def build_today_queue_card_from_insight_card(
     )
 
 
+# ---------------------------------------------------------------------------
+# Auto-resolve detection constants and helper
+# ---------------------------------------------------------------------------
+
+_AUTO_RESOLVE_GOAL_STATUSES: frozenset[str] = frozenset({"on_goal"})
+_AUTO_RESOLVE_BLOCKING_TRENDS: frozenset[str] = frozenset({"declining", "below_expected"})
+
+
+def _is_signal_auto_resolved(item: Any, card: TodayQueueCardViewModel) -> bool:
+    """Return True when the signal shows performance back at target with no declining trend.
+
+    Follow-up cards are never auto-resolved; the follow-up stays in the queue
+    independently so scheduled check-ins are preserved.
+    """
+    action_state = str(getattr(card, "normalized_action_state", "") or "").strip().lower()
+    if "follow-up" in action_state:
+        return False
+
+    snapshot = dict(getattr(item, "snapshot", None) or {})
+    goal_status = str(snapshot.get("goal_status") or "").strip().lower()
+    if goal_status not in _AUTO_RESOLVE_GOAL_STATUSES:
+        return False
+
+    trend = normalize_trend_state(snapshot.get("trend_state") or "")
+    if trend in _AUTO_RESOLVE_BLOCKING_TRENDS:
+        return False
+
+    return True
+
+
 def build_today_queue_view_model(
     attention: AttentionSummary,
     *,
@@ -1687,6 +2162,7 @@ def build_today_queue_view_model(
     primary_ranked: list[_RankedCard] = []
     secondary_ranked: list[_RankedCard] = []
     suppressed: list[SuppressedSignalViewModel] = []
+    auto_resolved_count: int = 0
 
     ranked_sources: list[tuple[Any, DisplaySignal, TodayQueueCardViewModel]] = []
     if decision_items:
@@ -1747,6 +2223,11 @@ def build_today_queue_view_model(
         )
 
         employee_id = str(getattr(item, "employee_id", "") or "").strip()
+
+        if _is_signal_auto_resolved(item, card_vm):
+            auto_resolved_count += 1
+            continue
+
         if decision_policy and employee_id:
             if employee_id in set(decision_policy.primary_employee_ids):
                 primary_ranked.append(ranked)
@@ -1808,6 +2289,7 @@ def build_today_queue_view_model(
         primary_cards=primary_cards,
         secondary_cards=secondary_cards,
         suppressed=suppressed,
+        auto_resolved_count=auto_resolved_count,
     )
 
 

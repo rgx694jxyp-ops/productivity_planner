@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from database import add_coaching_note
 from core.dependencies import _bust_cache, _cached_employees, _log_app_error, _log_operational_event
@@ -72,10 +73,16 @@ from services.today_signal_status_service import (
 )
 from services.today_view_model_service import (
     TodayAttentionStripViewModel,
+    TodayLowDataFallbackViewModel,
     TodayQueueCardViewModel,
     TodayReturnTriggerViewModel,
+    TodayTeamRiskViewModel,
     TodayValueStripViewModel,
     TodayWeeklySummaryViewModel,
+    build_today_low_data_fallback_view_model,
+    build_today_standup_text,
+    build_today_summary,
+    build_today_team_risk_view_model,
     build_today_attention_strip,
     build_today_queue_card_from_insight_card,
     build_today_return_trigger,
@@ -108,12 +115,13 @@ _TODAY_PHASE1_RANKED_SCAN_LIMIT = 12
 _TODAY_QUEUE_DEFAULT_VISIBLE_CARDS = 3
 _TODAY_PAYLOAD_SESSION_CACHE_KEY_PREFIX = "_today_payload_session_cache_"
 _TODAY_COMPLETED_ITEMS_SESSION_KEY = "_today_completed_items"
-_TODAY_LAST_COMPLETED_LABEL_KEY = "_today_last_completed_label"
+_TODAY_COMPLETION_FEEDBACK_MESSAGE_KEY = "_today_completion_feedback_message"
 _TODAY_FOCUS_NEXT_CARD_KEY = "_today_focus_next_card"
 _TODAY_HANDOFF_FOCUS_RENDERED_KEY_PREFIX = "_today_handoff_focus_rendered_"
 _TODAY_TO_TEAM_HANDOFF_KEY = "_today_to_team_handoff"
 _TEAM_TO_TODAY_FOCUS_KEY = "_team_to_today_focus"
 _TODAY_AUTO_REFRESH_MIN_SECONDS = 60
+_TODAY_AUTO_RESOLVED_SHOWN_KEY_PREFIX = "_today_auto_resolved_shown_"
 _TODAY_PENDING_COMPLETION_IDS_KEY = "_today_pending_completion_ids"
 _TODAY_PENDING_COMPLETION_META_KEY = "_today_pending_completion_meta"
 _TODAY_PENDING_COMPLETION_SIGNAL_KEYS_KEY = "_today_pending_completion_signal_keys"
@@ -486,7 +494,12 @@ def _render_today_phase1_top_cards(
     top_cards: list[TodayQueueCardViewModel],
     signal_status_map: dict[str, dict[str, str]],
     people_needing_attention: int,
+    low_data_fallback: TodayLowDataFallbackViewModel | None = None,
 ) -> None:
+    if low_data_fallback is not None:
+        _render_today_low_data_fallback(low_data_fallback)
+        return
+
     if not top_cards:
         st.markdown(f'<div class="today-placeholder">{_today_loading_placeholder()}</div>', unsafe_allow_html=True)
         return
@@ -1592,7 +1605,7 @@ def _render_first_value_screen() -> None:
         st.markdown("### Get to your first value")
         st.write(
             "Today becomes useful after the app has roster or shift history to compare. "
-            "This workspace does not have usable operating data yet."
+            "This workspace is still waiting for an initial operating data set."
         )
         st.info(
             "Load sample data to see the full workflow in demo mode, or upload a file to start from your own history. "
@@ -1603,6 +1616,7 @@ def _render_first_value_screen() -> None:
         with sample_col:
             if st.button("Use sample data", type="primary", use_container_width=True, key="today_first_value_sample"):
                 st.session_state["import_entry_mode"] = "Try sample data"
+                st.session_state["_auto_load_sample_on_import_once"] = True
                 st.session_state["goto_page"] = "import"
                 st.rerun()
         with upload_col:
@@ -1635,48 +1649,29 @@ def _render_top_status_area(*, meaning: TodaySurfaceMeaning) -> None:
     source_label = str(summary.get("source_label") or "").strip()
     stale_days = int(meaning.state_flags.get("stale_days") or 0)
 
-    chips: list[str] = []
-    if source_mode == "demo":
-        chips.append("Demo mode")
-    if stale_days > 0:
-        day_word = "day" if stale_days == 1 else "days"
-        chips.append(f"Data {stale_days} {day_word} old")
-    if meaning.signal_mode == SignalMode.LIMITED_DATA:
-        chips.append("Limited history")
-    elif meaning.signal_mode == SignalMode.EARLY_SIGNAL:
-        chips.append("Early signal mode")
-
-    if meaning.status_line:
-        primary_line = meaning.status_line
+    status_parts: list[str] = []
+    if stale_days <= 0:
+        status_parts.append("Updated today")
+    elif stale_days == 1:
+        status_parts.append("Updated 1 day ago")
     else:
-        primary_line = "Signals are ranked by current evidence strength and recency."
+        status_parts.append(f"Updated {stale_days} days ago")
 
-    detail_line = ""
-    detail_source_line = ""
+    if meaning.signal_mode == SignalMode.LIMITED_DATA:
+        status_parts.append("Limited history")
+    elif meaning.signal_mode == SignalMode.EARLY_SIGNAL:
+        status_parts.append("Early signal mode")
+    else:
+        status_parts.append("Standard signal mode")
+
     if source_mode == "demo":
-        detail_line = "Demo mode: based on sample data, not live operations."
-        if source_label:
-            detail_source_line = f"Source: {source_label}"
+        status_parts.append("Demo mode")
 
-    chips_html = "".join(f'<span class="today-queue-chip">{chip}</span>' for chip in chips)
-    chips_block = f'<div class="today-queue-orientation-chips">{chips_html}</div>' if chips else ""
-    detail_block = ""
-    if detail_line:
-        detail_block += f'<div style="color:#5d7693;font-size:0.86rem;margin-top:6px;">{detail_line}</div>'
-    if detail_source_line:
-        detail_block += f'<div style="color:#5d7693;font-size:0.79rem;margin-top:2px;">{detail_source_line}</div>'
-
-    st.markdown(
-        (
-            '<div class="today-queue-orientation">'
-            '<strong>Today status</strong>'
-            f'{chips_block}'
-            f'<div style="margin-top:6px;">{primary_line}</div>'
-            f'{detail_block}'
-            '</div>'
-        ),
-        unsafe_allow_html=True,
-    )
+    status_line = " | ".join(part for part in status_parts if str(part or "").strip())
+    if status_line:
+        st.caption(status_line)
+    if source_mode == "demo" and source_label:
+        st.caption(f"Source: {source_label}")
 
 
 def _emit_today_loaded_with_data_once(*, tenant_id: str, import_summary: dict, queue_count: int) -> None:
@@ -2191,9 +2186,9 @@ def _render_queue_orientation_block(
             st.markdown(
                 (
                     '<div class="today-queue-orientation">'
-                    "<strong>No usable data is available yet.</strong><br>"
+                    "<strong>Initial data setup is in progress.</strong><br>"
                     '<span style="color:#5d7693;font-size:0.86rem;">'
-                    "The system could not evaluate today against recent performance because imported history is not available yet."
+                    "Today will surface comparison signals once uploaded history is processed."
                     "</span>"
                     "</div>"
                 ),
@@ -2364,7 +2359,7 @@ def _render_first_time_empty_state() -> None:
 def _render_filtered_empty_state() -> None:
     with st.container(border=True):
         st.markdown("### Nothing matches this filter")
-        st.write("The queue still has open work, but none of it fits the selected summary bucket.")
+        st.write("The queue still has active work, but none of it fits the selected summary bucket.")
         if st.button("Show full queue", key="today_clear_filter_empty", type="primary"):
             st.session_state.today_queue_filter = "all"
             st.rerun()
@@ -2488,16 +2483,16 @@ def _render_open_exceptions(*, tenant_id: str) -> None:
     rows = summary.get("rows") or []
 
     st.markdown('<div class="today-section-label">Operational Exceptions</div>', unsafe_allow_html=True)
-    st.markdown('<div class="today-supporting-note">Open operational context that may help explain current performance signals.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="today-supporting-note">Active operational context that may help explain current performance signals.</div>', unsafe_allow_html=True)
     _render_exception_create_form(tenant_id=tenant_id, today_value=date.today())
 
     if not rows:
         with st.container(border=True):
-            st.markdown("No open operational exceptions are currently logged.")
+            st.markdown("No active operational exceptions are currently logged.")
         return
 
     m1, m2 = st.columns(2)
-    m1.metric("Open exceptions", int(summary.get("open_count", 0) or 0))
+    m1.metric("Active exceptions", int(summary.get("open_count", 0) or 0))
     m2.metric("Linked employees", int(summary.get("linked_employee_count", 0) or 0))
     category_bits = [f"{name}: {count}" for name, count in sorted((summary.get("categories") or {}).items())]
     if category_bits:
@@ -2515,7 +2510,7 @@ def _render_open_exceptions(*, tenant_id: str) -> None:
                 unsafe_allow_html=True,
             )
             st.markdown(
-                "<div class=\"today-insight-line\"><strong>Why shown:</strong> Shown because this exception is still open and may affect current performance interpretation.</div>",
+                "<div class=\"today-insight-line\"><strong>Why shown:</strong> Shown because this exception is still active and may affect current performance interpretation.</div>",
                 unsafe_allow_html=True,
             )
             st.markdown(
@@ -2583,7 +2578,7 @@ def _render_open_exceptions(*, tenant_id: str) -> None:
 
             c1, c2 = st.columns(2)
             with c1:
-                if str(row.get("employee_id") or "") and st.button("Open employee detail", key=f"today_exception_open_{exception_id}", use_container_width=True):
+                if str(row.get("employee_id") or "") and st.button("Employee detail", key=f"today_exception_open_{exception_id}", use_container_width=True):
                     _go_to_exception_employee(row)
             with c2:
                 if st.button("Resolve exception", key=f"today_exception_resolve_{exception_id}", use_container_width=True):
@@ -2697,7 +2692,7 @@ def _build_attention_explanation_lines(signal: DisplaySignal, fallback_summary: 
     mode = get_signal_display_mode(signal)
 
     if mode == SignalDisplayMode.LOW_DATA:
-        lines.append(signal_wording("not_enough_history_yet"))
+        lines.append("History is still building for this signal.")
         lines.append(format_confidence_line(signal))
     elif mode == SignalDisplayMode.CURRENT_STATE:
         lines.append(format_signal_label(signal))
@@ -3100,7 +3095,7 @@ def _render_today_more_actions_fragment(
     )
     if link_existing_exception:
         if len(exception_options) <= 1:
-            st.caption("No open exceptions are currently available to link for this employee.")
+                st.caption("No active exceptions are currently available to link for this employee.")
         st.selectbox(
             "Existing exception",
             options=list(exception_options.keys()),
@@ -3252,6 +3247,22 @@ def _save_today_card_completion(
         )
         if not follow_through_saved:
             raise RuntimeError("Primary follow-through write returned no row.")
+
+        if follow_up_required and due_at_label:
+            _log_operational_event(
+                "today_follow_up_created",
+                status="success",
+                tenant_id=tenant_id,
+                user_email=owner_value,
+                context={
+                    "signal_id": signal_id,
+                    "signal_key": signal_key,
+                    "employee_id": employee_id,
+                    "follow_up_due_date": follow_up_due_date,
+                    "follow_up_due_at": due_at_label,
+                    "source": "today_mark_complete",
+                },
+            )
 
         clean_follow_through_note = str(follow_through_note or "").strip()
         if add_follow_through and clean_follow_through_note:
@@ -3417,7 +3428,6 @@ def _optimistically_complete_today_card(
     if card_session_key and card_session_key not in completed_items:
         completed_items.append(card_session_key)
     st.session_state[_TODAY_COMPLETED_ITEMS_SESSION_KEY] = completed_items
-    st.session_state[_TODAY_LAST_COMPLETED_LABEL_KEY] = str(card.line_1 or card.employee_id or "Item")
     st.session_state[_TODAY_FOCUS_NEXT_CARD_KEY] = True
     _defer_today_completion_widget_reset(card=card)
 
@@ -3529,6 +3539,16 @@ def _drain_today_async_completion_results() -> None:
     completed_ok = 0
     completed_failed = 0
     failed_errors: list[str] = []
+    completion_feedback_message = ""
+
+    def _feedback_message_from_meta(meta: dict[str, Any]) -> str:
+        follow_up_choice = str(meta.get("follow_up_choice") or "").strip()
+        follow_up_at = meta.get("follow_up_at")
+        if follow_up_choice in {"Follow up tomorrow", "Pick a date"} or isinstance(follow_up_at, datetime):
+            return "Marked complete. Follow-up scheduled."
+        if follow_up_choice == "No follow-up needed":
+            return "Marked complete."
+        return "Marked complete. Next item moved up."
 
     for completion_id in pending_ids:
         with _TODAY_COMPLETION_ASYNC_RESULTS_LOCK:
@@ -3570,6 +3590,7 @@ def _drain_today_async_completion_results() -> None:
 
         if status == "success" and card is not None:
             completed_ok += 1
+            completion_feedback_message = _feedback_message_from_meta(meta)
             _narrow_invalidate_today_completion_caches(card=card)
             _log_operational_event(
                 "today_mark_complete_persisted",
@@ -3677,8 +3698,8 @@ def _drain_today_async_completion_results() -> None:
         context={"pending_count": len(remaining_ids)},
     )
 
-    if completed_ok > 0:
-        set_flash_message("Marked complete.")
+    if completed_ok > 0 and completion_feedback_message:
+        st.session_state[_TODAY_COMPLETION_FEEDBACK_MESSAGE_KEY] = completion_feedback_message
     if completed_failed > 0:
         first_error = next((err for err in failed_errors if str(err or "").strip()), "write failed")
         show_error_state(f"Save failed: {first_error}")
@@ -3702,32 +3723,6 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
     follow_up_status_text = _today_follow_up_status_text(card)
     if follow_up_status_text:
         st.caption(follow_up_status_text)
-
-    note_text = st.text_area(
-        "Short note (optional)",
-        value=str(st.session_state.get(note_key) or ""),
-        key=note_key,
-        height=90,
-        placeholder="Add a short check-in note if helpful.",
-    )
-
-    follow_up_choice = st.selectbox(
-        "Next step",
-        options=["Select one", "No follow-up needed", "Follow up tomorrow", "Pick a date"],
-        index=0,
-        key=follow_up_key,
-    )
-
-    follow_up_due_at: datetime | None = None
-    if follow_up_choice == "Follow up tomorrow":
-        follow_up_due_at = datetime.combine(date.today() + timedelta(days=1), dt_time(hour=9, minute=0))
-    elif follow_up_choice == "Pick a date":
-        due_date = st.date_input(
-            "Follow-up date",
-            value=date.today() + timedelta(days=7),
-            key=due_date_key,
-        )
-        follow_up_due_at = datetime.combine(due_date, dt_time(hour=9, minute=0))
 
     add_operational_exception = False
     selected_exception_type = ""
@@ -3771,19 +3766,27 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
         optional_data = _get_today_more_actions_optional_data(card=card, tenant_id=tenant_id)
         linked_existing_exception_id = str((optional_data.get("exception_options") or {}).get(linked_exception_label) or "").strip()
 
-    has_note = bool(str(note_text or "").strip())
-    has_follow_up_selection = follow_up_choice in {"No follow-up needed", "Follow up tomorrow", "Pick a date"}
-    can_submit = has_follow_up_selection
     pending_signal_keys = _get_pending_completion_signal_keys()
     is_signal_pending = bool(signal_id and signal_id in pending_signal_keys)
 
-    if st.button(
-        "Mark as complete",
-        key=submit_key,
-        use_container_width=True,
-        type="primary",
-        disabled=not can_submit or is_signal_pending,
-    ):
+    quick_reviewed_key = _today_completion_widget_key(signal_id=signal_id, field="quick_reviewed")
+    quick_follow_tomorrow_key = _today_completion_widget_key(signal_id=signal_id, field="quick_follow_tomorrow")
+
+    def _queue_completion_submission(
+        *,
+        submit_note_text: str,
+        submit_follow_up_choice: str,
+        submit_follow_up_due_at: datetime | None,
+        submit_add_operational_exception: bool,
+        submit_exception_type: str,
+        submit_operational_exception_note: str,
+        submit_link_existing_exception: bool,
+        submit_linked_existing_exception_id: str,
+        submit_add_follow_through: bool,
+        submit_follow_through_status: str,
+        submit_follow_through_note: str,
+        submit_link_follow_through_to_exception: bool,
+    ) -> None:
         if is_signal_pending:
             _log_operational_event(
                 "today_mark_complete_duplicate_prevented",
@@ -3796,19 +3799,17 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
                 },
             )
             return
-        if not has_follow_up_selection:
-            st.warning("Choose the next step before completing.")
-            return
-        if add_operational_exception and not str(operational_exception_note or "").strip():
+
+        if submit_add_operational_exception and not str(submit_operational_exception_note or "").strip():
             st.warning("Add an exception note before completing.")
             return
-        if link_existing_exception and not linked_existing_exception_id:
+        if submit_link_existing_exception and not submit_linked_existing_exception_id:
             st.warning("Select an existing exception to link.")
             return
-        if add_follow_through and not str(follow_through_note or "").strip():
+        if submit_add_follow_through and not str(submit_follow_through_note or "").strip():
             st.warning("Add a follow-through note before completing.")
             return
-        if link_follow_through_to_exception and not (linked_existing_exception_id or add_operational_exception):
+        if submit_link_follow_through_to_exception and not (submit_linked_existing_exception_id or submit_add_operational_exception):
             st.warning("Create or link an exception before linking follow-through.")
             return
 
@@ -3831,18 +3832,18 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
         st.session_state["_today_last_clicked_completion_signal_id"] = signal_id
         write_payload = {
             "card": dataclasses.asdict(card),
-            "note_text": str(note_text or ""),
-            "follow_up_choice": str(follow_up_choice or "Select one"),
-            "follow_up_required": bool(follow_up_choice in {"Follow up tomorrow", "Pick a date"}),
-            "follow_up_at": follow_up_due_at,
-            "add_operational_exception": bool(add_operational_exception),
-            "exception_type": str(selected_exception_type or ""),
-            "exception_note": str(operational_exception_note or ""),
-            "linked_existing_exception_id": str(linked_existing_exception_id or ""),
-            "add_follow_through": bool(add_follow_through),
-            "follow_through_status": str(selected_follow_through_status or "logged"),
-            "follow_through_note": str(follow_through_note or ""),
-            "link_follow_through_to_exception": bool(link_follow_through_to_exception),
+            "note_text": str(submit_note_text or ""),
+            "follow_up_choice": str(submit_follow_up_choice or "Select one"),
+            "follow_up_required": bool(submit_follow_up_choice in {"Follow up tomorrow", "Pick a date"}),
+            "follow_up_at": submit_follow_up_due_at,
+            "add_operational_exception": bool(submit_add_operational_exception),
+            "exception_type": str(submit_exception_type or ""),
+            "exception_note": str(submit_operational_exception_note or ""),
+            "linked_existing_exception_id": str(submit_linked_existing_exception_id or ""),
+            "add_follow_through": bool(submit_add_follow_through),
+            "follow_through_status": str(submit_follow_through_status or "logged"),
+            "follow_through_note": str(submit_follow_through_note or ""),
+            "link_follow_through_to_exception": bool(submit_link_follow_through_to_exception),
             "owner_value": owner_value,
             "tenant_id": tenant_id,
             "user_role": user_role,
@@ -3867,9 +3868,9 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
             "note_key": note_key,
             "follow_up_key": follow_up_key,
             "due_date_key": due_date_key,
-            "note_text": str(note_text or ""),
-            "follow_up_choice": str(follow_up_choice or "Select one"),
-            "follow_up_at": follow_up_due_at,
+            "note_text": str(submit_note_text or ""),
+            "follow_up_choice": str(submit_follow_up_choice or "Select one"),
+            "follow_up_at": submit_follow_up_due_at,
         }
         st.session_state[_TODAY_PENDING_COMPLETION_META_KEY] = pending_meta
 
@@ -3896,6 +3897,120 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
 
         _start_today_completion_write_async(completion_id=completion_id, payload=write_payload)
         st.rerun()
+
+    quick_actions_enabled = (
+        not bool(str(st.session_state.get(note_key) or "").strip())
+        and str(st.session_state.get(follow_up_key) or "Select one") == "Select one"
+    )
+    if not is_signal_pending:
+        st.caption("Quick actions")
+        quick_cols = st.columns([1, 1])
+        with quick_cols[0]:
+            quick_reviewed_clicked = st.button(
+                "Review done",
+                key=quick_reviewed_key,
+                type="secondary",
+                use_container_width=True,
+                disabled=not quick_actions_enabled,
+            )
+        with quick_cols[1]:
+            quick_follow_tomorrow_clicked = st.button(
+                "Check tomorrow",
+                key=quick_follow_tomorrow_key,
+                type="secondary",
+                use_container_width=True,
+                disabled=not quick_actions_enabled,
+            )
+
+        if quick_reviewed_clicked and quick_actions_enabled:
+            _queue_completion_submission(
+                submit_note_text="Reviewed — no follow-up needed",
+                submit_follow_up_choice="No follow-up needed",
+                submit_follow_up_due_at=None,
+                submit_add_operational_exception=False,
+                submit_exception_type="",
+                submit_operational_exception_note="",
+                submit_link_existing_exception=False,
+                submit_linked_existing_exception_id="",
+                submit_add_follow_through=False,
+                submit_follow_through_status="logged",
+                submit_follow_through_note="",
+                submit_link_follow_through_to_exception=False,
+            )
+            return
+
+        if quick_follow_tomorrow_clicked and quick_actions_enabled:
+            _queue_completion_submission(
+                submit_note_text="Reviewed — follow-up tomorrow",
+                submit_follow_up_choice="Follow up tomorrow",
+                submit_follow_up_due_at=datetime.combine(date.today() + timedelta(days=1), dt_time(hour=9, minute=0)),
+                submit_add_operational_exception=False,
+                submit_exception_type="",
+                submit_operational_exception_note="",
+                submit_link_existing_exception=False,
+                submit_linked_existing_exception_id="",
+                submit_add_follow_through=False,
+                submit_follow_through_status="logged",
+                submit_follow_through_note="",
+                submit_link_follow_through_to_exception=False,
+            )
+            return
+
+    st.caption("Add note / choose follow-up")
+
+    note_text = st.text_area(
+        "Short note (optional)",
+        value=str(st.session_state.get(note_key) or ""),
+        key=note_key,
+        height=90,
+        placeholder="Add a short check-in note if helpful.",
+    )
+
+    follow_up_choice = st.selectbox(
+        "Next step",
+        options=["Select one", "No follow-up needed", "Follow up tomorrow", "Pick a date"],
+        index=0,
+        key=follow_up_key,
+    )
+
+    follow_up_due_at: datetime | None = None
+    if follow_up_choice == "Follow up tomorrow":
+        follow_up_due_at = datetime.combine(date.today() + timedelta(days=1), dt_time(hour=9, minute=0))
+    elif follow_up_choice == "Pick a date":
+        due_date = st.date_input(
+            "Follow-up date",
+            value=date.today() + timedelta(days=7),
+            key=due_date_key,
+        )
+        follow_up_due_at = datetime.combine(due_date, dt_time(hour=9, minute=0))
+
+    has_follow_up_selection = follow_up_choice in {"No follow-up needed", "Follow up tomorrow", "Pick a date"}
+    can_submit = has_follow_up_selection
+
+    if st.button(
+        "Mark as complete",
+        key=submit_key,
+        use_container_width=True,
+        type="primary",
+        disabled=not can_submit or is_signal_pending,
+    ):
+        if not has_follow_up_selection:
+            st.warning("Choose the next step before completing.")
+            return
+        _queue_completion_submission(
+            submit_note_text=str(note_text or ""),
+            submit_follow_up_choice=str(follow_up_choice or "Select one"),
+            submit_follow_up_due_at=follow_up_due_at,
+            submit_add_operational_exception=bool(add_operational_exception),
+            submit_exception_type=str(selected_exception_type or ""),
+            submit_operational_exception_note=str(operational_exception_note or ""),
+            submit_link_existing_exception=bool(link_existing_exception),
+            submit_linked_existing_exception_id=str(linked_existing_exception_id or ""),
+            submit_add_follow_through=bool(add_follow_through),
+            submit_follow_through_status=str(selected_follow_through_status or "logged"),
+            submit_follow_through_note=str(follow_through_note or ""),
+            submit_link_follow_through_to_exception=bool(link_follow_through_to_exception),
+        )
 
 
 def _today_card_next_check_cue(card: TodayQueueCardViewModel, line_5_text: str) -> str:
@@ -3967,6 +4082,14 @@ def _render_attention_card(
         if department_name:
             st.markdown(f'<div class="today-card-department">{department_name}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="{line_class}">{card.line_2}</div>', unsafe_allow_html=True)
+        if not compact:
+            what_changed_text = str(getattr(card, "what_changed_line", "") or "").strip()
+            surfaced_because_text = str(card.line_3 or "").strip()
+            line_2_text = str(card.line_2 or "").strip().lower()
+            if what_changed_text and what_changed_text.lower() != line_2_text:
+                st.markdown(f'<div class="{line_class}">{what_changed_text}</div>', unsafe_allow_html=True)
+            if surfaced_because_text and surfaced_because_text.lower() not in {line_2_text, what_changed_text.lower() if what_changed_text else ""}:
+                st.markdown(f'<div class="{line_class}">{surfaced_because_text}</div>', unsafe_allow_html=True)
 
         line_5_text = str(card.line_5 or "").strip()
         freshness_text = str(card.freshness_line or "").strip()
@@ -4015,13 +4138,6 @@ def _render_attention_card(
 
         if signal_status_map is not None and not compact:
             with st.expander("Handle this", expanded=is_lead):
-                if is_lead:
-                    st.markdown(
-                        '<div style="font-size:0.8rem;color:#5d7693;margin-bottom:0.5rem;">'
-                        'Add a note and choose follow-up before marking complete.'
-                        '</div>',
-                        unsafe_allow_html=True,
-                    )
                 _render_guided_completion_controls(
                     card=card,
                     key_prefix=f"{key_prefix}_complete",
@@ -4118,18 +4234,129 @@ def _today_card_session_key(card: TodayQueueCardViewModel) -> str:
     return f"card:{employee_id}:{process_id}:{state}:{line_1}".strip(":")
 
 
+def _render_today_standup_view(cards: list[TodayQueueCardViewModel]) -> None:
+    standup_text = build_today_standup_text(cards)
+    st.markdown('<div class="today-section-label">Standup view</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="today-supporting-note">Read-only shift standup summary.</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(standup_text.replace("\n", "  \n"))
+
+
+def _render_today_low_data_fallback(fallback: TodayLowDataFallbackViewModel) -> None:
+    st.markdown(
+        f'<div class="today-action-frame-heading">Today ({fallback.mode_label})</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="today-action-frame-sub">{fallback.explanation_line}</div>',
+        unsafe_allow_html=True,
+    )
+    fallback_lines = [f"- {line}" for line in list(fallback.bullets or [])[:3]]
+    if fallback_lines:
+        st.markdown("  \n".join(fallback_lines))
+
+
+def _render_today_team_risk_block(team_risk: TodayTeamRiskViewModel | None) -> None:
+    if team_risk is None or not list(team_risk.bullets or []):
+        return
+    with st.expander("Team snapshot", expanded=False):
+        for bullet in list(team_risk.bullets or [])[:3]:
+            st.markdown(f"- {bullet}")
+
+
+def _render_today_copy_summary_block(cards: list[TodayQueueCardViewModel], *, today_value: date) -> None:
+        summary_text = build_today_summary(cards)
+        reveal_key = f"_today_copy_summary_visible_{today_value.isoformat()}"
+        text_key = f"_today_copy_summary_text_{today_value.isoformat()}"
+        copy_button_key = f"today_copy_summary_clipboard_{today_value.isoformat()}"
+        button_id = f"today-copy-summary-button-{today_value.isoformat()}"
+        status_id = f"today-copy-summary-status-{today_value.isoformat()}"
+        payload = json.dumps(summary_text)
+
+        st.markdown('<div class="today-section-label">Copy-ready summary</div>', unsafe_allow_html=True)
+        st.markdown(
+                '<div class="today-supporting-note">Short queue summary for export or handoff.</div>',
+                unsafe_allow_html=True,
+        )
+
+        components.html(
+                f"""
+                <div style=\"display:flex;align-items:center;gap:0.6rem;margin:0.15rem 0 0.35rem 0;\">
+                    <button
+                        id=\"{button_id}\"
+                        type=\"button\"
+                        style=\"background:#1f6feb;color:#fff;border:0;border-radius:999px;padding:0.42rem 0.9rem;font-size:0.9rem;font-weight:600;cursor:pointer;\"
+                    >
+                        Copy summary
+                    </button>
+                    <span id=\"{status_id}\" style=\"font-size:0.82rem;color:#4b647d;min-height:1rem;\"></span>
+                </div>
+                <script>
+                const copyText = {payload};
+                const button = document.getElementById({json.dumps(button_id)});
+                const status = document.getElementById({json.dumps(status_id)});
+
+                async function copySummaryText() {{
+                    try {{
+                        if (navigator.clipboard && navigator.clipboard.writeText) {{
+                            await navigator.clipboard.writeText(copyText);
+                        }} else {{
+                            const helper = document.createElement('textarea');
+                            helper.value = copyText;
+                            helper.style.position = 'fixed';
+                            helper.style.opacity = '0';
+                            document.body.appendChild(helper);
+                            helper.focus();
+                            helper.select();
+                            document.execCommand('copy');
+                            document.body.removeChild(helper);
+                        }}
+                        status.textContent = 'Copied';
+                    }} catch (_error) {{
+                        status.textContent = 'Copy failed';
+                    }}
+                    window.setTimeout(() => {{
+                        status.textContent = '';
+                    }}, 1800);
+                }}
+
+                if (button) {{
+                    button.addEventListener('click', copySummaryText);
+                }}
+                </script>
+                """,
+                height=44,
+                key=copy_button_key,
+        )
+
+        if st.button("Show summary text", key=f"today_copy_summary_toggle_{today_value.isoformat()}"):
+                st.session_state[reveal_key] = True
+
+        if bool(st.session_state.get(reveal_key)):
+                st.text_area(
+                        "Today summary",
+                        value=summary_text,
+                        height=140,
+                        key=text_key,
+                )
+
+
 
 def _render_unified_attention_queue(
     attention: AttentionSummary,
     *,
     decision_items: list[Any] | None = None,
     suppressed_cards: list[InsightCardContract] | None = None,
+    goal_status: list[dict[str, Any]] | None = None,
     is_stale: bool = False,
     show_secondary_open: bool = False,
     weak_data_mode: bool = False,
     snapshot_cards: list[TodayQueueCardViewModel] | None = None,
     last_action_lookup: dict[str, str] | None = None,
     action_state_lookup: dict[str, dict[str, Any]] | None = None,
+    low_data_fallback: TodayLowDataFallbackViewModel | None = None,
     render_plan: TodayQueueRenderPlan | None = None,
     prepared_queue_render: dict[str, Any] | None = None,
 ) -> None:
@@ -4164,17 +4391,23 @@ def _render_unified_attention_queue(
         top_cards = list(fallback_prepared.get("top_cards") or [])
         overflow_cards = list(fallback_prepared.get("overflow_cards") or [])
 
-    completed_label = str(st.session_state.pop(_TODAY_LAST_COMPLETED_LABEL_KEY, "") or "").strip()
-    if completed_label:
-        st.caption("Completed.")
+    if low_data_fallback is not None:
+        _render_today_low_data_fallback(low_data_fallback)
+        return
+
+    completion_feedback = str(st.session_state.pop(_TODAY_COMPLETION_FEEDBACK_MESSAGE_KEY, "") or "").strip()
+    if completion_feedback:
+        st.caption(completion_feedback)
+
+    team_risk = build_today_team_risk_view_model(
+        goal_status=list(goal_status or []),
+        cards=active_ranked_cards,
+    )
 
     if not active_ranked_cards and plan.primary_placeholder:
         st.markdown(f'<div class="today-placeholder">{plan.primary_placeholder}</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="today-action-frame-heading">Handle these first</div>', unsafe_allow_html=True)
-        st.markdown('<div class="today-action-frame-sub">These are the strongest signals from today\'s available data.</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="today-action-instruction">Open a card, add a note, and mark it complete when handled.</div>', unsafe_allow_html=True)
         st.session_state.pop(_TODAY_FOCUS_NEXT_CARD_KEY, None)
 
         # Honor one-time Team return focus payload first, then legacy cn_selected_emp behavior.
@@ -4240,6 +4473,21 @@ def _render_unified_attention_queue(
                     compact=True,
                     signal_status_map=signal_status_map,
                 )
+
+    if active_ranked_cards:
+        _render_today_copy_summary_block(active_ranked_cards, today_value=date.today())
+
+    auto_resolved_count = int(getattr(plan, "auto_resolved_count", 0) or 0)
+    if auto_resolved_count > 0:
+        _shown_key = _TODAY_AUTO_RESOLVED_SHOWN_KEY_PREFIX + date.today().isoformat()
+        if not st.session_state.get(_shown_key):
+            _item_word = "item" if auto_resolved_count == 1 else "items"
+            st.caption(f"{auto_resolved_count} {_item_word} back to target \u2014 no action needed")
+            st.session_state[_shown_key] = True
+
+    with st.expander("Context", expanded=False):
+        _render_today_standup_view(active_ranked_cards)
+        _render_today_team_risk_block(team_risk)
 
     if plan.suppressed_debug_rows:
         st.session_state["_today_suppressed_signals_debug"] = list(plan.suppressed_debug_rows)
@@ -5043,6 +5291,11 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     today_value=today_value,
                 )
 
+            low_data_fallback = build_today_low_data_fallback_view_model(
+                goal_status=goal_status,
+                import_summary=import_summary,
+            )
+
             if not _has_today_data(
                 queue_items=queue_items,
                 goal_status=goal_status,
@@ -5057,6 +5310,8 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 import_summary=import_summary,
                 queue_count=int(counts.get("all", 0) or 0),
             )
+
+            _render_top_status_area(meaning=meaning)
 
             phase2_ready = bool(st.session_state.get(phase2_ready_key))
             if not phase2_ready:
@@ -5094,6 +5349,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                         top_cards=list(phase1_prepared.get("top_cards") or []),
                         signal_status_map=dict(phase1_prepared.get("signal_status_map") or {}),
                         people_needing_attention=int(phase1_prepared.get("people_needing_attention") or 0),
+                        low_data_fallback=low_data_fallback,
                     )
                     if list(phase1_prepared.get("top_cards") or []):
                         _log_today_milestone(
@@ -5452,12 +5708,14 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     decision_summary,
                     decision_items=decision_items,
                     suppressed_cards=home_sections.get("suppressed_signals", []),
+                    goal_status=goal_status,
                     is_stale=bool(meaning.state_flags.get("stale_data")),
                     show_secondary_open=bool(st.session_state.get("_first_import_just_completed")),
                     weak_data_mode=bool(meaning.weak_data_mode),
                     snapshot_cards=snapshot_cards,
                     last_action_lookup=last_action_lookup,
                     action_state_lookup=action_state_lookup,
+                    low_data_fallback=low_data_fallback,
                     render_plan=render_plan,
                     prepared_queue_render=prepared_queue_render,
                 )

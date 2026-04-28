@@ -80,6 +80,7 @@ def test_render_first_value_screen_routes_sample_data_to_import(monkeypatch):
 
     assert session_state["goto_page"] == "import"
     assert session_state["import_entry_mode"] == "Try sample data"
+    assert session_state["_auto_load_sample_on_import_once"] is True
     assert any("Get to your first value" in call for call in markdown_calls)
     assert any("Today becomes useful" in call for call in markdown_calls)
     assert any("After import, Today returns to the normal queue automatically." in call for call in info_calls)
@@ -161,6 +162,11 @@ def test_page_today_bypasses_queue_rendering_for_no_data_tenant(monkeypatch):
     monkeypatch.setattr(today, "render_traceability_panel", lambda *args, **kwargs: None)
     monkeypatch.setattr(today, "_show_flash_message", lambda: None)
     monkeypatch.setattr(today, "get_today_signals", lambda **kwargs: precomputed)
+    monkeypatch.setattr(today, "_today_should_show_first_paint_shell", lambda **kwargs: False)
+    monkeypatch.setattr(today, "_finalize_today_initial_load_state", lambda **kwargs: True)
+    monkeypatch.setattr(today, "_trigger_today_initial_ready_rerun_if_needed", lambda **kwargs: False)
+    monkeypatch.setattr(today, "_precomputed_payload_looks_stale", lambda **kwargs: False)
+    monkeypatch.setattr(today, "_attempt_signal_payload_recovery", lambda **kwargs: False)
     monkeypatch.setattr(today, "_cached_employees", lambda: [])
     monkeypatch.setattr(today, "_render_first_value_screen", lambda: first_value_calls.append("rendered"))
     monkeypatch.setattr(today, "_render_top_status_area", lambda **kwargs: (_ for _ in ()).throw(AssertionError("top status should not render")))
