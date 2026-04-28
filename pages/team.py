@@ -50,7 +50,6 @@ from services.team_page_language_service import (
     format_roster_reason_improving,
     format_roster_reason_stable,
     format_roster_reason_variable,
-    format_selected_employee_subheader,
     format_selected_summary,
     format_show_older_exceptions_label,
     format_show_older_notes_label,
@@ -471,49 +470,8 @@ def _build_follow_up_status_lines(*, row: dict, notes: list[dict], action_rows: 
 
     if latest_review is not None:
         lines.append(f"Last reviewed {_format_month_day(latest_review)}")
-
-    # Add a concise last-check result from recent follow-up outcome first,
-    # then fall back to the most recent human-readable note.
-    last_check_text = ""
-
-    sorted_actions = sorted(
-        list(action_rows or []),
-        key=lambda ev: (_parse_dt(str(ev.get("event_at") or "").strip()) or datetime.min),
-        reverse=True,
-    )
-    for event in sorted_actions:
-        event_type = str(event.get("event_type") or "").strip().lower()
-        if event_type not in {"follow_up_logged", "follow_through_logged", "resolved"}:
-            continue
-        for candidate in (
-            str(event.get("outcome") or "").strip(),
-            str(event.get("result") or "").strip(),
-            str(event.get("notes") or "").strip(),
-        ):
-            clean_candidate = clean_note_text_for_display(candidate)
-            if clean_candidate:
-                last_check_text = clean_candidate
-                break
-        if last_check_text:
-            break
-
-    if not last_check_text:
-        sorted_notes = sorted(
-            list(notes or []),
-            key=lambda note: (_parse_dt(str(note.get("created_at") or note.get("date") or "").strip()) or datetime.min),
-            reverse=True,
-        )
-        for note in sorted_notes:
-            note_text = _note_text(note)
-            if note_text:
-                last_check_text = note_text
-                break
-
-    if last_check_text:
-        compact_last_check = " ".join(last_check_text.split())
-        if len(compact_last_check) > 88:
-            compact_last_check = f"{compact_last_check[:87].rstrip()}..."
-        lines.append(f"Last check: {compact_last_check}")
+    if latest_review is None:
+        lines.append("Last reviewed not recorded")
 
     return lines
 
@@ -944,7 +902,13 @@ def _render_team_page_styles() -> None:
         """
         <style>
         div.block-container {
+            max-width: none;
+            width: 100%;
+            margin-left: 0;
+            margin-right: 0;
             padding-top: 1.1rem;
+            padding-left: 1rem;
+            padding-right: 1rem;
             padding-bottom: 1.4rem;
         }
         div[data-testid="stHorizontalBlock"] {
@@ -1106,7 +1070,6 @@ def _render_team_page_styles() -> None:
             color: var(--dpd-navy-900);
             line-height: 1.24;
             margin: 0.25rem 0 0.6rem 0;
-            max-width: 54rem;
         }
         .team-summary-secondary {
             font-size: 1.0rem;
@@ -1114,7 +1077,20 @@ def _render_team_page_styles() -> None:
             line-height: 1.55;
             margin: 0 0 0.55rem 0;
             color: var(--dpd-text);
-            max-width: 56rem;
+        }
+        .team-followup-status {
+            font-size: 1.05rem;
+            font-weight: 650;
+            color: var(--dpd-navy-900);
+            line-height: 1.35;
+            margin: 0.05rem 0 0.35rem 0;
+        }
+        .team-followup-meta {
+            font-size: 0.93rem;
+            font-weight: 500;
+            color: var(--dpd-text-muted);
+            line-height: 1.35;
+            margin: 0.05rem 0 0.45rem 0;
         }
         .team-trend-primary {
             font-size: 0.96rem;
@@ -1449,7 +1425,7 @@ def page_team() -> None:
     with st.container():
         st.markdown("<div class='team-section-anchor team-section-anchor--summary'></div>", unsafe_allow_html=True)
         st.markdown(f"### {employee_name}")
-        st.caption(format_selected_employee_subheader(department, status_label))
+        st.caption(" · ".join([part for part in (department, status_label) if part]))
         if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
             st.markdown(
                 f"<div class='team-focus-banner'>Opened from Today: {escape(handoff_reason)}</div>",
@@ -1458,7 +1434,7 @@ def page_team() -> None:
         if primary_statement:
             st.markdown(f"<div class='team-summary-primary'>{escape(primary_statement)}</div>", unsafe_allow_html=True)
         st.markdown(
-            f"<div class='team-summary-context'>Main state: {escape(selected_window_trend_text)}</div>",
+            f"<div class='team-summary-context'>{escape(selected_window_trend_text)}</div>",
             unsafe_allow_html=True,
         )
         attention_line = (
@@ -1471,8 +1447,10 @@ def page_team() -> None:
             unsafe_allow_html=True,
         )
         st.markdown("#### Follow-up status")
-        for line in follow_up_status_lines:
-            st.markdown(f"<div class='team-summary-context'>{escape(line)}</div>", unsafe_allow_html=True)
+        if follow_up_status_lines:
+            st.markdown(f"<div class='team-followup-status'>{escape(str(follow_up_status_lines[0]))}</div>", unsafe_allow_html=True)
+        if len(follow_up_status_lines) > 1:
+            st.markdown(f"<div class='team-followup-meta'>{escape(str(follow_up_status_lines[1]))}</div>", unsafe_allow_html=True)
         if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
             st.markdown(
                 f"<div class='team-summary-context team-summary-context-highlight'>{escape(handoff_reason)}</div>",
