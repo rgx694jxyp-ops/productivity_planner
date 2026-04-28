@@ -4270,7 +4270,6 @@ def _render_today_copy_summary_block(cards: list[TodayQueueCardViewModel], *, to
         summary_text = build_today_summary(cards)
         reveal_key = f"_today_copy_summary_visible_{today_value.isoformat()}"
         text_key = f"_today_copy_summary_text_{today_value.isoformat()}"
-        copy_button_key = f"today_copy_summary_clipboard_{today_value.isoformat()}"
         button_id = f"today-copy-summary-button-{today_value.isoformat()}"
         status_id = f"today-copy-summary-status-{today_value.isoformat()}"
         payload = json.dumps(summary_text)
@@ -4328,7 +4327,6 @@ def _render_today_copy_summary_block(cards: list[TodayQueueCardViewModel], *, to
                 </script>
                 """,
                 height=44,
-                key=copy_button_key,
         )
 
         if st.button("Show summary text", key=f"today_copy_summary_toggle_{today_value.isoformat()}"):
