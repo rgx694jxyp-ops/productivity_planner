@@ -2,7 +2,7 @@ from contextlib import contextmanager
 from datetime import date
 
 from domain.display_signal import DisplaySignal, SignalConfidence, SignalLabel
-from pages.today import _render_attention_card
+from pages.today import _action_state_chip, _render_attention_card, _today_follow_up_status_text
 from services.attention_scoring_service import AttentionItem, AttentionSummary
 from services.today_view_model_service import TodayQueueCardViewModel, build_today_queue_view_model
 
@@ -151,20 +151,24 @@ def test_today_queue_cards_stay_uncluttered_without_action_context(monkeypatch):
 
 
 def test_today_renderer_shows_action_state_chip_when_present(monkeypatch):
-    rendered: list[str] = []
-    monkeypatch.setattr("pages.today.st.container", _noop_container)
-    monkeypatch.setattr("pages.today.st.markdown", lambda text, **kwargs: rendered.append(str(text)))
+    payload = _action_state_chip(_card(normalized_action_state="Follow-up Scheduled"))
 
-    _render_attention_card(
-        card=_card(normalized_action_state="Follow-up Scheduled"),
-        key_prefix="action_state_scheduled",
-        compact=True,
-        show_action=False,
-    )
-
-    payload = "\n".join(rendered)
     assert "Follow-up Scheduled" in payload
     assert "today-action-state-chip" in payload
+
+
+def test_today_follow_up_status_text_handles_due_today_overdue_and_none():
+    due_today = _card(normalized_action_state="Follow-up Scheduled")
+    due_today = TodayQueueCardViewModel(**{**due_today.__dict__, "normalized_action_state_detail": "Due today"})
+
+    overdue = _card(normalized_action_state="Follow-up Scheduled")
+    overdue = TodayQueueCardViewModel(**{**overdue.__dict__, "normalized_action_state_detail": "Overdue"})
+
+    none = _card(normalized_action_state="")
+
+    assert _today_follow_up_status_text(due_today, today_value=date(2026, 4, 13)) == "Follow-up due today"
+    assert _today_follow_up_status_text(overdue, today_value=date(2026, 4, 13)) == "Follow-up overdue"
+    assert _today_follow_up_status_text(none, today_value=date(2026, 4, 13)) == "No follow-up scheduled"
 
 
 def test_today_renderer_omits_action_state_chip_without_context(monkeypatch):

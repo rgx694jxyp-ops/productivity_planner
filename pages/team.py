@@ -422,6 +422,43 @@ def _format_month_day(dt: datetime, *, include_time: bool = False) -> str:
 
 
 def _build_follow_up_status_lines(*, row: dict, notes: list[dict], action_rows: list[dict]) -> list[str]:
+    def _clean_last_check_result(text: str) -> str:
+        clean = clean_note_text_for_display(text)
+        if not clean:
+            clean = " ".join(str(text or "").split()).strip()
+        lower = clean.lower()
+        blocked = (
+            "issue resolved",
+            "event_type",
+            "signal_key=",
+            "signal_id=",
+            "employee_id=",
+            "tenant_id=",
+            "debug",
+        )
+        if not clean or any(token in lower for token in blocked):
+            return ""
+        if lower.startswith("last check result:"):
+            return clean.split(":", 1)[1].strip()
+        if lower.startswith("reviewed and logged"):
+            return "Reviewed and logged"
+        return clean[:160]
+
+    def _latest_last_check_result() -> str:
+        best_dt: datetime | None = None
+        best_text = ""
+        for ev in action_rows or []:
+            event_dt = _parse_dt(str(ev.get("event_at") or "").strip())
+            candidate = _clean_last_check_result(str(ev.get("outcome") or ""))
+            if not candidate:
+                candidate = _clean_last_check_result(str(ev.get("notes") or ""))
+            if not candidate:
+                continue
+            if best_dt is None or (event_dt is not None and event_dt >= best_dt):
+                best_dt = event_dt
+                best_text = candidate
+        return best_text
+
     due_raw = str(
         row.get("follow_up_due_at")
         or row.get("next_follow_up_at")
@@ -432,11 +469,18 @@ def _build_follow_up_status_lines(*, row: dict, notes: list[dict], action_rows: 
 
     lines: list[str] = []
     if due_dt is not None:
-        lines.append(f"Follow-up scheduled for {_format_month_day(due_dt, include_time=True)}")
+        today_dt = datetime.utcnow()
+        day_delta = (due_dt.date() - today_dt.date()).days
+        if day_delta < 0:
+            lines.append("Follow-up overdue")
+        elif day_delta == 0:
+            lines.append("Follow-up due today")
+        else:
+            lines.append(f"Follow-up scheduled for {_format_month_day(due_dt, include_time=True)}")
     else:
         due_flag = str(row.get("follow_up_due") or "").strip().lower()
         if due_flag in {"true", "yes", "1", "y", "pending", "due"}:
-            lines.append("Follow-up scheduled")
+            lines.append("Follow-up due today")
         else:
             lines.append("No follow-up scheduled")
 
@@ -472,6 +516,10 @@ def _build_follow_up_status_lines(*, row: dict, notes: list[dict], action_rows: 
         lines.append(f"Last reviewed {_format_month_day(latest_review)}")
     if latest_review is None:
         lines.append("Last reviewed not recorded")
+
+    last_check_result = _latest_last_check_result()
+    if last_check_result:
+        lines.append(f"Last check result: {last_check_result}")
 
     return lines
 
@@ -1451,6 +1499,8 @@ def page_team() -> None:
             st.markdown(f"<div class='team-followup-status'>{escape(str(follow_up_status_lines[0]))}</div>", unsafe_allow_html=True)
         if len(follow_up_status_lines) > 1:
             st.markdown(f"<div class='team-followup-meta'>{escape(str(follow_up_status_lines[1]))}</div>", unsafe_allow_html=True)
+        if len(follow_up_status_lines) > 2:
+            st.markdown(f"<div class='team-followup-meta'>{escape(str(follow_up_status_lines[2]))}</div>", unsafe_allow_html=True)
         if has_today_handoff and handoff_reason and employee_id == handoff_employee_id:
             st.markdown(
                 f"<div class='team-summary-context team-summary-context-highlight'>{escape(handoff_reason)}</div>",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pages import team
 
 
@@ -463,7 +465,7 @@ def test_window_trend_summary_uses_percent_only_when_label_suppressed():
     assert summary == "-3.5% over the last 14 days"
 
 
-def test_follow_up_status_reports_schedule_and_last_review_only():
+def test_follow_up_status_reports_schedule_last_review_and_last_check_result():
     lines = team._build_follow_up_status_lines(
         row={"follow_up_due_at": "2026-05-04T09:00:00"},
         notes=[
@@ -480,7 +482,7 @@ def test_follow_up_status_reports_schedule_and_last_review_only():
 
     assert lines[0].startswith("Follow-up scheduled for")
     assert any(line == "Last reviewed Apr 27" for line in lines)
-    assert not any(line.startswith("Last check:") for line in lines)
+    assert any(line == "Last check result: Performance still below target" for line in lines)
 
 
 def test_follow_up_status_uses_not_recorded_when_no_recent_review():
@@ -492,6 +494,22 @@ def test_follow_up_status_uses_not_recorded_when_no_recent_review():
 
     assert lines[0] == "No follow-up scheduled"
     assert lines[1] == "Last reviewed not recorded"
+
+
+def test_follow_up_status_reports_due_today_and_overdue_states():
+    due_today_lines = team._build_follow_up_status_lines(
+        row={"follow_up_due_at": datetime.utcnow().date().isoformat()},
+        notes=[],
+        action_rows=[],
+    )
+    overdue_lines = team._build_follow_up_status_lines(
+        row={"follow_up_due_at": "2026-04-01T09:00:00"},
+        notes=[],
+        action_rows=[],
+    )
+
+    assert due_today_lines[0] == "Follow-up due today"
+    assert overdue_lines[0] == "Follow-up overdue"
 
 
 def test_team_handoff_auto_selects_employee_and_shows_banner_once(monkeypatch):

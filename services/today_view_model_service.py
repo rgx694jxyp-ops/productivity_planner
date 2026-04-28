@@ -48,6 +48,7 @@ class TodayQueueCardViewModel:
     line_4: str
     line_5: str
     expanded_lines: list[str]
+    what_changed_line: str = ""
     normalized_action_state: str = ""
     normalized_action_state_detail: str = ""
     freshness_line: str = ""
@@ -848,43 +849,244 @@ def _freshness_line(signal: DisplaySignal) -> str:
     return f"Freshness: {age_days} days old snapshot"
 
 
+def _why_surfaced_window_days(signal: DisplaySignal) -> int | None:
+    start = getattr(signal, "comparison_start_date", None)
+    observed = getattr(signal, "observed_date", None)
+    if start is None or observed is None:
+        return None
+    try:
+        days = int((observed - start).days) + 1
+    except Exception:
+        return None
+    return days if days > 0 else None
+
+
+def _why_surfaced_decline_pct(signal: DisplaySignal) -> float | None:
+    try:
+        if getattr(signal, "delta_percent", None) is not None:
+            return float(signal.delta_percent)
+    except Exception:
+        return None
+
+    observed_value = getattr(signal, "observed_value", None)
+    comparison_value = getattr(signal, "comparison_value", None)
+    try:
+        observed_float = float(observed_value)
+        comparison_float = float(comparison_value)
+    except (TypeError, ValueError):
+        return None
+    if comparison_float <= 0:
+        return None
+    return ((observed_float - comparison_float) / comparison_float) * 100.0
+
+
+def _why_surfaced_below_target_frequency(source: Any) -> tuple[int, int]:
+    snapshot = dict(getattr(source, "snapshot", {}) or {})
+    metadata = dict(getattr(source, "metadata", {}) or {})
+    recent_history = snapshot.get("recent_goal_status_history") or metadata.get("recent_goal_status_history")
+    if not isinstance(recent_history, list):
+        return 0, 0
+
+    normalized = [str(value or "").strip().lower() for value in recent_history if str(value or "").strip()]
+    if not normalized:
+        return 0, 0
+
+    below_statuses = {
+        "below_goal",
+        "below_target",
+        "below_expected",
+        "off_target",
+        "behind",
+    }
+    below_count = sum(1 for value in normalized if value in below_statuses)
+    return below_count, len(normalized)
+
+
+def _comparison_window_days(start: Any, end: Any) -> int | None:
+    if not isinstance(start, date) or not isinstance(end, date):
+        return None
+    try:
+        days = int((end - start).days) + 1
+    except Exception:
+        return None
+    return days if days > 0 else None
+
+
+def _what_changed_baseline_label(*, comparison_start_date: Any, comparison_end_date: Any) -> str:
+    window_days = _comparison_window_days(comparison_start_date, comparison_end_date)
+    if window_days == 7:
+        return "last week"
+    if window_days and window_days > 0:
+        return f"{window_days}-day average"
+    return "baseline"
+
+
+def build_what_changed_text(item: Any) -> str:
+    payload = dict(item or {}) if isinstance(item, dict) else {}
+    follow_up_status = str(payload.get("follow_up_status") or "").strip().lower()
+
+    observed_value = payload.get("observed_value")
+    comparison_value = payload.get("comparison_value")
+    try:
+        observed_float = float(observed_value) if observed_value is not None else None
+    except (TypeError, ValueError):
+        observed_float = None
+    try:
+        comparison_float = float(comparison_value) if comparison_value is not None else None
+    except (TypeError, ValueError):
+        comparison_float = None
+
+    delta_percent = payload.get("delta_percent")
+    try:
+        delta_float = float(delta_percent) if delta_percent is not None else None
+    except (TypeError, ValueError):
+        delta_float = None
+
+    basis_label = _what_changed_baseline_label(
+        comparison_start_date=payload.get("comparison_start_date"),
+        comparison_end_date=payload.get("comparison_end_date"),
+    )
+
+    if bool(payload.get("limited_recent_data")):
+        return "Limited data: early signal"
+    if observed_float is None or comparison_float is None or comparison_float <= 0:
+        return "Limited data: early signal"
+
+    if delta_float is None:
+        delta_float = ((observed_float - comparison_float) / comparison_float) * 100.0
+
+    rounded_percent = int(round(abs(delta_float)))
+    if abs(delta_float) < 3.0:
+        return f"No significant change ({rounded_percent}%) vs {basis_label}"
+    direction = "Up" if delta_float > 0 else "Down"
+    delta_text = f"{direction} {rounded_percent}% vs {basis_label}"
+    if follow_up_status in {"overdue", "due_today"}:
+        return f"Performance {delta_text.lower()}"
+    return delta_text
+
+
+def build_why_surfaced_text(item: Any) -> str:
+    payload = dict(item or {}) if isinstance(item, dict) else {}
+    prefix = "Surfaced because: "
+
+    def _frequency_reason() -> str | None:
+        if below_target_count > 0 and below_target_total > 0:
+            return f"{prefix}Below target on {below_target_count} of last {below_target_total} shifts"
+        return None
+
+    def _performance_context() -> str | None:
+        if signal_label == SignalLabel.LOWER_THAN_RECENT_PACE.value:
+            return "declining performance"
+        if signal_label == SignalLabel.BELOW_EXPECTED_PACE.value or frequency_reason:
+            return "below-target performance"
+        if decline_pct is not None and decline_pct <= -3.0:
+            return "declining performance"
+        return None
+
+    follow_up_status = str(payload.get("follow_up_status") or "").strip().lower()
+
+    signal_label = str(payload.get("signal_label") or "").strip().lower()
+    decline_pct = payload.get("decline_pct")
+    try:
+        decline_pct = float(decline_pct) if decline_pct is not None else None
+    except (TypeError, ValueError):
+        decline_pct = None
+    window_days = payload.get("window_days")
+    try:
+        window_days = int(window_days) if window_days is not None else None
+    except (TypeError, ValueError):
+        window_days = None
+
+    below_target_count = payload.get("below_target_count")
+    below_target_total = payload.get("below_target_total")
+    try:
+        below_target_count = int(below_target_count) if below_target_count is not None else 0
+    except (TypeError, ValueError):
+        below_target_count = 0
+    try:
+        below_target_total = int(below_target_total) if below_target_total is not None else 0
+    except (TypeError, ValueError):
+        below_target_total = 0
+
+    frequency_reason = _frequency_reason()
+    has_duration_reason = bool(window_days and window_days > 0)
+    performance_context = _performance_context()
+
+    if follow_up_status == "overdue":
+        if performance_context:
+            return f"{prefix}Overdue follow-up on {performance_context}"
+        return f"{prefix}Overdue follow-up"
+    if follow_up_status == "due_today":
+        if performance_context:
+            return f"{prefix}Follow-up due today for {performance_context}"
+        return f"{prefix}Follow-up due today"
+
+    if signal_label == SignalLabel.LOWER_THAN_RECENT_PACE.value:
+        if frequency_reason:
+            return frequency_reason
+        if has_duration_reason:
+            return f"{prefix}Declining over the last {window_days} days"
+        return f"{prefix}Below target on recent shift"
+
+    if decline_pct is not None and decline_pct <= -3.0 and has_duration_reason:
+        return f"{prefix}Declining over the last {window_days} days"
+
+    if frequency_reason:
+        return frequency_reason
+    if signal_label == SignalLabel.BELOW_EXPECTED_PACE.value:
+        return f"{prefix}Below target on recent shift"
+
+    confidence_level = str(payload.get("confidence_level") or "").strip().lower()
+    if confidence_level == "low" or bool(payload.get("limited_recent_data")):
+        return f"{prefix}Low confidence: limited recent data"
+
+    return f"{prefix}Below target on recent shift"
+
+
 def _why_surfaced_line(source: Any, signal: DisplaySignal) -> str:
     mode = get_signal_display_mode(signal)
-    if mode == SignalDisplayMode.LOW_DATA:
-        base = "Surfaced because limited recent history is available for comparison."
-        scope_label = _source_scope_label(source)
-        return f"{base} Scope: {scope_label}." if scope_label else base
-
     flags = dict(signal.flags or {})
-    if bool(flags.get("overdue")):
-        base = "Surfaced because this follow-up is still open past its due date."
-        scope_label = _source_scope_label(source)
-        return f"{base} Scope: {scope_label}." if scope_label else base
-    if bool(flags.get("due_today")):
-        base = "Surfaced because this follow-up is due in the current snapshot."
-        scope_label = _source_scope_label(source)
-        return f"{base} Scope: {scope_label}." if scope_label else base
+    below_target_count, below_target_total = _why_surfaced_below_target_frequency(source)
+    return build_why_surfaced_text(
+        {
+            "follow_up_status": (
+                "overdue"
+                if bool(flags.get("overdue"))
+                else "due_today"
+                if bool(flags.get("due_today"))
+                else ""
+            ),
+            "signal_label": getattr(signal.signal_label, "value", signal.signal_label),
+            "decline_pct": _why_surfaced_decline_pct(signal),
+            "window_days": _why_surfaced_window_days(signal),
+            "below_target_count": below_target_count,
+            "below_target_total": below_target_total,
+            "confidence_level": _confidence_level_value(signal),
+            "limited_recent_data": mode == SignalDisplayMode.LOW_DATA,
+        }
+    )
 
-    label = str(format_signal_label(signal) or "").strip().lower()
-    if label in {
-        signal_wording("lower_than_recent_pace").lower(),
-        signal_wording("below_expected_pace").lower(),
-    }:
-        base = "Below recent baseline vs comparable days."
-        scope_label = _source_scope_label(source)
-        return f"{base} Scope: {scope_label}." if scope_label else base
-    if label == signal_wording("inconsistent_performance").lower():
-        base = "Surfaced because recent output has been more variable than usual."
-        scope_label = _source_scope_label(source)
-        return f"{base} Scope: {scope_label}." if scope_label else base
-    if label == signal_wording("improving_pace").lower():
-        base = "Surfaced because recent output is above the recent baseline (prior comparable days and target context when available)."
-        scope_label = _source_scope_label(source)
-        return f"{base} Scope: {scope_label}." if scope_label else base
 
-    base = "Surfaced because this pattern differs from recent operating context."
-    scope_label = _source_scope_label(source)
-    return f"{base} Scope: {scope_label}." if scope_label else base
+def _what_changed_line(source: Any, signal: DisplaySignal) -> str:
+    mode = get_signal_display_mode(signal)
+    flags = dict(signal.flags or {})
+    return build_what_changed_text(
+        {
+            "follow_up_status": (
+                "overdue"
+                if bool(flags.get("overdue"))
+                else "due_today"
+                if bool(flags.get("due_today"))
+                else ""
+            ),
+            "observed_value": getattr(signal, "observed_value", None),
+            "comparison_value": getattr(signal, "comparison_value", None),
+            "comparison_start_date": getattr(signal, "comparison_start_date", None),
+            "comparison_end_date": getattr(signal, "comparison_end_date", None),
+            "delta_percent": _why_surfaced_decline_pct(signal),
+            "limited_recent_data": mode != SignalDisplayMode.FULL,
+        }
+    )
 
 
 def _evidence_basis_line(source: Any, signal: DisplaySignal) -> str:
@@ -1078,6 +1280,7 @@ def _merge_ranked_cards(preferred: _RankedCard, incoming: _RankedCard) -> _Ranke
             line_4=preferred.card.line_4,
             line_5=preferred.card.line_5,
             expanded_lines=merged_lines,
+            what_changed_line=preferred.card.what_changed_line or incoming.card.what_changed_line,
             normalized_action_state=preferred.card.normalized_action_state or incoming.card.normalized_action_state,
             normalized_action_state_detail=preferred.card.normalized_action_state_detail or incoming.card.normalized_action_state_detail,
             freshness_line=preferred.card.freshness_line or incoming.card.freshness_line,
@@ -1194,6 +1397,7 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
     current_state_mode = mode == SignalDisplayMode.CURRENT_STATE
     line_1 = f"{employee_name} · {process_name}"
     line_2 = _attention_primary_signal(item, signal)
+    what_changed_line = _what_changed_line(item, signal)
     line_3 = _why_surfaced_line(item, signal)
     line_4 = _evidence_basis_line(item, signal)
     line_5 = format_confidence_line(signal)
@@ -1220,6 +1424,7 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             line_4=line_4,
             line_5=line_5,
             expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, excluded=[line_3, line_4], max_lines=3),
+            what_changed_line=what_changed_line,
             collapsed_hint=_ranking_hint(item, signal),
             collapsed_evidence=_collapsed_evidence_line(item, signal),
             collapsed_issue="Active issue linked" if _has_open_exception(item, signal) else "",
@@ -1240,6 +1445,7 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
             line_4=line_4,
             line_5=format_confidence_line(signal),
             expanded_lines=[],
+            what_changed_line=what_changed_line,
             freshness_line=_freshness_line(signal),
             collapsed_hint=_ranking_hint(item, signal),
             collapsed_evidence=_collapsed_evidence_line(item, signal),
@@ -1254,20 +1460,20 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
         expanded = _dedupe_expanded(
             primary=line_2,
             lines=expanded_candidates,
-            excluded=[line_3, line_4, _follow_up_due_line(item, signal), _short_follow_up_context(item, signal)],
+            excluded=[what_changed_line, line_3, line_4, _follow_up_due_line(item, signal), _short_follow_up_context(item, signal)],
             max_lines=3,
         )
     else:
         expanded = _dedupe_expanded(
             primary=line_2,
             lines=_attention_context_lines(item, signal, max_lines=4),
-            excluded=[line_3, line_4, format_observed_line(signal), format_comparison_line(signal)],
+            excluded=[what_changed_line, line_3, line_4, format_observed_line(signal), format_comparison_line(signal)],
             max_lines=3,
         )
 
     line_3_lower = line_3.strip().lower()
     line_4_lower = line_4.strip().lower()
-    if "baseline" in line_3_lower:
+    if "baseline" in line_3_lower or "declining over the last" in line_3_lower:
         expanded = [line for line in list(expanded or []) if "compared against recent baseline" not in str(line).lower()]
     if (" seen " in f" {line_4_lower} " and " times " in line_4_lower) or ("repeat" in line_4_lower and "times" in line_4_lower):
         expanded = [
@@ -1299,6 +1505,7 @@ def _card_from_pair(item: Any, signal: DisplaySignal) -> TodayQueueCardViewModel
         line_4=line_4,
         line_5=line_5,
         expanded_lines=expanded,
+        what_changed_line=what_changed_line,
         freshness_line=_freshness_line(signal),
         collapsed_hint=_ranking_hint(item, signal),
         collapsed_evidence=_collapsed_evidence_line(item, signal),
@@ -1317,6 +1524,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
     process_name = str(signal.process)
     line_1 = f"{employee_name} · {process_name}"
     line_2 = _attention_primary_signal(card, signal)
+    what_changed_line = _what_changed_line(card, signal)
     line_3 = _why_surfaced_line(card, signal)
     line_4 = _evidence_basis_line(card, signal)
     line_5 = format_confidence_line(signal)
@@ -1342,6 +1550,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             line_4=line_4,
             line_5=line_5,
             expanded_lines=_dedupe_expanded(primary=line_2, lines=expanded, excluded=[line_3, line_4], max_lines=3),
+            what_changed_line=what_changed_line,
             signal_key=signal_key,
             repeat_count=repeat_count,
             repeat_window_label=repeat_window_label,
@@ -1359,6 +1568,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
             line_4=line_4,
             line_5=format_confidence_line(signal),
             expanded_lines=[],
+            what_changed_line=what_changed_line,
             freshness_line=_freshness_line(signal),
             signal_key=signal_key,
             repeat_count=repeat_count,
@@ -1368,13 +1578,13 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
     expanded = _dedupe_expanded(
         primary=line_2,
         lines=[],
-        excluded=[line_3, line_4, format_observed_line(signal), format_comparison_line(signal), _follow_up_due_line(card, signal), _short_follow_up_context(card, signal)],
+        excluded=[what_changed_line, line_3, line_4, format_observed_line(signal), format_comparison_line(signal), _follow_up_due_line(card, signal), _short_follow_up_context(card, signal)],
         max_lines=3,
     )
 
     line_3_lower = line_3.strip().lower()
     line_4_lower = line_4.strip().lower()
-    if "baseline" in line_3_lower:
+    if "baseline" in line_3_lower or "declining over the last" in line_3_lower:
         expanded = [line for line in list(expanded or []) if "compared against recent baseline" not in str(line).lower()]
     if (" seen " in f" {line_4_lower} " and " times " in line_4_lower) or ("repeat" in line_4_lower and "times" in line_4_lower):
         expanded = [
@@ -1406,6 +1616,7 @@ def _card_from_insight_card(card: InsightCardContract, signal: DisplaySignal) ->
         line_4=line_4,
         line_5=line_5,
         expanded_lines=expanded,
+        what_changed_line=what_changed_line,
         freshness_line=_freshness_line(signal),
         signal_key=signal_key,
         repeat_count=repeat_count,

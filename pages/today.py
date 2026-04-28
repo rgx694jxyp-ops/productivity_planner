@@ -2785,6 +2785,50 @@ def _format_signal_status_label(signal_status: str) -> str:
     return ""
 
 
+def _format_follow_up_month_day(value: date) -> str:
+    return f"{value.strftime('%b')} {value.day}"
+
+
+def _today_follow_up_status_text(card: TodayQueueCardViewModel, *, today_value: date | None = None) -> str:
+    today_value = today_value or date.today()
+    state = str(getattr(card, "normalized_action_state", "") or "").strip().lower()
+    detail = str(getattr(card, "normalized_action_state_detail", "") or "").strip()
+    detail_lower = detail.lower()
+
+    if "overdue" in detail_lower or "overdue" in state:
+        return "Follow-up overdue"
+    if "due today" in detail_lower:
+        return "Follow-up due today"
+    if detail_lower.startswith("due "):
+        due_text = detail[4:].strip()[:10]
+        try:
+            due_date = date.fromisoformat(due_text)
+        except Exception:
+            due_date = None
+        if due_date is not None:
+            if due_date < today_value:
+                return "Follow-up overdue"
+            if due_date == today_value:
+                return "Follow-up due today"
+            return f"Follow-up scheduled for {_format_follow_up_month_day(due_date)}"
+    if "follow-up scheduled" in state:
+        return "Follow-up scheduled"
+    return "No follow-up scheduled"
+
+
+def _build_today_last_check_result(*, note_text: str, follow_up_choice: str, follow_up_at: datetime | None) -> str:
+    clean_note = " ".join(str(note_text or "").split()).strip()
+    if clean_note:
+        return clean_note[:160]
+
+    choice = str(follow_up_choice or "").strip()
+    if choice == "No follow-up needed":
+        return "No follow-up needed"
+    if follow_up_at is not None:
+        return f"Follow-up scheduled for {_format_follow_up_month_day(follow_up_at.date())}"
+    return "Reviewed and logged"
+
+
 def _action_state_chip(card: TodayQueueCardViewModel) -> str:
     state = str(getattr(card, "normalized_action_state", "") or "").strip()
     if not state:
@@ -3093,6 +3137,7 @@ def _save_today_card_completion(
     *,
     card: TodayQueueCardViewModel,
     note_text: str,
+    follow_up_choice: str = "",
     follow_up_required: bool,
     follow_up_at: datetime | None,
     add_operational_exception: bool = False,
@@ -3123,11 +3168,14 @@ def _save_today_card_completion(
         raise ValueError("employee_id is required for completion persistence.")
     if not tenant_id:
         raise ValueError("tenant_id is required for completion persistence.")
-    if not clean_note:
-        raise ValueError("note is required for completion persistence.")
 
     follow_up_due_date = follow_up_at.date().isoformat() if follow_up_required and follow_up_at else ""
     due_at_label = follow_up_at.isoformat(timespec="minutes") if follow_up_required and follow_up_at else ""
+    last_check_result = _build_today_last_check_result(
+        note_text=clean_note,
+        follow_up_choice=follow_up_choice,
+        follow_up_at=follow_up_at,
+    )
     linked_exception_id = ""
     linked_existing_exception_id = str(linked_existing_exception_id or "").strip()
 
@@ -3142,6 +3190,7 @@ def _save_today_card_completion(
             "employee_id": employee_id,
             "tenant_id": tenant_id,
             "note": clean_note,
+            "follow_up_choice": str(follow_up_choice or ""),
             "follow_up_required": bool(follow_up_required),
             "follow_up_at": due_at_label,
             "add_operational_exception": bool(add_operational_exception),
@@ -3184,17 +3233,11 @@ def _save_today_card_completion(
 
         resolved_exception_id = linked_exception_id or linked_existing_exception_id
 
-        details_lines = [
-            "Today queue completion",
-            f"signal_key={signal_key}",
-            f"signal_id={signal_id}",
-            f"follow_up_required={'yes' if follow_up_required else 'no'}",
-        ]
+        details_lines = ["Reviewed and logged", f"Last check result: {last_check_result}"]
         if due_at_label:
-            details_lines.append(f"follow_up_due_at={due_at_label}")
-        if resolved_exception_id:
-            details_lines.append(f"linked_exception_id={resolved_exception_id}")
-        details_lines.append(f"note={clean_note}")
+            details_lines.append(f"Next follow-up: {_format_follow_up_month_day(follow_up_at.date())}")
+        if clean_note and clean_note.lower() != last_check_result.lower():
+            details_lines.append(f"Note: {clean_note}")
         details_payload = "\n".join(details_lines)
 
         follow_through_saved = log_follow_through_event(
@@ -3204,7 +3247,7 @@ def _save_today_card_completion(
             status="pending" if follow_up_required else "done",
             due_date=follow_up_due_date,
             details=details_payload,
-            outcome="pending" if follow_up_required else "not_applicable",
+            outcome=last_check_result,
             tenant_id=tenant_id,
         )
         if not follow_through_saved:
@@ -3219,7 +3262,7 @@ def _save_today_card_completion(
                 status=str(follow_through_status or "logged"),
                 due_date=follow_up_due_date,
                 details=clean_follow_through_note,
-                outcome="pending" if follow_up_required else "not_applicable",
+                outcome=last_check_result,
                 tenant_id=tenant_id,
             )
             if not secondary_follow_through_saved:
@@ -3228,10 +3271,9 @@ def _save_today_card_completion(
         # Preserve existing coaching journal history used by employee timelines.
         try:
             coaching_note = (
-                "reason=Today queue completion\n"
-                f"follow_up_required={'yes' if follow_up_required else 'no'}\n"
-                + (f"follow_up_due_at={due_at_label}\n" if due_at_label else "")
-                + clean_note
+                f"Last check result: {last_check_result}"
+                + (f"\nNext follow-up: {_format_follow_up_month_day(follow_up_at.date())}" if due_at_label else "")
+                + (f"\nNote: {clean_note}" if clean_note and clean_note.lower() != last_check_result.lower() else "")
             )
             add_coaching_note(employee_id, coaching_note, owner_value or "supervisor")
         except Exception:
@@ -3652,43 +3694,40 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
     note_key = _today_completion_widget_key(signal_id=signal_id, field="note")
     follow_up_key = _today_completion_widget_key(signal_id=signal_id, field="follow_up_needed")
     due_date_key = _today_completion_widget_key(signal_id=signal_id, field="follow_up_date")
-    due_time_key = _today_completion_widget_key(signal_id=signal_id, field="follow_up_time")
     add_exception_key = _today_completion_widget_key(signal_id=signal_id, field="add_exception")
     exception_type_key = _today_completion_widget_key(signal_id=signal_id, field="exception_type")
     exception_note_key = _today_completion_widget_key(signal_id=signal_id, field="exception_note")
     submit_key = _today_completion_widget_key(signal_id=signal_id, field="submit")
 
+    follow_up_status_text = _today_follow_up_status_text(card)
+    if follow_up_status_text:
+        st.caption(follow_up_status_text)
+
     note_text = st.text_area(
-        "Note (required)",
+        "Short note (optional)",
         value=str(st.session_state.get(note_key) or ""),
         key=note_key,
         height=90,
-        placeholder="Describe what happened and what was completed.",
+        placeholder="Add a short check-in note if helpful.",
     )
 
     follow_up_choice = st.selectbox(
-        "Follow-up needed? (required)",
-        options=["Select one", "Yes", "No"],
+        "Next step",
+        options=["Select one", "No follow-up needed", "Follow up tomorrow", "Pick a date"],
         index=0,
         key=follow_up_key,
     )
 
     follow_up_due_at: datetime | None = None
-    if follow_up_choice == "Yes":
-        c1, c2 = st.columns(2)
-        with c1:
-            due_date = st.date_input(
-                "Follow-up date",
-                value=date.today() + timedelta(days=7),
-                key=due_date_key,
-            )
-        with c2:
-            due_time = st.time_input(
-                "Follow-up time",
-                value=dt_time(hour=9, minute=0),
-                key=due_time_key,
-            )
-        follow_up_due_at = datetime.combine(due_date, due_time)
+    if follow_up_choice == "Follow up tomorrow":
+        follow_up_due_at = datetime.combine(date.today() + timedelta(days=1), dt_time(hour=9, minute=0))
+    elif follow_up_choice == "Pick a date":
+        due_date = st.date_input(
+            "Follow-up date",
+            value=date.today() + timedelta(days=7),
+            key=due_date_key,
+        )
+        follow_up_due_at = datetime.combine(due_date, dt_time(hour=9, minute=0))
 
     add_operational_exception = False
     selected_exception_type = ""
@@ -3733,8 +3772,8 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
         linked_existing_exception_id = str((optional_data.get("exception_options") or {}).get(linked_exception_label) or "").strip()
 
     has_note = bool(str(note_text or "").strip())
-    has_follow_up_selection = follow_up_choice in {"Yes", "No"}
-    can_submit = has_note and has_follow_up_selection
+    has_follow_up_selection = follow_up_choice in {"No follow-up needed", "Follow up tomorrow", "Pick a date"}
+    can_submit = has_follow_up_selection
     pending_signal_keys = _get_pending_completion_signal_keys()
     is_signal_pending = bool(signal_id and signal_id in pending_signal_keys)
 
@@ -3757,11 +3796,8 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
                 },
             )
             return
-        if not has_note:
-            st.warning("A note is required.")
-            return
         if not has_follow_up_selection:
-            st.warning("Choose whether follow-up is needed.")
+            st.warning("Choose the next step before completing.")
             return
         if add_operational_exception and not str(operational_exception_note or "").strip():
             st.warning("Add an exception note before completing.")
@@ -3796,7 +3832,8 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
         write_payload = {
             "card": dataclasses.asdict(card),
             "note_text": str(note_text or ""),
-            "follow_up_required": bool(follow_up_choice == "Yes"),
+            "follow_up_choice": str(follow_up_choice or "Select one"),
+            "follow_up_required": bool(follow_up_choice in {"Follow up tomorrow", "Pick a date"}),
             "follow_up_at": follow_up_due_at,
             "add_operational_exception": bool(add_operational_exception),
             "exception_type": str(selected_exception_type or ""),
@@ -3830,7 +3867,6 @@ def _render_guided_completion_controls(*, card: TodayQueueCardViewModel, key_pre
             "note_key": note_key,
             "follow_up_key": follow_up_key,
             "due_date_key": due_date_key,
-            "due_time_key": due_time_key,
             "note_text": str(note_text or ""),
             "follow_up_choice": str(follow_up_choice or "Select one"),
             "follow_up_at": follow_up_due_at,
@@ -3964,6 +4000,9 @@ def _render_attention_card(
         if compact:
             detail_text = str(card.line_3 or "").strip()
             evidence_text = str(card.line_4 or "").strip()
+            what_changed_text = str(getattr(card, "what_changed_line", "") or "").strip()
+            if what_changed_text:
+                st.markdown(f'<div class="today-insight-meta">{what_changed_text}</div>', unsafe_allow_html=True)
             if detail_text:
                 st.markdown(f'<div class="today-insight-meta">{detail_text}</div>', unsafe_allow_html=True)
             if evidence_text:
@@ -4286,6 +4325,8 @@ def _render_insight_card(
         if action_state_chip:
             st.markdown(action_state_chip, unsafe_allow_html=True)
         st.markdown(f'<div class="today-insight-line">{card_vm.line_2}</div>', unsafe_allow_html=True)
+        if str(getattr(card_vm, "what_changed_line", "") or "").strip():
+            st.markdown(f'<div class="today-insight-line">{card_vm.what_changed_line}</div>', unsafe_allow_html=True)
         if str(card_vm.line_3 or "").strip():
             st.markdown(f'<div class="today-insight-line">{card_vm.line_3}</div>', unsafe_allow_html=True)
 
@@ -4551,6 +4592,7 @@ def _today_render_plan_fingerprint(*, plan: TodayQueueRenderPlan) -> str:
                 str(getattr(card, "signal_key", "") or ""),
                 str(getattr(card, "line_1", "") or ""),
                 str(getattr(card, "line_2", "") or ""),
+                str(getattr(card, "what_changed_line", "") or ""),
                 str(getattr(card, "line_3", "") or ""),
                 str(getattr(card, "line_4", "") or ""),
                 str(getattr(card, "line_5", "") or ""),
@@ -4566,6 +4608,7 @@ def _today_render_plan_fingerprint(*, plan: TodayQueueRenderPlan) -> str:
                 str(getattr(card, "signal_key", "") or ""),
                 str(getattr(card, "line_1", "") or ""),
                 str(getattr(card, "line_2", "") or ""),
+                str(getattr(card, "what_changed_line", "") or ""),
                 str(getattr(card, "line_3", "") or ""),
                 str(getattr(card, "line_4", "") or ""),
                 str(getattr(card, "line_5", "") or ""),

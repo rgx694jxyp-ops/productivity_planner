@@ -49,7 +49,7 @@ def test_signal_status_write_invalidates_today_caches(monkeypatch):
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
     monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Completed review details")
-    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No follow-up needed")
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
     monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
@@ -74,9 +74,7 @@ def test_mark_complete_captures_note_and_follow_up_in_pending_meta(monkeypatch):
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
     monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Checked root cause and logged update")
-    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Yes")
-    monkeypatch.setattr("pages.today.st.date_input", lambda *_args, **_kwargs: today_module.date(2026, 4, 22))
-    monkeypatch.setattr("pages.today.st.time_input", lambda *_args, **_kwargs: today_module.dt_time(10, 30))
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "Follow up tomorrow")
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
     monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
@@ -96,7 +94,7 @@ def test_mark_complete_captures_note_and_follow_up_in_pending_meta(monkeypatch):
     assert len(pending_ids) == 1
     meta = dict((today_module.st.session_state.get("_today_pending_completion_meta") or {}).get(pending_ids[0]) or {})
     assert str(meta.get("note_text") or "") == "Checked root cause and logged update"
-    assert str(meta.get("follow_up_choice") or "") == "Yes"
+    assert str(meta.get("follow_up_choice") or "") == "Follow up tomorrow"
     assert isinstance(meta.get("follow_up_at"), datetime)
     assert str((captured_payload.get("payload") or {}).get("note_text") or "") == "Checked root cause and logged update"
     assert bool((captured_payload.get("payload") or {}).get("follow_up_required")) is True
@@ -120,6 +118,7 @@ def test_start_completion_write_calls_persistence_once(monkeypatch):
         payload={
             "card": today_module.dataclasses.asdict(card),
             "note_text": "done",
+            "follow_up_choice": "No follow-up needed",
             "follow_up_required": False,
             "follow_up_at": None,
             "owner_value": "lead@example.com",
@@ -201,7 +200,7 @@ def test_duplicate_click_same_signal_is_prevented(monkeypatch):
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
     monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Completed review details")
-    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No follow-up needed")
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
     monkeypatch.setattr(
@@ -238,7 +237,7 @@ def test_optimistic_completion_defers_widget_reset_until_next_run(monkeypatch):
             "user_email": "lead@example.com",
             "_today_completed_items": [],
             note_key: "note stays until next run",
-            follow_up_key: "Yes",
+                follow_up_key: "No follow-up needed",
             add_exception_key: True,
             exception_note_key: "exception context",
             more_actions_open_key: True,
@@ -256,7 +255,7 @@ def test_optimistic_completion_defers_widget_reset_until_next_run(monkeypatch):
     )
 
     assert str(today_module.st.session_state.get(note_key) or "") == "note stays until next run"
-    assert str(today_module.st.session_state.get(follow_up_key) or "") == "Yes"
+    assert str(today_module.st.session_state.get(follow_up_key) or "") == "No follow-up needed"
     assert bool(today_module.st.session_state.get(add_exception_key)) is True
     assert str(today_module.st.session_state.get(exception_note_key) or "") == "exception context"
     assert bool(today_module.st.session_state.get(more_actions_open_key)) is True
@@ -280,7 +279,7 @@ def test_two_rapid_completions_enqueue_independently(monkeypatch):
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
     monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("pages.today.st.text_area", lambda *_args, **_kwargs: "Completed review details")
-    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No follow-up needed")
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
     monkeypatch.setattr(
@@ -362,7 +361,6 @@ def test_rollback_restores_signal_and_inputs_without_duplicates(monkeypatch):
     note_key = "note_key"
     follow_up_key = "follow_up_key"
     due_date_key = "due_date_key"
-    due_time_key = "due_time_key"
     card_session_key = today_module._today_card_session_key(card)
 
     queue_item = {
@@ -394,9 +392,8 @@ def test_rollback_restores_signal_and_inputs_without_duplicates(monkeypatch):
                     "note_key": note_key,
                     "follow_up_key": follow_up_key,
                     "due_date_key": due_date_key,
-                    "due_time_key": due_time_key,
                     "note_text": "retry note",
-                    "follow_up_choice": "Yes",
+                    "follow_up_choice": "Follow up tomorrow",
                     "follow_up_at": datetime(2026, 4, 21, 9, 0),
                 }
             },
@@ -417,7 +414,7 @@ def test_rollback_restores_signal_and_inputs_without_duplicates(monkeypatch):
     assert str(queue_items[0].get("signal_key") or "") == "sig-rollback"
     assert card_session_key not in list(today_module.st.session_state.get("_today_completed_items") or [])
     assert str(today_module.st.session_state.get(note_key) or "") == "retry note"
-    assert str(today_module.st.session_state.get(follow_up_key) or "") == "Yes"
+    assert str(today_module.st.session_state.get(follow_up_key) or "") == "Follow up tomorrow"
     assert list(today_module.st.session_state.get("_today_pending_completion_ids") or []) == []
 
 
@@ -502,7 +499,7 @@ def test_note_text_survives_harmless_rerun(monkeypatch):
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No follow-up needed")
     monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
 
     def _text_area(_label, *, key, **_kwargs):
@@ -527,7 +524,7 @@ def test_follow_up_selection_survives_harmless_rerun(monkeypatch):
     session_state = {
         "tenant_id": "tenant-a",
         "user_email": "lead@example.com",
-        follow_up_key: "Yes",
+        follow_up_key: "Pick a date",
         due_date_key: today_module.date(2026, 4, 21),
         due_time_key: today_module.dt_time(9, 0),
     }
@@ -549,9 +546,8 @@ def test_follow_up_selection_survives_harmless_rerun(monkeypatch):
     today_module._render_guided_completion_controls(card=card, key_prefix="p0", status_map={})
     today_module._render_guided_completion_controls(card=card, key_prefix="p1", status_map={})
 
-    assert str(session_state.get(follow_up_key) or "") == "Yes"
+    assert str(session_state.get(follow_up_key) or "") == "Pick a date"
     assert session_state.get(due_date_key) == today_module.date(2026, 4, 21)
-    assert session_state.get(due_time_key) == today_module.dt_time(9, 0)
 
 
 def test_top3_promotion_does_not_remap_inputs_between_cards(monkeypatch):
@@ -572,7 +568,7 @@ def test_top3_promotion_does_not_remap_inputs_between_cards(monkeypatch):
     monkeypatch.setattr("pages.today.st.columns", lambda *_args, **_kwargs: (_noop_ctx(), _noop_ctx()))
     monkeypatch.setattr("pages.today.st.markdown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("pages.today.st.button", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No")
+    monkeypatch.setattr("pages.today.st.selectbox", lambda *_args, **_kwargs: "No follow-up needed")
     monkeypatch.setattr("pages.today._render_today_more_actions_fragment", lambda **_kwargs: None)
 
     def _text_area(_label, *, key, **_kwargs):
@@ -1096,6 +1092,7 @@ def test_save_today_card_completion_raises_when_tenant_missing(monkeypatch):
         today_module._save_today_card_completion(
             card=card,
             note_text="completed",
+            follow_up_choice="No follow-up needed",
             follow_up_required=False,
             follow_up_at=None,
             tenant_id="",
@@ -1166,6 +1163,7 @@ def test_save_today_card_completion_passes_exception_date_to_create_operational_
     today_module._save_today_card_completion(
         card=card,
         note_text="exception test",
+        follow_up_choice="No follow-up needed",
         follow_up_required=False,
         follow_up_at=None,
         add_operational_exception=True,
@@ -1180,3 +1178,56 @@ def test_save_today_card_completion_passes_exception_date_to_create_operational_
     # Must be a valid YYYY-MM-DD ISO string representing today
     from datetime import date as _date
     assert captured["exception_date"] == _date.today().isoformat()
+
+
+def test_save_today_card_completion_records_no_follow_up_result(monkeypatch):
+    card = _card_for("sig-no-follow-up", "E20")
+    captured_calls: list[dict] = []
+
+    monkeypatch.setattr("pages.today.log_follow_through_event", lambda **kwargs: captured_calls.append(dict(kwargs)) or {"id": "ft-1"})
+    monkeypatch.setattr("pages.today.set_signal_status", lambda **_kwargs: True)
+    monkeypatch.setattr("pages.today.add_coaching_note", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    result = today_module._save_today_card_completion(
+        card=card,
+        note_text="",
+        follow_up_choice="No follow-up needed",
+        follow_up_required=False,
+        follow_up_at=None,
+        tenant_id="tenant-a",
+        owner_value="lead@example.com",
+    )
+
+    assert result is True
+    assert captured_calls[0]["status"] == "done"
+    assert captured_calls[0]["due_date"] == ""
+    assert captured_calls[0]["outcome"] == "No follow-up needed"
+
+
+def test_save_today_card_completion_records_follow_up_tomorrow_result(monkeypatch):
+    card = _card_for("sig-follow-up-tomorrow", "E21")
+    captured_calls: list[dict] = []
+    tomorrow_at = datetime.combine(date.today() + today_module.timedelta(days=1), today_module.dt_time(hour=9, minute=0))
+
+    monkeypatch.setattr("pages.today.log_follow_through_event", lambda **kwargs: captured_calls.append(dict(kwargs)) or {"id": "ft-1"})
+    monkeypatch.setattr("pages.today.set_signal_status", lambda **_kwargs: True)
+    monkeypatch.setattr("pages.today.add_coaching_note", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today._log_operational_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("pages.today.st.session_state", {"tenant_id": "tenant-a", "user_email": "lead@example.com"})
+
+    result = today_module._save_today_card_completion(
+        card=card,
+        note_text="",
+        follow_up_choice="Follow up tomorrow",
+        follow_up_required=True,
+        follow_up_at=tomorrow_at,
+        tenant_id="tenant-a",
+        owner_value="lead@example.com",
+    )
+
+    assert result is True
+    assert captured_calls[0]["status"] == "pending"
+    assert captured_calls[0]["due_date"] == tomorrow_at.date().isoformat()
+    assert captured_calls[0]["outcome"].startswith("Follow-up scheduled for ")
