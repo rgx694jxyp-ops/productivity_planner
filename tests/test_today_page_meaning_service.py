@@ -84,10 +84,11 @@ def test_queue_render_plan_promotes_secondary_when_weak_data(monkeypatch):
             self.collapsed_issue = ""
 
     class _QueueVm:
-        main_section_title = "What needs attention today"
+        main_section_title = "Follow-ups Today"
         primary_cards = []
         secondary_cards = [_Card("E1")]
         suppressed = []
+        auto_resolved_count = 0
 
     monkeypatch.setattr("services.today_page_meaning_service.build_today_queue_view_model", lambda **kwargs: _QueueVm())
 
@@ -103,7 +104,7 @@ def test_queue_render_plan_promotes_secondary_when_weak_data(monkeypatch):
     assert len(plan.primary_cards) == 1
     assert len(plan.secondary_cards) == 0
     assert plan.weak_data_note == ""
-    assert plan.start_note.startswith("Early signal mode:")
+    assert plan.start_note == "Open loops that need a manager decision, check-in, or closeout."
     assert plan.primary_placeholder == ""
 
 
@@ -111,10 +112,11 @@ def test_queue_render_plan_disables_legacy_ranking_fallback_by_default(monkeypat
     captured: dict[str, object] = {}
 
     class _QueueVm:
-        main_section_title = "What needs attention today"
+        main_section_title = "Follow-ups Today"
         primary_cards = []
         secondary_cards = []
         suppressed = []
+        auto_resolved_count = 0
 
     def _fake_build_today_queue_view_model(**kwargs):
         captured.update(kwargs)
@@ -140,10 +142,11 @@ def test_queue_render_plan_enables_legacy_ranking_fallback_with_env_flag(monkeyp
     captured: dict[str, object] = {}
 
     class _QueueVm:
-        main_section_title = "What needs attention today"
+        main_section_title = "Follow-ups Today"
         primary_cards = []
         secondary_cards = []
         suppressed = []
+        auto_resolved_count = 0
 
     def _fake_build_today_queue_view_model(**kwargs):
         captured.update(kwargs)
@@ -163,3 +166,31 @@ def test_queue_render_plan_enables_legacy_ranking_fallback_with_env_flag(monkeyp
     )
 
     assert captured.get("allow_legacy_attention_fallback") is True
+
+
+def test_queue_render_plan_uses_follow_through_quiet_state_copy(monkeypatch):
+    class _QueueVm:
+        main_section_title = "Follow-ups Today"
+        primary_cards = []
+        secondary_cards = []
+        suppressed = []
+        auto_resolved_count = 0
+
+    monkeypatch.setattr("services.today_page_meaning_service.build_today_queue_view_model", lambda **kwargs: _QueueVm())
+
+    plan = build_today_queue_render_plan(
+        attention=AttentionSummary(ranked_items=[], is_healthy=True, healthy_message="", suppressed_count=0, total_evaluated=0),
+        decision_items=[],
+        suppressed_cards=[],
+        today_value=date(2026, 4, 12),
+        is_stale=False,
+        weak_data_mode=False,
+        show_secondary_open=False,
+    )
+
+    assert plan.section_title == "Follow-ups Today"
+    assert plan.start_note == "Open loops that need a manager decision, check-in, or closeout."
+    assert plan.primary_placeholder == (
+        "No urgent performance issues today. Keep momentum by closing open follow-ups, "
+        "recognizing recent improvement, or checking limited-data items."
+    )

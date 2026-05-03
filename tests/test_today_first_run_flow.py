@@ -41,9 +41,9 @@ def test_first_run_secondary_only_surfaces_item_in_top_cards(monkeypatch):
             return False
 
     class _Plan:
-        section_title = "What needs attention today"
+        section_title = "Follow-ups Today"
         weak_data_note = ""
-        start_note = "Start here."
+        start_note = "Open loops that need a manager decision, check-in, or closeout."
         primary_cards = []
         secondary_cards = [
             type(
@@ -53,6 +53,9 @@ def test_first_run_secondary_only_surfaces_item_in_top_cards(monkeypatch):
                     "employee_id": "E1",
                     "process_id": "Packing",
                     "state": "EARLY_TREND",
+                        "normalized_action_state": "",
+                        "normalized_action_state_detail": "",
+                        "repeat_count": 0,
                     "line_1": "E1 · Packing",
                     "line_2": "Not enough history yet",
                     "line_3": "",
@@ -63,7 +66,7 @@ def test_first_run_secondary_only_surfaces_item_in_top_cards(monkeypatch):
                 },
             )()
         ]
-        primary_placeholder = "Early signals are listed below. Confidence improves as more history is imported."
+        primary_placeholder = "Open loops that need a manager decision, check-in, or closeout."
         secondary_caption = "Other early signals"
         secondary_expanded = True
         suppressed_debug_rows = []
@@ -87,4 +90,5 @@ def test_first_run_secondary_only_surfaces_item_in_top_cards(monkeypatch):
 
     assert any(">E1<" in text or "E1</div>" in text for text in markdown_calls)
     assert any(">Packing<" in text or "Packing</div>" in text for text in markdown_calls)
-    assert not any("Early signals are listed below. Confidence improves as more history is imported." in text for text in markdown_calls)
+    assert any("Follow-ups Today" in text for text in markdown_calls)
+    assert any("Open loops that need a manager decision, check-in, or closeout." in text for text in markdown_calls)

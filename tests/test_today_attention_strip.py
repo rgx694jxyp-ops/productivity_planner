@@ -11,7 +11,9 @@ from datetime import date
 from services.attention_scoring_service import AttentionItem, AttentionSummary
 from services.today_view_model_service import (
     TodayAttentionStripViewModel,
+    TodayManagerLoopStripViewModel,
     build_today_attention_strip,
+    build_today_manager_loop_strip,
 )
 
 
@@ -226,3 +228,53 @@ def test_result_is_frozen_dataclass():
         assert False, "Expected FrozenInstanceError"
     except Exception:
         pass
+
+
+def test_manager_loop_strip_uses_existing_queue_and_weekly_metrics():
+    strip = build_today_manager_loop_strip(
+        queue_items=[
+            _queue_item(status="overdue", created_today=False),
+            _queue_item(status="due_today", created_today=False),
+            _queue_item(status="pending", created_today=False),
+            _queue_item(status="pending", created_today=False),
+        ],
+        weekly_activity={"improved_outcomes": 3},
+    )
+
+    assert isinstance(strip, TodayManagerLoopStripViewModel)
+    assert strip is not None
+    assert strip.open_loops == 4
+    assert strip.due_today == 1
+    assert strip.overdue == 1
+    assert strip.improved == 3
+    assert strip.no_action_yet == 2
+
+
+def test_manager_loop_strip_returns_none_when_metrics_unavailable():
+    strip = build_today_manager_loop_strip(queue_items=None, weekly_activity=None)
+    assert strip is None
+
+
+def test_manager_loop_strip_does_not_query_additional_services(monkeypatch):
+    called: list[bool] = []
+
+    def _should_not_be_called(*args, **kwargs):
+        called.append(True)
+        return {}
+
+    monkeypatch.setattr(
+        "services.today_view_model_service.build_display_signal_from_attention_item",
+        _should_not_be_called,
+        raising=False,
+    )
+
+    strip = build_today_manager_loop_strip(
+        queue_items=[_queue_item(status="pending", created_today=True)],
+        weekly_activity={"improved_outcomes": 1},
+    )
+
+    assert strip is not None
+    assert strip.open_loops == 1
+    assert strip.no_action_yet == 1
+    assert strip.improved == 1
+    assert not called

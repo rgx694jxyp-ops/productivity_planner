@@ -74,12 +74,14 @@ from services.today_signal_status_service import (
 from services.today_view_model_service import (
     TodayAttentionStripViewModel,
     TodayLowDataFallbackViewModel,
+    TodayManagerLoopStripViewModel,
     TodayQueueCardViewModel,
     TodayReturnTriggerViewModel,
     TodayTeamRiskViewModel,
     TodayValueStripViewModel,
     TodayWeeklySummaryViewModel,
     build_today_low_data_fallback_view_model,
+    build_today_manager_loop_strip,
     build_today_standup_text,
     build_today_summary,
     build_today_team_risk_view_model,
@@ -434,11 +436,11 @@ def _today_signal_surface_heading(signal_count: int) -> str:
 
 
 def _today_queue_intro_label() -> str:
-    return "Signals surfaced now"
+    return "Follow-ups Today"
 
 
 def _today_loading_placeholder() -> str:
-    return "Loading today's signals..."
+    return "Loading follow-ups for today..."
 
 
 def _today_phase2_render_ready_key(today_value: date) -> str:
@@ -504,8 +506,9 @@ def _render_today_phase1_top_cards(
         st.markdown(f'<div class="today-placeholder">{_today_loading_placeholder()}</div>', unsafe_allow_html=True)
         return
 
+    st.markdown('<div class="today-home-title">Follow-ups Today</div>', unsafe_allow_html=True)
     st.markdown('<div class="today-action-frame-heading">Handle these first</div>', unsafe_allow_html=True)
-    st.markdown('<div class="today-action-frame-sub">These are the strongest signals from today\'s available data.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="today-action-frame-sub">Open loops that need a manager decision, check-in, or closeout.</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="today-update-indicator">{_updated_indicator_text()}</div>', unsafe_allow_html=True)
     _phase1_cards = list(top_cards or [])[:_TODAY_QUEUE_DEFAULT_VISIBLE_CARDS]
     _phase1_cols = st.columns(min(max(len(_phase1_cards), 1), 3))
@@ -2314,6 +2317,28 @@ def _render_attention_summary_strip(strip: TodayAttentionStripViewModel) -> None
     for idx, (label, value) in enumerate(metric_tiles):
         with cols[idx]:
             st.metric(label, value)
+
+
+def _render_manager_loop_strip(strip: TodayManagerLoopStripViewModel | None) -> None:
+    """Render compact manager follow-through counts above Today cards."""
+    if strip is None:
+        return
+
+    tiles: list[tuple[str, int]] = [
+        ("Open loops", int(strip.open_loops or 0)),
+        ("Due today", int(strip.due_today or 0)),
+        ("Overdue", int(strip.overdue or 0)),
+        ("Improved", int(strip.improved or 0)),
+        ("No action yet", int(strip.no_action_yet or 0)),
+    ]
+
+    st.markdown('<div class="today-secondary-context-label">Manager loop</div>', unsafe_allow_html=True)
+    cols = st.columns(len(tiles))
+    for idx, (label, value) in enumerate(tiles):
+        with cols[idx]:
+            with st.container(border=True):
+                st.caption(label)
+                st.markdown(f"**{value}**")
 
 
 def _render_weekly_summary_block(summary: TodayWeeklySummaryViewModel) -> None:
@@ -4355,6 +4380,7 @@ def _render_unified_attention_queue(
     last_action_lookup: dict[str, str] | None = None,
     action_state_lookup: dict[str, dict[str, Any]] | None = None,
     low_data_fallback: TodayLowDataFallbackViewModel | None = None,
+    manager_loop_strip: TodayManagerLoopStripViewModel | None = None,
     render_plan: TodayQueueRenderPlan | None = None,
     prepared_queue_render: dict[str, Any] | None = None,
 ) -> None:
@@ -4405,7 +4431,10 @@ def _render_unified_attention_queue(
     if not active_ranked_cards and plan.primary_placeholder:
         st.markdown(f'<div class="today-placeholder">{plan.primary_placeholder}</div>', unsafe_allow_html=True)
     else:
+        st.markdown(f'<div class="today-home-title">{str(plan.section_title or "Follow-ups Today")}</div>', unsafe_allow_html=True)
         st.markdown('<div class="today-action-frame-heading">Handle these first</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="today-action-frame-sub">{str(plan.start_note or "Open loops that need a manager decision, check-in, or closeout.")}</div>', unsafe_allow_html=True)
+        _render_manager_loop_strip(manager_loop_strip)
         st.session_state.pop(_TODAY_FOCUS_NEXT_CARD_KEY, None)
 
         # Honor one-time Team return focus payload first, then legacy cn_selected_emp behavior.
@@ -5615,6 +5644,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                 touchpoints_logged_today=0,
                 follow_ups_scheduled_today=0,
             )
+            manager_loop_strip: TodayManagerLoopStripViewModel | None = None
             with profile.stage("weekly_activity"):
                 rendered_card_count = _today_rendered_card_count(plan=render_plan)
                 profile.set("weekly_activity_rendered_cards", int(rendered_card_count))
@@ -5651,6 +5681,10 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     queue_items=queue_items,
                     today=today_value,
                     same_day_activity=weekly_activity,
+                )
+                manager_loop_strip = build_today_manager_loop_strip(
+                    queue_items=queue_items,
+                    weekly_activity=weekly_activity,
                 )
 
             weekly_summary = TodayWeeklySummaryViewModel(items=[])
@@ -5713,6 +5747,7 @@ def _page_today_impl(*, root_placeholder: Any) -> None:
                     snapshot_cards=snapshot_cards,
                     last_action_lookup=last_action_lookup,
                     action_state_lookup=action_state_lookup,
+                    manager_loop_strip=manager_loop_strip,
                     low_data_fallback=low_data_fallback,
                     render_plan=render_plan,
                     prepared_queue_render=prepared_queue_render,

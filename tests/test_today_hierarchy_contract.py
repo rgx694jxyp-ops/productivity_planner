@@ -17,7 +17,14 @@ def test_unified_queue_renders_before_context_blocks_and_context_is_collapsed(mo
     expander_calls: list[tuple[str, bool]] = []
 
     card = SimpleNamespace(employee_id="E1")
-    plan = SimpleNamespace(primary_cards=[], secondary_cards=[], primary_placeholder="", suppressed_debug_rows=[])
+    plan = SimpleNamespace(
+        section_title="Follow-ups Today",
+        start_note="Open loops that need a manager decision, check-in, or closeout.",
+        primary_cards=[],
+        secondary_cards=[],
+        primary_placeholder="",
+        suppressed_debug_rows=[],
+    )
     prepared = {
         "signal_status_map": {},
         "active_ranked_cards": [card],
@@ -57,7 +64,14 @@ def test_unified_queue_keeps_single_primary_header(monkeypatch):
     markdown_calls: list[str] = []
 
     card = SimpleNamespace(employee_id="E1")
-    plan = SimpleNamespace(primary_cards=[], secondary_cards=[], primary_placeholder="", suppressed_debug_rows=[])
+    plan = SimpleNamespace(
+        section_title="Follow-ups Today",
+        start_note="Open loops that need a manager decision, check-in, or closeout.",
+        primary_cards=[],
+        secondary_cards=[],
+        primary_placeholder="",
+        suppressed_debug_rows=[],
+    )
     prepared = {
         "signal_status_map": {},
         "active_ranked_cards": [card],
@@ -84,7 +98,8 @@ def test_unified_queue_keeps_single_primary_header(monkeypatch):
 
     payload = "\n".join(markdown_calls)
     assert payload.count("Handle these first") == 1
-    assert "today-action-frame-sub" not in payload
+    assert "today-action-frame-sub" in payload
+    assert "Open loops that need a manager decision, check-in, or closeout." in payload
     assert "today-action-instruction" not in payload
     assert "Open a card" not in payload
 
@@ -93,7 +108,14 @@ def test_today_primary_queue_copy_avoids_instructional_phrases(monkeypatch):
     markdown_calls: list[str] = []
 
     card = SimpleNamespace(employee_id="E1")
-    plan = SimpleNamespace(primary_cards=[], secondary_cards=[], primary_placeholder="", suppressed_debug_rows=[])
+    plan = SimpleNamespace(
+        section_title="Follow-ups Today",
+        start_note="Open loops that need a manager decision, check-in, or closeout.",
+        primary_cards=[],
+        secondary_cards=[],
+        primary_placeholder="",
+        suppressed_debug_rows=[],
+    )
     prepared = {
         "signal_status_map": {},
         "active_ranked_cards": [card],
@@ -123,12 +145,68 @@ def test_today_primary_queue_copy_avoids_instructional_phrases(monkeypatch):
     assert "click" not in payload
 
 
+def test_unified_queue_renders_manager_loop_strip_when_metrics_provided(monkeypatch):
+    markdown_calls: list[str] = []
+    caption_calls: list[str] = []
+
+    card = SimpleNamespace(employee_id="E1")
+    plan = SimpleNamespace(
+        section_title="Follow-ups Today",
+        start_note="Open loops that need a manager decision, check-in, or closeout.",
+        primary_cards=[],
+        secondary_cards=[],
+        primary_placeholder="",
+        suppressed_debug_rows=[],
+    )
+    prepared = {
+        "signal_status_map": {},
+        "active_ranked_cards": [card],
+        "top_cards": [card],
+        "overflow_cards": [],
+    }
+
+    monkeypatch.setattr(today.st, "session_state", {})
+    monkeypatch.setattr(today.st, "columns", lambda n, **_kwargs: [_noop_ctx() for _ in range(int(n))])
+    monkeypatch.setattr(today.st, "caption", lambda text, **_kwargs: caption_calls.append(str(text)))
+    monkeypatch.setattr(today.st, "expander", lambda *_args, **_kwargs: _noop_ctx())
+    monkeypatch.setattr(today.st, "container", lambda **_kwargs: _noop_ctx())
+    monkeypatch.setattr(today.st, "markdown", lambda text, **_kwargs: markdown_calls.append(str(text)))
+    monkeypatch.setattr(today, "build_today_team_risk_view_model", lambda **_kwargs: None)
+    monkeypatch.setattr(today, "_render_attention_card", lambda **_kwargs: None)
+    monkeypatch.setattr(today, "_render_today_standup_view", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(today, "_render_today_copy_summary_block", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(today, "_render_today_team_risk_block", lambda *_args, **_kwargs: None)
+
+    today._render_unified_attention_queue(
+        attention=SimpleNamespace(),
+        render_plan=plan,
+        prepared_queue_render=prepared,
+        manager_loop_strip=today.TodayManagerLoopStripViewModel(
+            open_loops=7,
+            due_today=2,
+            overdue=1,
+            improved=3,
+            no_action_yet=4,
+        ),
+    )
+
+    assert ["Open loops", "Due today", "Overdue", "Improved", "No action yet"] == caption_calls[-5:]
+    assert any("**7**" in line for line in markdown_calls)
+
+
 def test_unified_queue_completion_feedback_is_one_time_and_not_generic(monkeypatch):
     markdown_calls: list[str] = []
     caption_calls: list[str] = []
 
     card = SimpleNamespace(employee_id="E1")
-    plan = SimpleNamespace(primary_cards=[], secondary_cards=[], primary_placeholder="", suppressed_debug_rows=[])
+    plan = SimpleNamespace(
+        section_title="Follow-ups Today",
+        start_note="Open loops that need a manager decision, check-in, or closeout.",
+        primary_cards=[],
+        secondary_cards=[],
+        primary_placeholder="",
+        suppressed_debug_rows=[],
+    )
     prepared = {
         "signal_status_map": {},
         "active_ranked_cards": [card],

@@ -86,7 +86,7 @@ def test_low_confidence_cards_go_to_secondary_today_queue(monkeypatch):
     assert len(queue_vm.suppressed) == 0
 
 
-def test_today_page_shows_what_you_can_review_today_when_only_current_signals_exist(monkeypatch):
+def test_today_page_shows_follow_ups_today_when_only_current_signals_exist(monkeypatch):
     current_item = _attention_item(employee_id="E4", tier="high")
     summary = AttentionSummary(
         ranked_items=[current_item],
@@ -117,14 +117,14 @@ def test_today_page_shows_what_you_can_review_today_when_only_current_signals_ex
 
     queue_vm = build_today_queue_view_model(attention=summary, suppressed_cards=[], today=date(2026, 4, 11))
 
-    assert queue_vm.main_section_title == "What you can review today"
+    assert queue_vm.main_section_title == "Follow-ups Today"
     assert len(queue_vm.primary_cards) == 1
     assert str(queue_vm.primary_cards[0].employee_id) == "E4"
     assert queue_vm.primary_cards[0].state == "CURRENT"
     assert len(queue_vm.secondary_cards) == 0
 
 
-def test_today_page_shows_attention_heading_when_trend_signals_exist(monkeypatch):
+def test_today_page_shows_follow_ups_today_heading_when_trend_signals_exist(monkeypatch):
     trend_item = _attention_item(employee_id="E5", tier="high")
     summary = AttentionSummary(
         ranked_items=[trend_item],
@@ -155,7 +155,7 @@ def test_today_page_shows_attention_heading_when_trend_signals_exist(monkeypatch
 
     queue_vm = build_today_queue_view_model(attention=summary, suppressed_cards=[], today=date(2026, 4, 11))
 
-    assert queue_vm.main_section_title == "What needs attention today"
+    assert queue_vm.main_section_title == "Follow-ups Today"
     assert len(queue_vm.primary_cards) == 0
     assert len(queue_vm.secondary_cards) == 1
     assert queue_vm.secondary_cards[0].state == "EARLY_TREND"

@@ -241,9 +241,7 @@ def build_today_queue_render_plan(
         action_state_lookup=action_state_lookup,
     )
 
-    section_title = str(queue_vm.main_section_title or "")
-    if is_stale:
-        section_title = section_title.replace("today", "latest snapshot").replace("Today", "Latest snapshot")
+    section_title = "Follow-ups Today"
 
     promoted_secondary = bool(weak_data_mode and not queue_vm.primary_cards and bool(queue_vm.secondary_cards))
     primary_cards_to_render = queue_vm.secondary_cards if promoted_secondary else queue_vm.primary_cards
@@ -260,9 +258,9 @@ def build_today_queue_render_plan(
     primary_placeholder = ""
     if not primary_cards_to_render:
         if secondary_cards_to_render:
-            primary_placeholder = "Early signals are listed below. Confidence improves as more history is imported."
+            primary_placeholder = "Open loops that need a manager decision, check-in, or closeout."
         else:
-            primary_placeholder = "No items need immediate attention right now."
+            primary_placeholder = "No urgent performance issues today. Keep momentum by closing open follow-ups, recognizing recent improvement, or checking limited-data items."
 
     suppressed_debug_rows = [
         {
@@ -275,28 +273,17 @@ def build_today_queue_render_plan(
     ]
 
     if snapshot_active:
-        section_title = "Today's performance snapshot"
-
-    if snapshot_active:
         weak_data_note = ""
-        start_note = (
-            "Snapshot-only mode: these signals compare within today's group. "
-            "Multi-day trend confidence is still building."
-        )
+        start_note = "Open loops that need a manager decision, check-in, or closeout."
     elif weak_data_mode:
         weak_data_note = ""
-        start_note = (
-            "Early signal mode: limited history means directional evidence only. "
-            "Signals are ranked by current evidence strength and recency."
-        )
+        start_note = "Open loops that need a manager decision, check-in, or closeout."
     elif decision_policy is not None:
         weak_data_note = ""
-        start_note = (
-            "Primary queue shows urgent items first. Secondary queue keeps follow-through and watchlist context visible."
-        )
+        start_note = "Open loops that need a manager decision, check-in, or closeout."
     else:
         weak_data_note = ""
-        start_note = "Signals are ranked by current evidence strength and recency."
+        start_note = "Open loops that need a manager decision, check-in, or closeout."
 
     return TodayQueueRenderPlan(
         section_title=section_title,

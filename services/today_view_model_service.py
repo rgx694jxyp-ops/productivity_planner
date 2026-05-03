@@ -1798,14 +1798,9 @@ def _should_force_primary(item: Any, signal: DisplaySignal) -> bool:
 
 
 def _section_title(primary_cards: list[TodayQueueCardViewModel], secondary_cards: list[TodayQueueCardViewModel]) -> str:
-    all_cards = [*list(primary_cards or []), *list(secondary_cards or [])]
-    if any(str(card.state or "") in _ATTENTION_STATES for card in all_cards):
-        return "What needs attention today"
-    if any(str(card.state or "") == "CURRENT" for card in primary_cards):
-        return "What you can review today"
-    if any(str(card.state or "") == "CURRENT" for card in all_cards):
-        return "What you can review today"
-    return "What needs attention today"
+    _ = primary_cards
+    _ = secondary_cards
+    return "Follow-ups Today"
 
 
 def _dedupe_expanded(*, primary: str, lines: list[str], excluded: list[str] | None = None, max_lines: int = 3) -> list[str]:
@@ -2333,12 +2328,48 @@ class TodayAttentionStripViewModel:
     follow_ups_scheduled_today: int | None
 
 
+@dataclass(frozen=True)
+class TodayManagerLoopStripViewModel:
+    """Compact manager follow-through summary for the top of Today.
+
+    Counts are derived from already-loaded queue and weekly activity payloads.
+    No additional service/database queries are performed by this model builder.
+    """
+
+    open_loops: int
+    due_today: int
+    overdue: int
+    improved: int
+    no_action_yet: int
+
+
 def _positive_metric_or_none(value: Any) -> int | None:
     try:
         resolved = int(value or 0)
     except Exception:
         return None
     return resolved if resolved > 0 else None
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        resolved = int(value or 0)
+    except Exception:
+        return 0
+    return resolved if resolved > 0 else 0
+
+
+def _approx_no_action_yet_from_queue_status_pending(queue_items: list[dict[str, Any]]) -> int:
+    """Approximation for items with no logged follow-up action yet.
+
+    Uses existing queue status only: pending is treated as no-action-yet.
+    This avoids additional action-event scans and keeps the strip lightweight.
+    """
+    count = 0
+    for item in list(queue_items or []):
+        if str(item.get("_queue_status") or "").strip().lower() == "pending":
+            count += 1
+    return count
 
 
 def build_today_attention_strip(
@@ -2376,6 +2407,44 @@ def build_today_attention_strip(
         reviewed_today=_positive_metric_or_none((same_day_activity or {}).get("reviewed_today")),
         touchpoints_logged_today=_positive_metric_or_none((same_day_activity or {}).get("touchpoints_logged_today")),
         follow_ups_scheduled_today=_positive_metric_or_none((same_day_activity or {}).get("follow_ups_scheduled_today")),
+    )
+
+
+def build_today_manager_loop_strip(
+    *,
+    queue_items: list[dict[str, Any]] | None,
+    weekly_activity: dict[str, Any] | None = None,
+) -> TodayManagerLoopStripViewModel | None:
+    """Build compact manager-loop counts from precomputed Today payloads.
+
+    Data sources:
+    - open_loops / due_today / overdue / no_action_yet: queue_items statuses
+    - improved: weekly_activity["improved_outcomes"] when present
+
+    Returns None when both queue and weekly payloads are unavailable.
+    """
+    if queue_items is None and weekly_activity is None:
+        return None
+
+    queue_rows = list(queue_items or [])
+    due_today = 0
+    overdue = 0
+    for item in queue_rows:
+        status = str(item.get("_queue_status") or "").strip().lower()
+        if status == "due_today":
+            due_today += 1
+        elif status == "overdue":
+            overdue += 1
+
+    improved = _non_negative_int((weekly_activity or {}).get("improved_outcomes"))
+    no_action_yet = _approx_no_action_yet_from_queue_status_pending(queue_rows)
+
+    return TodayManagerLoopStripViewModel(
+        open_loops=len(queue_rows),
+        due_today=due_today,
+        overdue=overdue,
+        improved=improved,
+        no_action_yet=no_action_yet,
     )
 
 
